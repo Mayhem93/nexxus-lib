@@ -38,12 +38,12 @@ BuilderNode.prototype.addFilter = function(name, value) {
 			throw new TelepatError(TelepatError.errors.QueryError, ['filter value is undefined']);
 		}
 
-		if (['is', 'exists', 'in_array', 'like'].indexOf(name) !== -1 && typeof value !== 'string') {
-			throw new TelepatError(TelepatError.errors.QueryError, ['filter value for ' + name + ' must be a string']);
+		if (name === 'exists' && typeof value !== 'string') {
+			throw new TelepatError(TelepatError.errors.QueryError, ['filter value for "exists" must be a string']);
 		}
 
-		if (['not', 'range'].indexOf(name) !== -1 && typeof value !== 'object') {
-			throw new TelepatError(TelepatError.errors.QueryError, ['filter value for ' + name + ' must be an object']);
+		if (['is', 'not', 'range', 'in_array', 'like'].indexOf(name) !== -1 && typeof value !== 'object') {
+			throw new TelepatError(TelepatError.errors.QueryError, ['filter value for "' + name + '" must be an object']);
 		}
 
 		var filter = {};
@@ -110,34 +110,27 @@ var FilterBuilder = function(initial) {
 	 */
 	this.root = null;
 
-	if (initial)
+	if (initial) {
 		this.root = new BuilderNode(initial);
-	else
+	} else {
 		this.root = new BuilderNode('and');
+	}
 
 	this.pointer = this.root;
 };
 
 FilterBuilder.prototype.and = function() {
-	if (this.root === null) {
-		this.root = new BuilderNode('and');
-	} else {
-		var child = new BuilderNode('and');
-		this.pointer.addNode(child);
-		this.pointer = child;
-	}
+	var child = new BuilderNode('and');
+	this.pointer.addNode(child);
+	this.pointer = child;
 
 	return this;
 };
 
 FilterBuilder.prototype.or = function() {
-	if (this.root === null) {
-		this.root = new BuilderNode('or');
-	} else {
-		var child = new BuilderNode('or');
-		this.pointer.addNode(child);
-		this.pointer = child;
-	}
+	var child = new BuilderNode('or');
+	this.pointer.addNode(child);
+	this.pointer = child;
 
 	return this;
 };
@@ -170,20 +163,8 @@ FilterBuilder.prototype.end = function() {
 };
 
 FilterBuilder.prototype.build = function() {
-	return this.root ? this.root.toObject() : null;
+	return this.root.toObject();
 };
-
-/*var FB = new FilterBuilder('and');
-FB.
-	or().
-		addFilter('is', {a: 1}).
-		addFilter('is', {b: 2}).
-		addFilter('is', {c: 3}).
-	end().
-	or().
-		addFilter('is', {d: 4}).
-		addFilter('is', {e: 5}).
-		addFilter('is', {f: 6});*/
 
 module.exports = {
 	FilterBuilder: FilterBuilder,
