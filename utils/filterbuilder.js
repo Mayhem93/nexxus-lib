@@ -163,6 +163,11 @@ FilterBuilder.prototype.end = function() {
 };
 
 FilterBuilder.prototype.build = function() {
+	if (this.isEmpty()) {
+		throw new TelepatError(TelepatError.errors.QueryError,
+			['cannot build query with empty filter (' + JSON.stringify(this.root.toObject()) + ')']);
+	}
+
 	return this.root.toObject();
 };
 

@@ -479,6 +479,18 @@ module.exports = function() {
 			done();
 		});
 
+		it('Should when trying to build the query because root is empty ', function(done) {
+			try {
+				var fb = new FilterBuilder();
+				var ret = fb.build();
+				assert.fail(ret, undefined, 'FilterBuilder.build should throw error');
+			} catch (e) {
+				expect(e).to.be.instanceof(TelepatError);
+				expect(e).to.have.property('code', '048');
+				done();
+			}
+		});
+
 		it('Should construct the filter object', function(done) {
 			var fb = new FilterBuilder();
 

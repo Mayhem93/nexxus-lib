@@ -15,9 +15,7 @@ esConfig = common.config.ElasticSearch1;
 esConnection = new es.Client(clone(common.config.ElasticSearch1));
 
 /**
- *
  * @global
- * @type {ElasticSearchDB|null}
  */
 esAdapterConnection = new EsAdapter(clone(common.config.ElasticSearch1));
 
@@ -45,7 +43,8 @@ var tests = [
 	require('./getObjects'),
 	require('./createObjects'),
 	require('./updateObjects'),
-	require('./deleteObjects')
+	require('./deleteObjects'),
+	require('./getQueryObject')
 ];
 
 tests.forEach(function(t) {
