@@ -5,7 +5,7 @@
 	"main": "index.js",
 	"repository": {
 		"type": "git",
-		"url": "git@github.com:telepat-io/telepat-models.git"
+		"url": "git@github.com:Mayhem93/telepat-models.git"
 	},
 	"keywords": [
 		"telepat",
@@ -13,7 +13,7 @@
 		"models"
 	],
 	"bugs": {
-		"url": "https://github.com/telepat-io/telepat-models/issues"
+		"url": "https://github.com/Mayhem93/telepat-models/issues"
 	},
 	"author": {
 		"name": "Răzvan Botea",
@@ -34,23 +34,31 @@
 	},
 	"license": "Apache-2.0",
 	"dependencies": {
-		"agentkeepalive": "2.0.3",
-		"amqplib": "0.4.1",
-		"async": "1.5.2",
-		"azure": "0.10.6",
-		"clone": "1.0.2",
-		"dateformat": "1.0.12",
-		"dot-object": "1.5.1",
-		"elasticsearch": "10.1.3",
-		"kafka-node": "0.3.2",
-		"lz4": "0.5.2",
+		"agentkeepalive": "3.4.1",
+		"amqplib": "0.5.2",
+		"async": "2.6.0",
+		"clone": "2.1.1",
+		"dateformat": "3.0.3",
+		"dot-object": "1.7.0",
+		"elasticsearch": "15.0.0",
+		"kafka-node": "2.6.1",
+		"lz4": "0.5.3",
 		"object-merge": "2.5.1",
-		"sprintf-js": "1.0.3",
-		"uuid": "2.0.1",
-		"validator": "6.2.0",
-		"winston": "2.1.1"
+		"sprintf-js": "1.1.1",
+		"uuid": "3.2.1",
+		"validator": "10.2.0",
+		"winston": "2.4.2"
 	},
 	"optionalDependencies": {
-		"winston-syslog": "1.2.1"
+		"winston-syslog": "2.0.0"
+	},
+	"devDependencies": {
+		"eslint": "4.19.1",
+		"eslint-config-standard": "11.0.0",
+		"eslint-plugin-import": "2.11.0",
+		"eslint-plugin-mocha": "5.0.0",
+		"eslint-plugin-node": "6.0.1",
+		"eslint-plugin-promise": "3.7.0",
+		"eslint-plugin-standard": "3.1.0"
 	}
 }
