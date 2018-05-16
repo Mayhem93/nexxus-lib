@@ -1,4 +1,5 @@
-var fs = require('fs');
+const fs = require('fs');
+const path = require('path');
 
 module.exports.Application = require('./lib/Application');
 
@@ -33,10 +34,10 @@ module.exports.ConfigurationManager = require('./lib/ConfigurationManager');
 
 module.exports.SystemMessageProcessor = require('./lib/systemMessage');
 
-fs.readdirSync(__dirname+'/lib/message_queue').forEach(function(filename) {
-	var filenameParts = filename.split('_');
+fs.readdirSync(path.join(__dirname, '/lib/message_queue')).forEach(filename => {
+	const filenameParts = filename.split('_');
 
-	if (filenameParts.pop() == 'queue.js') {
-		module.exports[filenameParts.join('_')] = require('./lib/message_queue/'+filename);
+	if (filenameParts.pop() === 'queue.js') {
+		module.exports[filenameParts.join('_')] = require(path.join('./lib/message_queue/', filename));
 	}
 });

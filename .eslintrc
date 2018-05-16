@@ -82,6 +82,7 @@
 		"no-unused-vars": 2,
 		"no-use-before-define": 2,
 		"no-tabs": "off",
+		"no-var": "error",
 		"quotes": [
 			2,
 			"single"
