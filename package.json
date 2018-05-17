@@ -3,6 +3,9 @@
 	"version": "0.4.4",
 	"description": "Telepat lib used by the API and the workers",
 	"main": "index.js",
+	"engines": {
+		"node": ">=8.10.0"
+	},
 	"repository": {
 		"type": "git",
 		"url": "git@github.com:Mayhem93/telepat-models.git"
