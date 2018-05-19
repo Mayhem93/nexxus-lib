@@ -1,18 +1,94 @@
-var TelepatError = require('../lib/TelepatError');
+const TelepatError = require('../lib/TelepatError');
 
-var BuilderNode = function(name) {
-	if (BuilderNode.CONNECTORS.indexOf(name) === -1) {
-		throw new TelepatError(TelepatError.errors.QueryError, ['unsupported query connector "'+name+'"']);
+class BuilderNode {
+	constructor (name) {
+		if (!BuilderNode.CONNECTORS.includes(name)) {
+			throw new TelepatError(TelepatError.errors.QueryError, [`unsupported query connector "${name}"`]);
+		}
+
+		this.parent = null;
+		/**
+		 *
+		 * @type {BuilderNode[]|Object[]}
+		 */
+		this.children = [];
+		this.name = name;
 	}
 
-	this.parent = null;
+	addFilter (name, value) {
+		if (BuilderNode.FILTERS.indexOf(name) !== -1) {
+			if (value === undefined) {
+				throw new TelepatError(TelepatError.errors.QueryError, ['filter value is undefined']);
+			}
+
+			if (name === 'exists' && typeof value !== 'string') {
+				throw new TelepatError(TelepatError.errors.QueryError, ['filter value for "exists" must be a string']);
+			}
+
+			if (['is', 'not', 'range', 'in_array', 'like'].indexOf(name) !== -1 && typeof value !== 'object') {
+				throw new TelepatError(TelepatError.errors.QueryError, [`filter value for "${name}" must be an object`]);
+			}
+
+			const filter = {};
+
+			filter[name] = value;
+			this.children.push(filter);
+		} else {
+			throw new TelepatError(TelepatError.errors.QueryError, [`invalid filter "${name}"`]);
+		}
+	}
+
 	/**
 	 *
-	 * @type {BuilderNode[]|Object[]}
+	 * @param {BuilderNode} node
 	 */
-	this.children = [];
-	this.name = name;
-};
+	addNode (node) {
+		if (!(node instanceof BuilderNode)) {
+			throw new TelepatError(TelepatError.errors.ServerFailure,
+				['BuilderNode.addNode: argument must be instanceof BuilderNode']);
+		}
+
+		node.parent = this;
+		this.children.push(node);
+	}
+
+	/**
+	 *
+	 * @param {BuilderNode} node
+	 */
+	removeNode (node) {
+		if (!(node instanceof BuilderNode)) {
+			throw new TelepatError(TelepatError.errors.ServerFailure,
+				['BuilderNode.addNode: argument must be instanceof BuilderNode']);
+		}
+
+		let idx = this.children.indexOf(node);
+
+		if (idx !== -1) {
+			node.parent = null;
+
+			return this.children.splice(idx, 1)[0];
+		}
+
+		return null;
+	}
+
+	toObject () {
+		let obj = {};
+
+		obj[this.name] = [];
+
+		this.children.forEach(item => {
+			if (item instanceof BuilderNode) {
+				obj[this.name].push(item.toObject());
+			} else {
+				obj[this.name].push(item);
+			}
+		});
+
+		return obj;
+	}
+}
 
 BuilderNode.CONNECTORS = [
 	'and',
@@ -28,150 +104,90 @@ BuilderNode.FILTERS = [
 	'like'
 ];
 
-/**
- * @param {string} name
- * @param {Object|string} value
- */
-BuilderNode.prototype.addFilter = function(name, value) {
-	if (BuilderNode.FILTERS.indexOf(name) !== -1) {
-		if (value === undefined) {
-			throw new TelepatError(TelepatError.errors.QueryError, ['filter value is undefined']);
+class FilterBuilder {
+	constructor (initial) {
+		/**
+		 *
+		 * @type {null|BuilderNode}
+		 */
+		this.root = null;
+
+		if (initial) {
+			this.root = new BuilderNode(initial);
+		} else {
+			this.root = new BuilderNode('and');
 		}
 
-		if (name === 'exists' && typeof value !== 'string') {
-			throw new TelepatError(TelepatError.errors.QueryError, ['filter value for "exists" must be a string']);
+		this.pointer = this.root;
+	}
+
+	and () {
+		if (this.root === null) {
+			this.root = new BuilderNode('and');
+		} else {
+			let child = new BuilderNode('and');
+
+			this.pointer.addNode(child);
+			this.pointer = child;
 		}
 
-		if (['is', 'not', 'range', 'in_array', 'like'].indexOf(name) !== -1 && typeof value !== 'object') {
-			throw new TelepatError(TelepatError.errors.QueryError, ['filter value for "' + name + '" must be an object']);
+		return this;
+	}
+
+	or () {
+		if (this.root === null) {
+			this.root = new BuilderNode('or');
+		} else {
+			let child = new BuilderNode('or');
+
+			this.pointer.addNode(child);
+			this.pointer = child;
 		}
 
-		var filter = {};
-		filter[name] = value;
-
-		this.children.push(filter);
-	} else {
-		throw new TelepatError(TelepatError.errors.QueryError, ['invalid filter "'+name+'"']);
-	}
-};
-
-/**
- *
- * @param {BuilderNode} node
- */
-BuilderNode.prototype.addNode = function(node) {
-	if (!(node instanceof BuilderNode)) {
-		throw new TelepatError(TelepatError.errors.ServerFailure,
-			['BuilderNode.addNode: argument must be instanceof BuilderNode']);
+		return this;
 	}
 
-	node.parent = this;
-	this.children.push(node);
-};
+	addFilter (name, value) {
+		this.pointer.addFilter(name, value);
 
-/**
- *
- * @param {BuilderNode} node
- */
-BuilderNode.prototype.removeNode = function(node) {
-	if (!(node instanceof BuilderNode)) {
-		throw new TelepatError(TelepatError.errors.ServerFailure,
-			['BuilderNode.addNode: argument must be instanceof BuilderNode']);
+		return this;
 	}
 
-	var idx = this.children.indexOf(node);
+	removeNode () {
+		if (this.root !== this.pointer) {
+			let nodeToRemove = this.pointer;
 
-	if (idx !== -1) {
-		node.parent = null;
-		return this.children.splice(idx, 1)[0];
-	} else {
+			this.pointer = this.pointer.parent;
+
+			return this.pointer.removeNode(nodeToRemove);
+		}
+
 		return null;
 	}
-};
 
-BuilderNode.prototype.toObject = function() {
-	var obj = {};
-	obj[this.name] = [];
-
-	this.children.forEach(function(item) {
-		if (item instanceof BuilderNode)
-			obj[this.name].push(item.toObject());
-		else
-			obj[this.name].push(item);
-	}, this);
-
-	return obj;
-};
-
-var FilterBuilder = function(initial) {
-	/**
-	 *
-	 * @type {null|BuilderNode}
-	 */
-	this.root = null;
-
-	if (initial) {
-		this.root = new BuilderNode(initial);
-	} else {
-		this.root = new BuilderNode('and');
+	isEmpty () {
+		return !!this.root.children.length;
 	}
 
-	this.pointer = this.root;
-};
+	end () {
+		if (this.pointer.parent) {
+			this.pointer = this.pointer.parent;
+		}
 
-FilterBuilder.prototype.and = function() {
-	var child = new BuilderNode('and');
-	this.pointer.addNode(child);
-	this.pointer = child;
-
-	return this;
-};
-
-FilterBuilder.prototype.or = function() {
-	var child = new BuilderNode('or');
-	this.pointer.addNode(child);
-	this.pointer = child;
-
-	return this;
-};
-
-FilterBuilder.prototype.addFilter = function(name, value) {
-	this.pointer.addFilter(name, value);
-
-	return this;
-};
-
-FilterBuilder.prototype.removeNode = function() {
-	if (this.root !== this.pointer) {
-		var nodeToRemove = this.pointer;
-		this.pointer = this.pointer.parent;
-
-		return this.pointer.removeNode(nodeToRemove);
-	} else
-		return null;
-};
-
-FilterBuilder.prototype.isEmpty = function() {
-	return this.root.children.length ? false : true;
-};
-
-FilterBuilder.prototype.end = function() {
-	if (this.pointer.parent)
-		this.pointer = this.pointer.parent;
-
-	return this;
-};
-
-FilterBuilder.prototype.build = function() {
-	if (this.isEmpty()) {
-		throw new TelepatError(TelepatError.errors.QueryError,
-			['cannot build query with empty filter (' + JSON.stringify(this.root.toObject()) + ')']);
+		return this;
 	}
 
-	return this.root.toObject();
-};
+	build () {
+		if (this.isEmpty()) {
+			throw new TelepatError(TelepatError.errors.QueryError,
+				[`cannot build query with empty filter (${JSON.stringify(this.root.toObject())})`]);
+		}
+
+		return this.root.toObject();
+	}
+}
 
 module.exports = {
-	FilterBuilder: FilterBuilder,
-	BuilderNode: BuilderNode
+	FilterBuilder,
+	BuilderNode
 };
