@@ -1,70 +1,69 @@
-var common = require('../../common');
-var chai = require('chai');
-var expect = chai.expect;
-var clone = require('clone');
+const common = require('../../common');
+const chai = require('chai');
+const expect = chai.expect;
+const clone = require('clone');
+
 chai.should();
 chai.use(require('chai-things'));
 
-var sinon = require('sinon');
-var clone = require('clone');
-var esAdapter = require('../../../lib/database/elasticsearch_adapter');
-var TelepatError = require('../../../lib/TelepatError');
-var TelepatLogger = require('../../../lib/logger/logger');
+const sinon = require('sinon');
+const EsAdapter = require('../../../lib/database/elasticsearch_adapter');
+const TelepatError = require('../../../lib/TelepatError');
+const TelepatLogger = require('../../../lib/logger/logger');
 
-module.exports = function Constructor() {
-	describe('ElasticSearchDB.constructor', function() {
-		after(function(done) {
-			afterTest(done);
-		});
-
-		it('Should fail because configuration parameter is missing or not valid param', function(done) {
+module.exports = function Constructor () {
+	describe('ElasticSearchDB.constructor', () => {
+		it('Should fail because configuration parameter is missing or not valid param', done => {
 			try {
-				var client1 = new esAdapter();
-			} catch(e) {
-				expect(e).to.be.instanceof(TelepatError);
-				expect(e.code).to.equal('002');
-			}
-
-			try {
-				client1 = new esAdapter({});
-			} catch(e) {
-				expect(e).to.be.instanceof(TelepatError);
-				expect(e.code).to.equal('002');
-			}
-
-			afterSubTest(done);
-		});
-
-		it('Should connect to a real server with the correct configuration param ', function(done) {
-			var esConfig = clone(common.config.ElasticSearch1);
-			var infoLogSpy = sinon.spy(TelepatLogger.prototype, 'info');
-
-			try {
-				var client = new esAdapter(esConfig);
+				EsAdapter();
 			} catch (e) {
-				expect(e).to.be.undefined;
+				expect(e).to.be.instanceof(TelepatError);
+				expect(e.code).to.equal('002');
+			}
+
+			try {
+				EsAdapter({});
+			} catch (e) {
+				expect(e).to.be.instanceof(TelepatError);
+				expect(e.code).to.equal('002');
+			}
+
+			done();
+		});
+
+		it('Should connect to a real server with the correct configuration param ', done => {
+			const esConfig = clone(common.config.ElasticSearch1);
+			const infoLogSpy = sinon.spy(TelepatLogger.prototype, 'info');
+			let client;
+
+			try {
+				client = new EsAdapter(esConfig);
+			} catch (e) {
+				expect(e).to.be.undefined; // disable-eslint-rule no-unused-expressions
 			}
 			expect(client.config.host).to.be.equal(esConfig.host);
 			expect(client.config.hosts).to.be.undefined;
 
-			client.onReady(function() {
+			client.onReady(() => {
 				infoLogSpy.restore();
 				sinon.assert.calledOnce(infoLogSpy);
 				sinon.assert.calledWith(infoLogSpy, 'Connected to ElasticSearch MainDatabase');
 
-				afterSubTest(done);
+				done();
 			});
 		});
 
-		it('Shouldn\'t connect to a server because host timed out', function(done) {
-			var esConfig = clone(common.config.ElasticSearch1);
+		it('Shouldn\'t connect to a server because host timed out', done => {
+			const esConfig = clone(common.config.ElasticSearch1);
+
 			esConfig.host = '127.0.0.2:9200';
 			esConfig.log = false;
-			var infoLogSpy = sinon.spy(TelepatLogger.prototype, 'info');
-			var errorLogSpy = sinon.spy(TelepatLogger.prototype, 'error');
+			const infoLogSpy = sinon.spy(TelepatLogger.prototype, 'info');
+			const errorLogSpy = sinon.spy(TelepatLogger.prototype, 'error');
+			let client;
 
 			try {
-				var client = new esAdapter(esConfig);
+				client = new EsAdapter(esConfig);
 			} catch (e) {
 				expect(e).to.be.undefined;
 			}
@@ -72,23 +71,24 @@ module.exports = function Constructor() {
 			expect(client.config.host).to.be.equal(esConfig.host);
 			expect(client.config.hosts).to.be.undefined;
 
-			setTimeout(function() {
+			setTimeout(() => {
 				infoLogSpy.restore();
 				errorLogSpy.restore();
 
 				sinon.assert.notCalled(infoLogSpy);
 				sinon.assert.called(errorLogSpy);
 
-				afterSubTest(done);
+				done();
 			}, 3000);
 		});
 
-		it('Should connect using hosts config parameter', function(done) {
-			var esConfig = clone(common.config.ElasticSearch2);
-			var infoLogSpy = sinon.spy(TelepatLogger.prototype, 'info');
+		it('Should connect using hosts config parameter', done => {
+			const esConfig = clone(common.config.ElasticSearch2);
+			const infoLogSpy = sinon.spy(TelepatLogger.prototype, 'info');
+			let client;
 
 			try {
-				var client = new esAdapter(esConfig);
+				client = new EsAdapter(esConfig);
 			} catch (e) {
 				expect(e).to.be.undefined;
 			}
@@ -96,12 +96,12 @@ module.exports = function Constructor() {
 			expect(client.config.hosts).to.deep.equal(esConfig.hosts);
 			expect(client.config.host).to.be.undefined;
 
-			client.onReady(function() {
+			client.onReady(() => {
 				infoLogSpy.restore();
 
 				sinon.assert.calledWith(infoLogSpy, 'Connected to ElasticSearch MainDatabase');
 
-				afterSubTest(done);
+				done();
 			});
 		});
 	});

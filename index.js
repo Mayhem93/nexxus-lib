@@ -30,9 +30,9 @@ fs.readdirSync(path.join(__dirname, '/lib/message_queue')).forEach(filename => {
 	}
 });
 
-const init = (servicesConfig, callback) => {
+const init = (serviceOptions, callback) => {
 	let configManager = new ConfigurationManager('./config.spec.json', './config.json');
-	let name = servicesConfig.name;
+	let name = serviceOptions.name;
 
 	async.series([
 		seriesCallback => {
@@ -71,11 +71,8 @@ const init = (servicesConfig, callback) => {
 			}
 
 			Services.datasource = new Datasource();
+			Services.datasource.on('ready', seriesCallback);
 			Services.datasource.setMainDatabase(new acceptedServices[mainDatabase](config[mainDatabase]));
-			seriesCallback();
-		},
-		seriesCallback => {
-			Services.datasource.dataStorage.onReady(seriesCallback);
 		},
 		seriesCallback => {
 			if (Services.redisClient) {
@@ -144,13 +141,13 @@ const init = (servicesConfig, callback) => {
 				return seriesCallback(new Error(`Unable to load "${messagingClient}" messaging queue: not found. Aborting...`, 5));
 			}
 
-			if (!clientConfiguration && servicesConfig) {
-				clientConfiguration = { broadcast: servicesConfig.broadcast, exclusive: servicesConfig.exclusive };
-			} else if (servicesConfig) {
-				clientConfiguration.broadcast = servicesConfig.broadcast;
-				clientConfiguration.exclusive = servicesConfig.exclusive;
-				name = servicesConfig.name;
-				type = servicesConfig.type;
+			if (!clientConfiguration && serviceOptions) {
+				clientConfiguration = { broadcast: serviceOptions.broadcast, exclusive: serviceOptions.exclusive };
+			} else if (serviceOptions) {
+				clientConfiguration.broadcast = serviceOptions.broadcast;
+				clientConfiguration.exclusive = serviceOptions.exclusive;
+				name = serviceOptions.name;
+				type = serviceOptions.type;
 			} else {
 				clientConfiguration = clientConfiguration || { broadcast: false };
 				type = name;

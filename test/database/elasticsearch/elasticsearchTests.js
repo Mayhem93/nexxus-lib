@@ -1,44 +1,25 @@
-var common = require('../../common');
-var clone = require('clone');
-var es = require('elasticsearch');
-var EsAdapter = require('../../../lib/database/elasticsearch_adapter');
+const common = require('../../common');
+const clone = require('clone');
+const es = require('elasticsearch');
+const EsAdapter = require('../../../lib/database/elasticsearch_adapter');
 
 /**
  * @global
  */
-esConfig = common.config.ElasticSearch1;
+let esConfig = common.config.ElasticSearch1;
 
 /**
  *	@global
  * 	@param {Function} done
  */
-esConnection = new es.Client(clone(common.config.ElasticSearch1));
+let esConnection = new es.Client(clone(common.config.ElasticSearch1));
 
 /**
  * @global
  */
 esAdapterConnection = new EsAdapter(clone(common.config.ElasticSearch1));
 
-subTestIndex = 1;
-
-/**
- * @global
- * @param {Function} done
- */
-afterTest = function(done) {
-	done();
-};
-
-/**
- *	@global
- * 	@param {Function} done
- */
-afterSubTest = function(done, err) {
-	subTestIndex++;
-	done(err);
-};
-
-var tests = [
+const tests = [
 	require('./constructor'),
 	require('./getObjects'),
 	require('./createObjects'),
@@ -47,6 +28,6 @@ var tests = [
 	require('./getQueryObject')
 ];
 
-tests.forEach(function(t) {
+tests.forEach(t => {
 	t();
 });
