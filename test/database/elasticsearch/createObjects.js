@@ -1,19 +1,16 @@
-var common = require('../../common');
-var chai = require('chai');
-var expect = chai.expect;
-var assert = chai.assert;
+const chai = require('chai');
+const expect = chai.expect;
+
 chai.should();
 chai.use(require('chai-things'));
-var sinon = require('sinon');
-var clone = require('clone');
-var async = require('async');
-var es = require('elasticsearch');
-var guid = require('uuid');
-var esAdapter = require('../../../lib/database/elasticsearch_adapter');
-var TelepatError = require('../../../lib/TelepatError');
-var TelepatLogger = require('../../../lib/logger/logger');
+const sinon = require('sinon');
+const async = require('async');
+const guid = require('uuid');
+const EsAdapter = require('../../../lib/database/elasticsearch_adapter');
+const TelepatError = require('../../../lib/TelepatError');
+const TelepatLogger = require('../../../lib/logger/logger');
 
-module.exports = function CreateObjects() {
+module.exports = () => {
 	describe('ElasticSearchDB.createObjects', function() {
 		after(afterTest);
 

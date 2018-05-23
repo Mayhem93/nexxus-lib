@@ -38,26 +38,26 @@ module.exports = function Constructor () {
 
 			try {
 				client = new EsAdapter(esConfig);
+
+				expect(client.config.host).to.be.equal(esConfig.host);
+				expect(client.config.hosts).to.be.undefined;
+
+				client.once('ready', () => {
+					infoLogSpy.restore();
+					sinon.assert.calledOnce(infoLogSpy);
+					sinon.assert.calledWith(infoLogSpy, 'Connected to ElasticSearch MainDatabase');
+
+					done();
+				});
 			} catch (e) {
 				expect(e).to.be.undefined; // disable-eslint-rule no-unused-expressions
 			}
-			expect(client.config.host).to.be.equal(esConfig.host);
-			expect(client.config.hosts).to.be.undefined;
-
-			client.onReady(() => {
-				infoLogSpy.restore();
-				sinon.assert.calledOnce(infoLogSpy);
-				sinon.assert.calledWith(infoLogSpy, 'Connected to ElasticSearch MainDatabase');
-
-				done();
-			});
 		});
 
 		it('Shouldn\'t connect to a server because host timed out', done => {
 			const esConfig = clone(common.config.ElasticSearch1);
 
 			esConfig.host = '127.0.0.2:9200';
-			esConfig.log = false;
 			const infoLogSpy = sinon.spy(TelepatLogger.prototype, 'info');
 			const errorLogSpy = sinon.spy(TelepatLogger.prototype, 'error');
 			let client;
@@ -89,20 +89,19 @@ module.exports = function Constructor () {
 
 			try {
 				client = new EsAdapter(esConfig);
+				expect(client.config.hosts).to.deep.equal(esConfig.hosts);
+				expect(client.config.host).to.be.undefined;
+
+				client.once('ready', () => {
+					infoLogSpy.restore();
+
+					sinon.assert.calledWith(infoLogSpy, 'Connected to ElasticSearch MainDatabase');
+
+					done();
+				});
 			} catch (e) {
 				expect(e).to.be.undefined;
 			}
-
-			expect(client.config.hosts).to.deep.equal(esConfig.hosts);
-			expect(client.config.host).to.be.undefined;
-
-			client.onReady(() => {
-				infoLogSpy.restore();
-
-				sinon.assert.calledWith(infoLogSpy, 'Connected to ElasticSearch MainDatabase');
-
-				done();
-			});
 		});
 	});
 };

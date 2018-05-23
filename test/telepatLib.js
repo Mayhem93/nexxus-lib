@@ -14,6 +14,10 @@ Application.logger = new TelepatLogger({
 
 const tests = [
 	{
+		name: 'index',
+		path: 'index.js'
+	},
+	{
 		name: 'Filter builder',
 		path: 'utils/filterbuilderTests.js'
 	},
