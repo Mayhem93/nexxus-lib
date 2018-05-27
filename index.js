@@ -26,149 +26,136 @@ fs.readdirSync(path.join(__dirname, '/lib/message_queue')).forEach(filename => {
 	let filenameParts = filename.split('_');
 
 	if (filenameParts.pop() === 'queue.js') {
-		acceptedServices[filenameParts.join('_')] = require('./lib/message_queue/' + filename);
+		acceptedServices[filenameParts.join('_')] = require('./lib/message_queue/' + filename)(Services);
 	}
 });
 
-const init = (serviceOptions, callback) => {
-	let configManager = new ConfigurationManager('./config.spec.json', './config.json');
+const init = async serviceOptions => {
+	let configManager = new ConfigurationManager(serviceOptions.configFileSpec, serviceOptions.configFile);
 	let name = serviceOptions.name;
+
+	await configManager.load();
+	config = configManager.config;
+
+	if (config.logger) {
+		config.logger.name = name;
+		Services.logger = new TelepatLogger(config.logger);
+	} else {
+		Services.logger = new TelepatLogger({
+			type: 'Console',
+			name,
+			settings: { level: 'info' }
+		});
+	}
+	let mainDatabase = config.main_database;
+
+	if (!acceptedServices[mainDatabase]) {
+		throw new Error(`Unable to load "${mainDatabase}" main database: not found. Aborting...`, 2);
+	}
+
+	Services.datasource = new Datasource();
+	await (new Promise((resolve, reject) => {
+		Services.datasource.on('ready', err => err ? reject(err) : resolve());
+	}));
+	Services.datasource.setMainDatabase(new acceptedServices[mainDatabase](config[mainDatabase]));
+
+	if (Services.redisClient) {
+		Services.redisClient = null;
+	}
+
+	let redisConf = config.redis;
+	const retryStrategy = options => {
+		if (options.error && (options.error.code === 'ETIMEDOUT' || options.error.code === 'ECONNREFUSED')) {
+			return 1000;
+		}
+
+		Services.logger.error(`Redis server connection lost "${redisConf.host}". Retrying...`);
+		// reconnect after
+
+		return 3000;
+	};
+
+	Services.redisClient = redis.createClient({
+		port: redisConf.port,
+		host: redisConf.host,
+		retry_strategy: retryStrategy
+	});
+
+	Services.redisClient.on('error', err => {
+		Services.logger.error(`Failed connecting to Redis "${redisConf.host}": ${err.message}. Retrying...`);
+	});
+
+	await (new Promise(resolve => {
+		Services.redisClient.on('ready', () => {
+			Services.logger.info('Client connected to Redis.');
+			resolve();
+		});
+	}));
+
+	if (Services.redisCacheClient) {
+		Services.redisCacheClient = null;
+	}
+
+	let redisCacheConf = config.redisCache;
+
+	Services.redisCacheClient = redis.createClient({
+		port: redisCacheConf.port,
+		host: redisCacheConf.host,
+		retry_strategy: retryStrategy
+	});
+
+	Services.redisCacheClient.on('error', err => {
+		Services.logger.error(`Failed connecting to Redis Cache "${redisCacheConf.host}": ${err.message}. Retrying...`);
+	});
+
+	await (new Promise(resolve => {
+		Services.redisCacheClient.on('ready', () => {
+			Services.logger.info('Client connected to Redis.');
+			resolve();
+		});
+	}));
+
+	let messagingClient = config.message_queue;
+	let clientConfiguration = config[messagingClient];
+	let type;
+
+	if (!acceptedServices[messagingClient]) {
+		throw new Error(`Unable to load "${messagingClient}" messaging queue: not found. Aborting...`, 5);
+	}
+
+	if (!clientConfiguration && serviceOptions) {
+		clientConfiguration = { broadcast: serviceOptions.broadcast, exclusive: serviceOptions.exclusive };
+	} else if (serviceOptions) {
+		clientConfiguration.broadcast = serviceOptions.broadcast;
+		clientConfiguration.exclusive = serviceOptions.exclusive;
+		name = serviceOptions.name;
+		type = serviceOptions.type;
+	} else {
+		clientConfiguration = clientConfiguration || { broadcast: false };
+		type = name;
+	}
+
+	/**
+	 * @type {MessagingClient}
+	 */
+	Services.messagingClient = new acceptedServices[messagingClient](clientConfiguration, name, type);
+
+	/* Services.messagingClient.systemMessageFunc = (message, callback) => {
+		SystemMessageProcessor.identity = name;
+
+		if (message._systemMessage) {
+			Services.logger.debug(`Got system message: "${JSON.stringify(message)}"`);
+			SystemMessageProcessor.process(message);
+		}
+
+		callback(message);
+	}; */
+
+	return Services.messagingClient.onReady(seriesCallback);
 
 	async.series([
 		seriesCallback => {
-			configManager.load(err => {
-				if (err) {
-					return seriesCallback(err);
-				}
 
-				let testResult = configManager.test();
-
-				if (testResult === true) {
-					config = configManager.config;
-
-					return seriesCallback();
-				}
-
-				return seriesCallback(testResult);
-			});
-		},
-		seriesCallback => {
-			if (config.logger) {
-				config.logger.name = name;
-				Services.logger = new TelepatLogger(config.logger);
-			} else {
-				Services.logger = new TelepatLogger({
-					type: 'Console',
-					name: name + (process.env.PORT || 3000),
-					settings: { level: 'info' }
-				});
-			}
-			let mainDatabase = config.main_database;
-
-			if (!acceptedServices[mainDatabase]) {
-				seriesCallback(new Error(`Unable to load "${mainDatabase}" main database: not found. Aborting...`, 2));
-				process.exit(2);
-			}
-
-			Services.datasource = new Datasource();
-			Services.datasource.on('ready', seriesCallback);
-			Services.datasource.setMainDatabase(new acceptedServices[mainDatabase](config[mainDatabase]));
-		},
-		seriesCallback => {
-			if (Services.redisClient) {
-				Services.redisClient = null;
-			}
-
-			let redisConf = config.redis;
-
-			Services.redisClient = redis.createClient({
-				port: redisConf.port,
-				host: redisConf.host,
-				retry_strategy: options => {
-					if (options.error && (options.error.code === 'ETIMEDOUT' || options.error.code === 'ECONNREFUSED')) {
-						return 1000;
-					}
-
-					Services.logger.error(`Redis server connection lost "${redisConf.host}". Retrying...`);
-					// reconnect after
-
-					return 3000;
-				}
-			});
-			Services.redisClient.on('error', err => {
-				Services.logger.error(`Failed connecting to Redis "${redisConf.host}": ${err.message}. Retrying...`);
-			});
-			Services.redisClient.on('ready', () => {
-				Services.logger.info('Client connected to Redis.');
-				seriesCallback();
-			});
-		},
-		seriesCallback => {
-			if (Services.redisCacheClient) {
-				Services.redisCacheClient = null;
-			}
-
-			let redisCacheConf = config.redisCache;
-
-			Services.redisCacheClient = redis.createClient({
-				port: redisCacheConf.port,
-				host: redisCacheConf.host,
-				retry_strategy: options => {
-					if (options.error && (options.error.code === 'ETIMEDOUT' || options.error.code === 'ECONNREFUSED')) {
-						return 1000;
-					}
-
-					Services.logger.error(`Redis cache server connection lost "${redisCacheConf.host}". Retrying...`);
-
-					// reconnect after
-					return 3000;
-				}
-			});
-			Services.redisCacheClient.on('error', err => {
-				Services.logger.error(`Failed connecting to Redis Cache "${redisCacheConf.host}": ${err.message}. Retrying...`);
-			});
-			Services.redisCacheClient.on('ready', () => {
-				Services.logger.info('Client connected to Redis Cache.');
-				seriesCallback();
-			});
-		},
-		seriesCallback => {
-			let messagingClient = config.message_queue;
-			let clientConfiguration = config[messagingClient];
-			let type;
-
-			if (!acceptedServices[messagingClient]) {
-				return seriesCallback(new Error(`Unable to load "${messagingClient}" messaging queue: not found. Aborting...`, 5));
-			}
-
-			if (!clientConfiguration && serviceOptions) {
-				clientConfiguration = { broadcast: serviceOptions.broadcast, exclusive: serviceOptions.exclusive };
-			} else if (serviceOptions) {
-				clientConfiguration.broadcast = serviceOptions.broadcast;
-				clientConfiguration.exclusive = serviceOptions.exclusive;
-				name = serviceOptions.name;
-				type = serviceOptions.type;
-			} else {
-				clientConfiguration = clientConfiguration || { broadcast: false };
-				type = name;
-			}
-			/**
-			 * @type {MessagingClient}
-			 */
-			Services.messagingClient = new acceptedServices[messagingClient](clientConfiguration, name, type);
-
-			Services.messagingClient.systemMessageFunc = (message, callback) => {
-				SystemMessageProcessor.identity = name;
-
-				if (message._systemMessage) {
-					Services.logger.debug(`Got system message: "${JSON.stringify(message)}"`);
-					SystemMessageProcessor.process(message);
-				}
-
-				callback(message);
-			};
-
-			return Services.messagingClient.onReady(seriesCallback);
 		},
 		seriesCallback => {
 			module.exports.config = config;

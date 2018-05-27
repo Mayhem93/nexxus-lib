@@ -68,6 +68,7 @@ describe('Telepat Models', () => {
 			this.timeout(10000);
 
 			require(path.join(__dirname, t.path));
+			console.log(__dirname, t.path);
 
 			if (t.cleanup && t.cleanup instanceof Function) {
 				after(t.cleanup);
