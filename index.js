@@ -1,4 +1,3 @@
-const async = require('async');
 const redis = require('redis');
 const fs = require('fs');
 const path = require('path');
@@ -26,27 +25,19 @@ fs.readdirSync(path.join(__dirname, '/lib/message_queue')).forEach(filename => {
 	let filenameParts = filename.split('_');
 
 	if (filenameParts.pop() === 'queue.js') {
-		acceptedServices[filenameParts.join('_')] = require('./lib/message_queue/' + filename)(Services);
+		acceptedServices[filenameParts.join('_')] = require(`./lib/message_queue/${filename}`)(Services);
 	}
 });
 
 const init = async serviceOptions => {
-	let configManager = new ConfigurationManager(serviceOptions.configFileSpec, serviceOptions.configFile);
 	let name = serviceOptions.name;
+	let configManager = new ConfigurationManager(serviceOptions.configFileSpec, serviceOptions.configFile);
 
 	await configManager.load();
+	configManager.test();
 	config = configManager.config;
+	Services.logger = new TelepatLogger(config.logger);
 
-	if (config.logger) {
-		config.logger.name = name;
-		Services.logger = new TelepatLogger(config.logger);
-	} else {
-		Services.logger = new TelepatLogger({
-			type: 'Console',
-			name,
-			settings: { level: 'info' }
-		});
-	}
 	let mainDatabase = config.main_database;
 
 	if (!acceptedServices[mainDatabase]) {
@@ -54,14 +45,10 @@ const init = async serviceOptions => {
 	}
 
 	Services.datasource = new Datasource();
-	await (new Promise((resolve, reject) => {
-		Services.datasource.on('ready', err => err ? reject(err) : resolve());
-	}));
 	Services.datasource.setMainDatabase(new acceptedServices[mainDatabase](config[mainDatabase]));
-
-	if (Services.redisClient) {
-		Services.redisClient = null;
-	}
+	await (new Promise((resolve, reject) => {
+		Services.datasource.dataStorage.on('ready', err => err ? reject(err) : resolve());
+	}));
 
 	let redisConf = config.redis;
 	const retryStrategy = options => {
@@ -91,10 +78,6 @@ const init = async serviceOptions => {
 			resolve();
 		});
 	}));
-
-	if (Services.redisCacheClient) {
-		Services.redisCacheClient = null;
-	}
 
 	let redisCacheConf = config.redisCache;
 
@@ -151,17 +134,14 @@ const init = async serviceOptions => {
 		callback(message);
 	}; */
 
-	return Services.messagingClient.onReady(seriesCallback);
+	await (new Promise(resolve => {
+		Services.messagingClient.on('ready', () => {
+			Services.logger.info('Messaging services connected');
+			resolve();
+		});
+	}));
 
-	async.series([
-		seriesCallback => {
-
-		},
-		seriesCallback => {
-			module.exports.config = config;
-			Application.getAll(seriesCallback);
-		}
-	], callback);
+	await Application.getAll();
 };
 
 const appsModule = new Proxy({
@@ -191,17 +171,17 @@ module.exports = {
 	config,
 	apps: appsModule,
 	admins: Admin,
-	error: error => new TelepatError(error),
+	// error: error => new TelepatError(error),
 	errors: TelepatError.errors,
 	services: Services,
-	TelepatError: TelepatError,
+	TelepatError,
 	users: User,
 	contexts: Context,
 	subscription: Subscription,
 	models: Model,
 	delta: Delta,
 	channel: Channel,
-	SystemMessageProcessor: SystemMessageProcessor,
-	Application: Application,
+	SystemMessageProcessor,
+	Application,
 	telepatIndexedList: require('./lib/TelepatIndexedLists')
 };
