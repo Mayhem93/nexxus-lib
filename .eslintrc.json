@@ -23,22 +23,22 @@
 			"multi-line"
 		],
 		"dot-location": [
-			"warn",
+			1,
 			"property"
 		],
 		"dot-notation": [
-			"warn",
+			1,
 			{
 				"allowKeywords": true,
 				"allowPattern": "-"
 			}
 		],
 		"eqeqeq": [
-			"warn",
+			1,
 			"smart"
 		],
 		"indent": [
-			"warn",
+			1,
 			"tab",
 			{
 				"SwitchCase": 1
@@ -52,7 +52,7 @@
 			}
 		],
 		"linebreak-style": [
-			"error",
+			2,
 			"unix"
 		],
 		"max-len": [
@@ -60,36 +60,38 @@
 			200,
 			4
 		],
-		"newline-after-var": [
-			"warn"
-		],
-		"newline-before-return": [
-			"warn"
-		],
-		"no-else-return": [
-			"warn"
-		],
-		"no-multi-spaces": 2,
+		"newline-after-var": 1,
+		"newline-before-return": 1,
+		"no-else-return": 1,
+		"no-lonely-if": 1,
+		"no-multi-spaces": 1,
 		"no-multiple-empty-lines": [
 			2,
 			{
 				"max": 1
 			}
 		],
-		"no-trailing-spaces": 2,
+		"no-trailing-spaces": 1,
 		"no-undef": 2,
+		"no-unneeded-ternary": 1,
 		"no-unused-expressions": 2,
 		"no-unused-vars": 2,
 		"no-use-before-define": 2,
 		"no-tabs": "off",
-		"no-var": "error",
+		"no-var": 2,
+		"object-shorthand": 1,
+		"prefer-arrow-callback": [
+			1,
+			{
+				"allowUnboundThis": true
+			}
+		],
+		"prefer-template": 2,
 		"quotes": [
 			2,
 			"single"
 		],
-		"require-await": [
-			"warn"
-		],
+		"require-await": 2,
 		"semi": [
 			2,
 			"always"
@@ -103,7 +105,7 @@
 			"any"
 		],
 		"yoda": [
-			2,
+			1,
 			"never"
 		]
 	},
