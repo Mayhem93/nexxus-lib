@@ -112,21 +112,7 @@ const init = async serviceOptions => {
 		nodeIndex
 	});
 
-	/**
-	 * @type {MessagingClient}
-	 */
-	Services.messagingClient = new acceptedServices[messagingClient](clientConfiguration, serviceType, nodeIndex);
-
-	/* Services.messagingClient.systemMessageFunc = (message, callback) => {
-		SystemMessageProcessor.identity = name;
-
-		if (message._systemMessage) {
-			Services.logger.debug(`Got system message: "${JSON.stringify(message)}"`);
-			SystemMessageProcessor.process(message);
-		}
-
-		callback(message);
-	}; */
+	Services.messagingClient = new acceptedServices[messagingClient](clientConfiguration);
 
 	await (new Promise(resolve => {
 		Services.messagingClient.on('ready', () => {
