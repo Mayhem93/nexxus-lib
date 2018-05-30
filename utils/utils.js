@@ -218,51 +218,55 @@ let lz4 = ((() => {
 	 * @param {int} operation 0 for compression, 1 for decompression
 	 * @param {lz4ResultCb} callback
 	 */
-	let doWork = (data, operation, callback) => {
-		let lz4Stream = null;
+	const doWork = async (data, operation) => {
+		const result = await (new Promise((resolve, reject) => {
+			let lz4Stream = null;
 
-		if (operation === 0) {
-			lz4Stream = lz4Module.createEncoderStream();
-		} else if (operation === 1) {
-			lz4Stream = lz4Module.createDecoderStream();
-		}
+			if (operation === 0) {
+				lz4Stream = lz4Module.createEncoderStream();
+			} else if (operation === 1) {
+				lz4Stream = lz4Module.createDecoderStream();
+			}
 
-		let outputStream = new stream.Writable();
-		let result = Buffer.alloc(0);
+			let outputStream = new stream.Writable();
+			let result = Buffer.alloc(0);
 
-		outputStream._write = (chunk, encoding, callback1) => {
-			result = Buffer.concat([result, chunk]);
-			callback1();
-		};
+			outputStream._write = (chunk, encoding, callback1) => {
+				result = Buffer.concat([result, chunk]);
+				callback1();
+			};
 
-		outputStream.on('finish', () => {
-			callback(result);
-		});
+			outputStream.on('finish', () => {
+				resolve(result);
+			});
 
-		let inputStream = new stream.Readable();
+			let inputStream = new stream.Readable();
 
-		inputStream.push(data);
-		inputStream.push(null);
+			inputStream.push(data);
+			inputStream.push(null);
 
-		inputStream.pipe(lz4Stream).pipe(outputStream);
+			inputStream.pipe(lz4Stream).pipe(outputStream);
+		}));
+
+		return result;
 	};
 
 	return {
 		/**
 		 * LZ4 compress a string
-		 * @param {string} string
+		 * @param {string} data
 		 * @param {lz4ResultCb} callback
 		 */
-		compress (string, callback) {
-			doWork(string, 0, callback);
+		compress (data) {
+			return doWork(data, 0);
 		},
 		/**
 		 * LZ4 decompress a string
-		 * @param {Buffer} buffer
+		 * @param {Buffer} data
 		 * @param {lz4ResultCb} callback
 		 */
-		decompress (buffer, callback) {
-			doWork(buffer, 1, callback);
+		decompress (data) {
+			return doWork(data, 1);
 		}
 	};
 }))();

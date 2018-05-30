@@ -30,18 +30,20 @@ fs.readdirSync(path.join(__dirname, '/lib/message_queue')).forEach(filename => {
 });
 
 const init = async serviceOptions => {
-	let name = serviceOptions.name;
-	let configManager = new ConfigurationManager(serviceOptions.configFileSpec, serviceOptions.configFile);
+	const serviceType = serviceOptions.serviceType;
+	const nodeIndex = serviceOptions.nodeIndex;
+	const serviceName = `${serviceType}-${nodeIndex}`;
+	const configManager = new ConfigurationManager(serviceOptions.configFileSpec, serviceOptions.configFile);
 
 	await configManager.load();
 	configManager.test();
 	config = configManager.config;
-	Services.logger = new TelepatLogger(config.logger);
+	Services.logger = new TelepatLogger(Object.assign(config.logger, { serviceName }));
 
 	let mainDatabase = config.main_database;
 
 	if (!acceptedServices[mainDatabase]) {
-		throw new Error(`Unable to load "${mainDatabase}" main database: not found. Aborting...`, 2);
+		throw new TelepatError(TelepatError.errors.ServerFailure, `Unable to load "${mainDatabase}" main database: not found. Aborting...`);
 	}
 
 	Services.datasource = new Datasource();
@@ -62,18 +64,18 @@ const init = async serviceOptions => {
 		return 3000;
 	};
 
-	Services.redisClient = redis.createClient({
+	Services.datasource.setCacheDatabase(redis.createClient({
 		port: redisConf.port,
 		host: redisConf.host,
 		retry_strategy: retryStrategy
-	});
+	}));
 
-	Services.redisClient.on('error', err => {
+	Services.datasource.cacheDatabase.on('error', err => {
 		Services.logger.error(`Failed connecting to Redis "${redisConf.host}": ${err.message}. Retrying...`);
 	});
 
 	await (new Promise(resolve => {
-		Services.redisClient.on('ready', () => {
+		Services.datasource.cacheDatabase.on('ready', () => {
 			Services.logger.info('Client connected to Redis.');
 			resolve();
 		});
@@ -99,29 +101,21 @@ const init = async serviceOptions => {
 	}));
 
 	let messagingClient = config.message_queue;
-	let clientConfiguration = config[messagingClient];
-	let type;
 
 	if (!acceptedServices[messagingClient]) {
-		throw new Error(`Unable to load "${messagingClient}" messaging queue: not found. Aborting...`, 5);
+		throw new TelepatError(TelepatError.errors.ServerFailure, `Unable to load "${messagingClient}" messaging queue: not found. Aborting...`);
 	}
 
-	if (!clientConfiguration && serviceOptions) {
-		clientConfiguration = { broadcast: serviceOptions.broadcast, exclusive: serviceOptions.exclusive };
-	} else if (serviceOptions) {
-		clientConfiguration.broadcast = serviceOptions.broadcast;
-		clientConfiguration.exclusive = serviceOptions.exclusive;
-		name = serviceOptions.name;
-		type = serviceOptions.type;
-	} else {
-		clientConfiguration = clientConfiguration || { broadcast: false };
-		type = name;
-	}
+	let clientConfiguration = Object.assign(config[messagingClient], {
+		serviceType,
+		serviceName,
+		nodeIndex
+	});
 
 	/**
 	 * @type {MessagingClient}
 	 */
-	Services.messagingClient = new acceptedServices[messagingClient](clientConfiguration, name, type);
+	Services.messagingClient = new acceptedServices[messagingClient](clientConfiguration, serviceType, nodeIndex);
 
 	/* Services.messagingClient.systemMessageFunc = (message, callback) => {
 		SystemMessageProcessor.identity = name;
