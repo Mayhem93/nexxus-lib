@@ -1,11 +1,10 @@
-const redis = require('redis');
+const Redis = require('redis');
 const fs = require('fs');
 const path = require('path');
 const Application = require('./lib/Application');
 const ConfigurationManager = require('./lib/ConfigurationManager');
 const Datasource = require('./lib/database/datasource');
 const TelepatLogger = require('./lib/logger/logger');
-const Services = require('./lib/Services');
 const SystemMessageProcessor = require('./lib/systemMessage');
 const Admin = require('./lib/Admin');
 const Model = require('./lib/Model');
@@ -19,6 +18,13 @@ const Subscription = require('./lib/Subscription');
 let config;
 let acceptedServices = {
 	ElasticSearch: require('./lib/database/elasticsearch_adapter')
+};
+
+const Services = {
+	datasource: null,
+	logger: null,
+	messagingClient: null,
+	redisCacheClient: null
 };
 
 fs.readdirSync(path.join(__dirname, '/lib/message_queue')).forEach(filename => {
@@ -64,7 +70,7 @@ const init = async serviceOptions => {
 		return 3000;
 	};
 
-	Services.datasource.setCacheDatabase(redis.createClient({
+	Services.datasource.setCacheDatabase(Redis.createClient({
 		port: redisConf.port,
 		host: redisConf.host,
 		retry_strategy: retryStrategy
@@ -83,7 +89,7 @@ const init = async serviceOptions => {
 
 	let redisCacheConf = config.redisCache;
 
-	Services.redisCacheClient = redis.createClient({
+	Services.redisCacheClient = Redis.createClient({
 		port: redisCacheConf.port,
 		host: redisCacheConf.host,
 		retry_strategy: retryStrategy
@@ -153,7 +159,6 @@ module.exports = {
 	admins: Admin,
 	// error: error => new TelepatError(error),
 	errors: TelepatError.errors,
-	services: Services,
 	TelepatError,
 	users: User,
 	contexts: Context,

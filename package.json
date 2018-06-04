@@ -6,6 +6,8 @@
 	"engines": {
 		"node": ">=8.10.0"
 	},
+	"types": "index.d.ts",
+	"typings": "index.d.ts",
 	"repository": {
 		"type": "git",
 		"url": "git@github.com:Mayhem93/telepat-models.git"
@@ -31,9 +33,6 @@
 			"email": "utherr.ghujax@gmail.com"
 		}
 	],
-	"directories": {
-		"lib": "lib/"
-	},
 	"license": "Apache-2.0",
 	"dependencies": {
 		"agentkeepalive": "3.4.1",
@@ -58,6 +57,7 @@
 		"winston-syslog": "2.0.0"
 	},
 	"devDependencies": {
+		"@types/node": "^10.1.4",
 		"chai": "chaijs/chai#master",
 		"chai-things": "chaijs/chai-things#master",
 		"eslint": "4.19.1",
