@@ -7,31 +7,34 @@ const Datasource = require('./lib/database/datasource');
 const TelepatLogger = require('./lib/logger/logger');
 const SystemMessageProcessor = require('./lib/systemMessage');
 const Admin = require('./lib/Admin');
-const Model = require('./lib/Model');
 const Context = require('./lib/Context');
 const TelepatError = require('./lib/TelepatError');
 const User = require('./lib/User');
 const Delta = require('./lib/Delta');
 const Channel = require('./lib/Channel');
 const Subscription = require('./lib/Subscription');
+const Model = require('./lib/Model');
+const FilterBuilder = require('./utils/filterbuilder');
+const Services = require('./lib/Services');
 
 let config;
-let acceptedServices = {
-	ElasticSearch: require('./lib/database/elasticsearch_adapter')
-};
+let logger;
+let messagingClient;
+const acceptedServices = {};
 
-const Services = {
-	datasource: null,
-	logger: null,
-	messagingClient: null,
-	redisCacheClient: null
-};
+fs.readdirSync(path.join(__dirname, '/lib/database/adapters')).forEach(filename => {
+	let filenameParts = filename.split('_');
 
-fs.readdirSync(path.join(__dirname, '/lib/message_queue')).forEach(filename => {
+	if (filenameParts.pop() === 'adapter.js') {
+		acceptedServices[filenameParts.join('_')] = require(`./lib/database/adapters/${filename}`);
+	}
+});
+
+fs.readdirSync(path.join(__dirname, '/lib/message_queue/adapters')).forEach(filename => {
 	let filenameParts = filename.split('_');
 
 	if (filenameParts.pop() === 'queue.js') {
-		acceptedServices[filenameParts.join('_')] = require(`./lib/message_queue/${filename}`)(Services);
+		acceptedServices[filenameParts.join('_')] = require(`./lib/message_queue/adapters/${filename}`);
 	}
 });
 
@@ -44,7 +47,7 @@ const init = async serviceOptions => {
 	await configManager.load();
 	configManager.test();
 	config = configManager.config;
-	Services.logger = new TelepatLogger(Object.assign(config.logger, { serviceName }));
+	logger = new TelepatLogger(Object.assign(config.logger, { serviceName }));
 
 	let mainDatabase = config.main_database;
 
@@ -77,12 +80,12 @@ const init = async serviceOptions => {
 	}));
 
 	Services.datasource.cacheDatabase.on('error', err => {
-		Services.logger.error(`Failed connecting to Redis "${redisConf.host}": ${err.message}. Retrying...`);
+		logger.error(`Failed connecting to Redis "${redisConf.host}": ${err.message}. Retrying...`);
 	});
 
 	await (new Promise(resolve => {
 		Services.datasource.cacheDatabase.on('ready', () => {
-			Services.logger.info('Client connected to Redis.');
+			logger.info('Client connected to Redis.');
 			resolve();
 		});
 	}));
@@ -96,12 +99,12 @@ const init = async serviceOptions => {
 	});
 
 	Services.redisCacheClient.on('error', err => {
-		Services.logger.error(`Failed connecting to Redis Cache "${redisCacheConf.host}": ${err.message}. Retrying...`);
+		logger.error(`Failed connecting to Redis Cache "${redisCacheConf.host}": ${err.message}. Retrying...`);
 	});
 
 	await (new Promise(resolve => {
 		Services.redisCacheClient.on('ready', () => {
-			Services.logger.info('Client connected to Redis.');
+			logger.info('Client connected to Redis.');
 			resolve();
 		});
 	}));
@@ -118,11 +121,11 @@ const init = async serviceOptions => {
 		nodeIndex
 	});
 
-	Services.messagingClient = new acceptedServices[messagingClient](clientConfiguration);
+	messagingClient = new acceptedServices[messagingClient](clientConfiguration);
 
 	await (new Promise(resolve => {
-		Services.messagingClient.on('ready', () => {
-			Services.logger.info('Messaging services connected');
+		messagingClient.on('ready', () => {
+			logger.info('Messaging services connected');
 			resolve();
 		});
 	}));
@@ -130,43 +133,30 @@ const init = async serviceOptions => {
 	await Application.getAll();
 };
 
-const appsModule = new Proxy({
-	new: Application.new,
-	get: Application.get,
-	isBuiltInModel: Application.isBuiltInModel,
-	models: Model,
-	contexts: Context,
-	users: User,
-	getIterator: () => Application.apps
-}, {
+/* const appsModule = new Proxy(Application, {
 	get: (object, prop) => {
-		if (!config) {
-			throw new Error('Not initialized'); // TODO: improve
-		}
-
 		if (object[prop] instanceof Function) {
 			return object[prop];
 		}
 
 		return object.get(prop);
 	}
-});
+}); */
 
 module.exports = {
 	init,
 	config,
-	apps: appsModule,
-	admins: Admin,
-	// error: error => new TelepatError(error),
-	errors: TelepatError.errors,
-	TelepatError,
-	users: User,
-	contexts: Context,
-	subscription: Subscription,
-	models: Model,
-	delta: Delta,
-	channel: Channel,
-	SystemMessageProcessor,
+	logger,
+	messagingClient,
 	Application,
-	telepatIndexedList: require('./lib/TelepatIndexedLists')
+	Admin,
+	TelepatError,
+	User,
+	Context,
+	Subscription,
+	Model,
+	Delta,
+	Channel,
+	FilterBuilder,
+	SystemMessageProcessor
 };

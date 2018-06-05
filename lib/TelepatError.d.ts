@@ -1,4 +1,4 @@
-export type ERRORS = 'ServerNotAvailable' |
+type ERRORS = 'ServerNotAvailable' |
 	'ServerFailure' |
 	'NoRouteAvailable' |
 	'MissingRequiredField' |
@@ -51,5 +51,7 @@ export type ERRORS = 'ServerNotAvailable' |
 	'ServerConfigurationFailure';
 
 export class TelepatError extends Error {
-	constructor(err: ERRORS, placeholders: Array<string>);
+	static errors: ERRORS;
+
+	constructor(err: ERRORS, placeholders?: Array<string>);
 }

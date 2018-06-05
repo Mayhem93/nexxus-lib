@@ -3,6 +3,11 @@ import {TelepatError} from './lib/TelepatError';
 import {Datasource} from './lib/database/datasource';
 import {MessagingClient} from './lib/message_queue/messaging_client';
 
+declare namespace TelepatLib {
+	export function init(serviceOptions: ServiceOptions): Global.TelepatPromise<null, TelepatError>;
+	export const TelepatError;
+}
+
 interface TelepatServices {
 	datasource: Datasource,
 	logger: null,
@@ -12,10 +17,9 @@ interface TelepatServices {
 
 interface ServiceOptions {
 	serviceType: string,
-	serviceName: string,
 	nodeIndex: number,
 	configFile: string,
 	configFileSpec: string
 }
 
-export function init(serviceOptions: ServiceOptions): Global.TelepatPromise<null, TelepatError>;
+export = TelepatLib;
