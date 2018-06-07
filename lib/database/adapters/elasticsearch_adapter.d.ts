@@ -1,6 +1,6 @@
 import {MainDatabase, DatabaseSearchOptions, DatabaseCountOptions, DatabaseDeleteObjectsInput} from '../mainDatabase';
 import {TelepatPromise} from '../../../global';
-import {TelepatError} from '../../TelepatError';
+import TelepatError = require('../../TelepatError');
 
 export class ElasticSearchDB extends MainDatabase {
 	constructor(config: object)

@@ -1,36 +1,64 @@
-const common = require('./common');
 const chai = require('chai');
 const expect = chai.expect;
-const assert = chai.assert;
-const clone = require('clone');
 const TelepatLib = require('../index');
-const TelepatError = TelepatLib.TelepatError;
-const ConfigurationManager = require('../lib/ConfigurationManager');
+const TelepatError = require('../lib/TelepatError');
+const promisify = require('util').promisify;
+const fs = require('fs');
+const writeFile = promisify(fs.writeFile);
+const readFile = promisify(fs.readFile);
+
+const CONFIG_FILE_SPEC = './test/test-spec-file.json';
+const CONFIG_FILE = './test/test-config-file.json';
 
 chai.should();
 chai.use(require('chai-things'));
 
-const sinon = require('sinon');
-
 describe('index.init', () => {
-	it('Sould fail because ConfigurationManager failed to load', async () => {
-		const loadFunctionStub = sinon.stub(ConfigurationManager.prototype, 'load').throws(new TelepatError('ServerConfigurationFailure'));
+	before(async () => {
+		let config = JSON.parse(await readFile(CONFIG_FILE));
+		let configSpec = JSON.parse(await readFile(CONFIG_FILE_SPEC));
 
+		config.main_database = 'ElasticSearch';
+		configSpec.root[0].enum = ['ElasticSearch'];
+
+		await writeFile(CONFIG_FILE, JSON.stringify(config, null, 4));
+		await writeFile(CONFIG_FILE_SPEC, JSON.stringify(configSpec, null, 4));
+	});
+
+	it('Sould fail because mainDatabase was not found due to badly configured config file and spec file', async () => {
 		try {
 			await TelepatLib.init({
-				configFileSpec: '',
-				configFile: '',
+				configFileSpec: CONFIG_FILE_SPEC,
+				configFile: CONFIG_FILE,
 				nodeIndex: 0,
 				serviceType: 'api'
 			});
 
 			return new Error('Should throw error');
 		} catch (e) {
-			expect(e).to.be.instanceOf(TelepatError);
-			expect(e.code).to.be.eq(TelepatError.errors.ServerConfigurationFailure);
+			expect(e).to.be.instanceOf(TelepatError, e.stack);
+			expect(e.code).to.be.eq('ServerFailure', e.stack);
 		}
 
-		loadFunctionStub.restore();
+		return true;
+	});
+
+	it('Sould fail because mainDatabase was not found due to badly configured config file and spec file', async () => {
+		let config = JSON.parse(await readFile(CONFIG_FILE));
+		let configSpec = JSON.parse(await readFile(CONFIG_FILE_SPEC));
+
+		config.main_database = 'elasticsearch';
+		configSpec.root[0].enum = ['elasticsearch'];
+
+		await writeFile(CONFIG_FILE, JSON.stringify(config, null, 4));
+		await writeFile(CONFIG_FILE_SPEC, JSON.stringify(configSpec, null, 4));
+
+		await TelepatLib.init({
+			configFileSpec: CONFIG_FILE_SPEC,
+			configFile: CONFIG_FILE,
+			nodeIndex: 0,
+			serviceType: 'api'
+		});
 
 		return true;
 	});

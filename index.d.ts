@@ -1,25 +1,15 @@
 import * as Global from './global';
-import {TelepatError} from './lib/TelepatError';
+import TelepatError = require('./lib/TelepatError');
+import {TelepatLogger} from './lib/logger/logger';
 import {Datasource} from './lib/database/datasource';
 import {MessagingClient} from './lib/message_queue/messaging_client';
 
 declare namespace TelepatLib {
-	export function init(serviceOptions: ServiceOptions): Global.TelepatPromise<null, TelepatError>;
+	export function init(serviceOptions: Global.ServiceOptions): Global.TelepatPromise<null>;
+	export const config: object;
+	export const logger: TelepatLogger;
+	export const messagingClient: MessagingClient;
 	export const TelepatError;
-}
-
-interface TelepatServices {
-	datasource: Datasource,
-	logger: null,
-	messagingClient: MessagingClient,
-	redisCacheClient: null
-}
-
-interface ServiceOptions {
-	serviceType: string,
-	nodeIndex: number,
-	configFile: string,
-	configFileSpec: string
 }
 
 export = TelepatLib;

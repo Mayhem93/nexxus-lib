@@ -2,15 +2,7 @@ const common = require('./common');
 const es = require('elasticsearch');
 const clone = require('clone');
 const esConnection = new es.Client(clone(common.config.ElasticSearch1));
-const Application = require('../lib/Application');
-const TelepatLogger = require('../lib/logger/logger');
 const path = require('path');
-
-Application.logger = new TelepatLogger({
-	type: 'Console',
-	name: 'telepat-models-tests',
-	settings: {level: 'debug'}
-});
 
 const tests = [
 	{

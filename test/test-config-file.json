@@ -1,0 +1,29 @@
+{
+    "main_database": "elasticsearch",
+    "message_queue": "amqp",
+    "logger": {
+        "type": "Console",
+        "settings": {
+            "level": "info"
+        }
+    },
+    "elasticsearch": {
+        "hosts": [
+            "localhost:9200"
+        ],
+        "index": "default"
+    },
+    "redis": {
+        "host": "localhost",
+        "port": 6379
+    },
+    "redisCache": {
+        "host": "localhost",
+        "port": 6379
+    },
+    "amqp": {
+        "host": "localhost",
+        "user": "telepat",
+        "password": "password"
+    }
+}

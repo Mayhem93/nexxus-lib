@@ -50,8 +50,10 @@ type ERRORS = 'ServerNotAvailable' |
 	'DeviceInvalid' |
 	'ServerConfigurationFailure';
 
-export class TelepatError extends Error {
+declare class TelepatError extends Error {
 	static errors: ERRORS;
 
 	constructor(err: ERRORS, placeholders?: Array<string>);
 }
+
+export = TelepatError;

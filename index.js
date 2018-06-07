@@ -18,8 +18,6 @@ const FilterBuilder = require('./utils/filterbuilder');
 const Services = require('./lib/Services');
 
 let config;
-let logger;
-let messagingClient;
 const acceptedServices = {};
 
 fs.readdirSync(path.join(__dirname, '/lib/database/adapters')).forEach(filename => {
@@ -47,7 +45,8 @@ const init = async serviceOptions => {
 	await configManager.load();
 	configManager.test();
 	config = configManager.config;
-	logger = new TelepatLogger(Object.assign(config.logger, { serviceName }));
+
+	Services.logger = new TelepatLogger(Object.assign(config.logger, { serviceName }));
 
 	let mainDatabase = config.main_database;
 
@@ -58,7 +57,8 @@ const init = async serviceOptions => {
 	Services.datasource = new Datasource();
 	Services.datasource.setMainDatabase(new acceptedServices[mainDatabase](config[mainDatabase]));
 	await (new Promise((resolve, reject) => {
-		Services.datasource.dataStorage.on('ready', err => err ? reject(err) : resolve());
+		Services.datasource.dataStorage.on('ready', resolve);
+		Services.datasource.dataStorage.on('error', reject);
 	}));
 
 	let redisConf = config.redis;
@@ -79,13 +79,13 @@ const init = async serviceOptions => {
 		retry_strategy: retryStrategy
 	}));
 
-	Services.datasource.cacheDatabase.on('error', err => {
-		logger.error(`Failed connecting to Redis "${redisConf.host}": ${err.message}. Retrying...`);
+	Services.datasource.cacheStorage.on('error', err => {
+		Services.logger.error(`Failed connecting to Redis "${redisConf.host}": ${err.message}. Retrying...`);
 	});
 
 	await (new Promise(resolve => {
-		Services.datasource.cacheDatabase.on('ready', () => {
-			logger.info('Client connected to Redis.');
+		Services.datasource.cacheStorage.on('ready', () => {
+			Services.logger.info('Client connected to Redis.');
 			resolve();
 		});
 	}));
@@ -99,12 +99,12 @@ const init = async serviceOptions => {
 	});
 
 	Services.redisCacheClient.on('error', err => {
-		logger.error(`Failed connecting to Redis Cache "${redisCacheConf.host}": ${err.message}. Retrying...`);
+		Services.logger.error(`Failed connecting to Redis Cache "${redisCacheConf.host}": ${err.message}. Retrying...`);
 	});
 
 	await (new Promise(resolve => {
 		Services.redisCacheClient.on('ready', () => {
-			logger.info('Client connected to Redis.');
+			Services.logger.info('Client connected to Redis.');
 			resolve();
 		});
 	}));
@@ -125,7 +125,7 @@ const init = async serviceOptions => {
 
 	await (new Promise(resolve => {
 		messagingClient.on('ready', () => {
-			logger.info('Messaging services connected');
+			Services.logger.info('Messaging services connected');
 			resolve();
 		});
 	}));
@@ -146,8 +146,8 @@ const init = async serviceOptions => {
 module.exports = {
 	init,
 	config,
-	logger,
-	messagingClient,
+	logger: Services.logger,
+	messagingClient: Services.messagingClient,
 	Application,
 	Admin,
 	TelepatError,

@@ -7,7 +7,7 @@ chai.should();
 chai.use(require('chai-things'));
 
 const sinon = require('sinon');
-const EsAdapter = require('../../../lib/database/elasticsearch_adapter');
+const EsAdapter = require('../../../lib/database/adapters/elasticsearch_adapter');
 const TelepatError = require('../../../lib/TelepatError');
 const TelepatLogger = require('../../../lib/logger/logger');
 

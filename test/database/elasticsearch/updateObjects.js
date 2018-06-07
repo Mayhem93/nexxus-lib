@@ -10,7 +10,7 @@ var clone = require('clone');
 var async = require('async');
 var es = require('elasticsearch');
 var guid = require('uuid');
-var esAdapter = require('../../../lib/database/elasticsearch_adapter');
+var esAdapter = require('../../../lib/database/adapters/elasticsearch_adapter');
 var TelepatError = require('../../../lib/TelepatError');
 var TelepatLogger = require('../../../lib/logger/logger');
 
