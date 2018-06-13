@@ -1,4 +1,9 @@
-export {TelepatLogger as logger} from './logger/logger';
-export {MessagingClient as messagingClient} from './message_queue/messaging_client.js';
-export {Datasource} from './database/datasource';
-export {RedisClient as redisCacheClient} from 'redis';
+import {TelepatLogger} from './logger/logger';
+import {MessagingClient} from './message_queue/messaging_client';
+import {Datasource} from './database/datasource';
+import {RedisClient} from 'redis';
+
+export const logger: TelepatLogger;
+export const messagingClient: MessagingClient;
+export const datasource: Datasource;
+export const redisCacheClient: RedisClient;

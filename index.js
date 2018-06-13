@@ -62,6 +62,7 @@ const init = async serviceOptions => {
 	}));
 
 	let redisConf = config.redis;
+
 	const retryStrategy = options => {
 		if (options.error && (options.error.code === 'ETIMEDOUT' || options.error.code === 'ECONNREFUSED')) {
 			return 1000;

@@ -1,12 +1,15 @@
 import {MainDatabase} from './mainDatabase';
+import {RedisClient} from 'redis';
 
-export class Datasource {
-	dataStorage: MainDatabase
-	cacheStorage: any
+declare const redisClient: RedisClient;
+
+export declare class Datasource {
+	readonly dataStorage: MainDatabase
+	readonly cacheStorage: RedisClient
 
 	constructor();
 
 	setMainDatabase(database: MainDatabase): void;
 
-	setCacheStorage(database: any): void;
+	setCacheStorage(database: RedisClient): void;
 }

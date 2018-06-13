@@ -43,7 +43,9 @@ describe('index.init', () => {
 		return true;
 	});
 
-	it('Sould fail because mainDatabase was not found due to badly configured config file and spec file', async () => {
+	it('Should succcessfuly connect to services', async function (done) {
+		this.timeout(30000);
+
 		let config = JSON.parse(await readFile(CONFIG_FILE));
 		let configSpec = JSON.parse(await readFile(CONFIG_FILE_SPEC));
 
@@ -60,6 +62,6 @@ describe('index.init', () => {
 			serviceType: 'api'
 		});
 
-		return true;
+		done();
 	});
 });

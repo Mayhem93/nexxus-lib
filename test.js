@@ -1,2 +1,0 @@
-const TelepatLib = require('./index');
-
