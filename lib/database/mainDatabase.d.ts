@@ -32,7 +32,7 @@ interface DatabaseSearchOptions {
 	offset?: Number,
 	limit?: Number,
 	fields?: Array<string>,
-	scanFunction?: (objects: Array<object>) => TelepatPromise<null, TelepatError>
+	scanFunction?: (objects: Array<object>) => TelepatPromise<null>
 }
 
 declare const enum AggregationType {
@@ -53,16 +53,46 @@ interface DatabaseDeleteObjectsInput {
 	[id: string]: string
 }
 
+interface GetObjectsResultInterface {
+	errors: Array<TelepatError>
+	results: Array<object>
+	versions?: Array<Number>
+}
+
+interface SearchObjectsResultInterface {
+	results: Array<object>
+}
+
+interface CountObjectsResultInterface {
+	count: Number
+}
+
+interface CreateObjectsResultInterface {
+	errors: Array<TelepatError>
+}
+
+interface UpdateObjectsResultsInterface {
+	errors: Array<TelepatError>
+	results: Array<object>
+}
+
+interface DeleteObjectsResultInterface {
+	errors: Array<TelepatError>
+	results: Array<string>
+}
+
 export abstract class MainDatabase extends EventEmitter {
 	constructor(connection: any);
 
-	abstract getObjects(ids: Array<string>): TelepatPromise<Array<Object>, Array<TelepatError>>;
+	abstract getObjects(ids: Array<string>): TelepatPromise<GetObjectsResultInterface>;
 
-	abstract searchObjects(options: DatabaseSearchOptions): TelepatPromise<Array<Object>, TelepatError>;
+	abstract searchObjects(options: DatabaseSearchOptions): TelepatPromise<SearchObjectsResultInterface>;
 
-	abstract countObjects(options: DatabaseCountOptions): TelepatPromise<object, TelepatError>;
+	abstract countObjects(options: DatabaseCountOptions): TelepatPromise<CountObjectsResultInterface>;
 
-	abstract createObjects(objects: Array<object>): TelepatPromise< Array<object>, Array<TelepatError> >;
+	abstract createObjects(objects: Array<object>): TelepatPromise<CreateObjectsResultInterface>;
 
-	abstract  deleteObjects(objects: DatabaseDeleteObjectsInput): TelepatPromise< Array<object>, Array<TelepatError> >;
+	abstract updateObjects(patches: Array<object>): TelepatPromise<UpdateObjectsResultsInterface>;
+
+	abstract deleteObjects(objects: DatabaseDeleteObjectsInput): TelepatPromise<DeleteObjectsResultInterface>;
 }
