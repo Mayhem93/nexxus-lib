@@ -1,7 +1,7 @@
 {
-	"name": "telepat-models",
+	"name": "nexxus.lib",
 	"version": "0.4.4",
-	"description": "Telepat lib used by the API and the workers",
+	"description": "The Nexxus library is used by any Nexxus infrastructure node or client",
 	"main": "index.js",
 	"engines": {
 		"node": ">=8.10.0"
@@ -10,18 +10,20 @@
 	"typings": "index.d.ts",
 	"repository": {
 		"type": "git",
-		"url": "git@github.com:Mayhem93/telepat-models.git"
+		"url": "git@github.com:Mayhem93/nexxus-lib.git"
 	},
 	"scripts": {
-		"test": "istanbul cover ./node_modules/.bin/mocha -- ./test/telepatLib.js -R spec -s 1000"
+		"test": "istanbul cover ./node_modules/.bin/mocha -- ./test/nexxusLib.js -R spec -s 1000"
 	},
 	"keywords": [
-		"telepat",
-		"api",
-		"models"
+		"nexxus",
+		"library",
+		"realtime",
+		"backend",
+		"server"
 	],
 	"bugs": {
-		"url": "https://github.com/Mayhem93/telepat-models/issues"
+		"url": "https://github.com/Mayhem93/nexxus-lib/issues"
 	},
 	"author": {
 		"name": "Răzvan Botea",
@@ -31,14 +33,18 @@
 		{
 			"name": "Răzvan Botea",
 			"email": "utherr.ghujax@gmail.com"
+		},
+		{
+			"name": "Andrei Marinescu",
+			"email": "andrei@appscend.com"
+		},
+		{
+			"name": "Gabi Dobocan",
+			"email": "gabi@appscend.com"
 		}
 	],
 	"license": "Apache-2.0",
 	"dependencies": {
-		"@types/amqplib": "^0.5.7",
-		"@types/async": "^2.0.49",
-		"@types/elasticsearch": "^5.0.24",
-		"@types/redis": "^2.8.6",
 		"agentkeepalive": "3.4.1",
 		"amqplib": "0.5.2",
 		"async": "2.6.0",
@@ -61,16 +67,20 @@
 		"winston-syslog": "2.0.0"
 	},
 	"devDependencies": {
+		"@types/amqplib": "^0.5.7",
+		"@types/async": "^2.0.49",
+		"@types/elasticsearch": "^5.0.24",
 		"@types/node": "^10.1.4",
-		"chai": "chaijs/chai#master",
+		"@types/redis": "^2.8.6",
 		"chai-things": "chaijs/chai-things#master",
-		"eslint": "4.19.1",
+		"chai": "chaijs/chai#master",
 		"eslint-config-standard": "11.0.0",
 		"eslint-plugin-import": "2.11.0",
 		"eslint-plugin-mocha": "5.0.0",
 		"eslint-plugin-node": "6.0.1",
 		"eslint-plugin-promise": "3.7.0",
 		"eslint-plugin-standard": "3.1.0",
+		"eslint": "4.19.1",
 		"istanbul": "0.4.5",
 		"mocha": "5.1.1",
 		"sinon": "5.0.7"

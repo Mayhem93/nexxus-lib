@@ -8,8 +8,8 @@ chai.use(require('chai-things'));
 
 const sinon = require('sinon');
 const EsAdapter = require('../../../lib/database/adapters/elasticsearch_adapter');
-const TelepatError = require('../../../lib/TelepatError');
-const TelepatLogger = require('../../../lib/logger/logger');
+const NexxusError = require('../../../lib/NexxusError');
+const NexxusLogger = require('../../../lib/logger/logger');
 
 module.exports = function Constructor () {
 	describe('ElasticSearchDB.constructor', () => {
@@ -17,14 +17,14 @@ module.exports = function Constructor () {
 			try {
 				EsAdapter();
 			} catch (e) {
-				expect(e).to.be.instanceof(TelepatError);
+				expect(e).to.be.instanceof(NexxusError);
 				expect(e.code).to.equal('002');
 			}
 
 			try {
 				EsAdapter({});
 			} catch (e) {
-				expect(e).to.be.instanceof(TelepatError);
+				expect(e).to.be.instanceof(NexxusError);
 				expect(e.code).to.equal('002');
 			}
 
@@ -33,7 +33,7 @@ module.exports = function Constructor () {
 
 		it('Should connect to a real server with the correct configuration param ', done => {
 			const esConfig = clone(common.config.ElasticSearch1);
-			const infoLogSpy = sinon.spy(TelepatLogger.prototype, 'info');
+			const infoLogSpy = sinon.spy(NexxusLogger.prototype, 'info');
 			let client;
 
 			try {
@@ -58,8 +58,8 @@ module.exports = function Constructor () {
 			const esConfig = clone(common.config.ElasticSearch1);
 
 			esConfig.host = '127.0.0.2:9200';
-			const infoLogSpy = sinon.spy(TelepatLogger.prototype, 'info');
-			const errorLogSpy = sinon.spy(TelepatLogger.prototype, 'error');
+			const infoLogSpy = sinon.spy(NexxusLogger.prototype, 'info');
+			const errorLogSpy = sinon.spy(NexxusLogger.prototype, 'error');
 			let client;
 
 			try {
@@ -84,7 +84,7 @@ module.exports = function Constructor () {
 
 		it('Should connect using hosts config parameter', done => {
 			const esConfig = clone(common.config.ElasticSearch2);
-			const infoLogSpy = sinon.spy(TelepatLogger.prototype, 'info');
+			const infoLogSpy = sinon.spy(NexxusLogger.prototype, 'info');
 			let client;
 
 			try {

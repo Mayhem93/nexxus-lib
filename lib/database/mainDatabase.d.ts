@@ -1,7 +1,7 @@
 import {EventEmitter} from 'events';
 import {FilterBuilder} from '../../utils/filterbuilder';
-import {TelepatError} from '../TelepatError';
-import {TelepatPromise} from '../../global';
+import NexxusError = require('../NexxusError');
+import {NexxusPromise} from '../../global';
 
 declare const enum SortType {
 	'geo' = 'geo'
@@ -32,7 +32,7 @@ interface DatabaseSearchOptions {
 	offset?: Number,
 	limit?: Number,
 	fields?: Array<string>,
-	scanFunction?: (objects: Array<object>) => TelepatPromise<null>
+	scanFunction?: (objects: Array<object>) => NexxusPromise<null>
 }
 
 declare const enum AggregationType {
@@ -54,7 +54,7 @@ interface DatabaseDeleteObjectsInput {
 }
 
 interface GetObjectsResultInterface {
-	errors: Array<TelepatError>
+	errors: Array<NexxusError>
 	results: Array<object>
 	versions?: Array<Number>
 }
@@ -68,31 +68,31 @@ interface CountObjectsResultInterface {
 }
 
 interface CreateObjectsResultInterface {
-	errors: Array<TelepatError>
+	errors: Array<NexxusError>
 }
 
 interface UpdateObjectsResultsInterface {
-	errors: Array<TelepatError>
+	errors: Array<NexxusError>
 	results: Array<object>
 }
 
 interface DeleteObjectsResultInterface {
-	errors: Array<TelepatError>
+	errors: Array<NexxusError>
 	results: Array<string>
 }
 
 export abstract class MainDatabase extends EventEmitter {
 	constructor(connection: any);
 
-	abstract getObjects(ids: Array<string>): TelepatPromise<GetObjectsResultInterface>;
+	abstract getObjects(ids: Array<string>): NexxusPromise<GetObjectsResultInterface>;
 
-	abstract searchObjects(options: DatabaseSearchOptions): TelepatPromise<SearchObjectsResultInterface>;
+	abstract searchObjects(options: DatabaseSearchOptions): NexxusPromise<SearchObjectsResultInterface>;
 
-	abstract countObjects(options: DatabaseCountOptions): TelepatPromise<CountObjectsResultInterface>;
+	abstract countObjects(options: DatabaseCountOptions): NexxusPromise<CountObjectsResultInterface>;
 
-	abstract createObjects(objects: Array<object>): TelepatPromise<CreateObjectsResultInterface>;
+	abstract createObjects(objects: Array<object>): NexxusPromise<CreateObjectsResultInterface>;
 
-	abstract updateObjects(patches: Array<object>): TelepatPromise<UpdateObjectsResultsInterface>;
+	abstract updateObjects(patches: Array<object>): NexxusPromise<UpdateObjectsResultsInterface>;
 
-	abstract deleteObjects(objects: DatabaseDeleteObjectsInput): TelepatPromise<DeleteObjectsResultInterface>;
+	abstract deleteObjects(objects: DatabaseDeleteObjectsInput): NexxusPromise<DeleteObjectsResultInterface>;
 }

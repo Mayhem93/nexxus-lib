@@ -1,9 +1,9 @@
-const TelepatError = require('../lib/TelepatError');
+const NexxusError = require('../lib/NexxusError');
 
 class BuilderNode {
 	constructor (name) {
 		if (!BuilderNode.CONNECTORS.includes(name)) {
-			throw new TelepatError(TelepatError.errors.QueryError, [`unsupported query connector "${name}"`]);
+			throw new NexxusError(NexxusError.errors.QueryError, [`unsupported query connector "${name}"`]);
 		}
 
 		this.parent = null;
@@ -18,15 +18,15 @@ class BuilderNode {
 	addFilter (name, value) {
 		if (BuilderNode.FILTERS.indexOf(name) !== -1) {
 			if (value === undefined) {
-				throw new TelepatError(TelepatError.errors.QueryError, ['filter value is undefined']);
+				throw new NexxusError(NexxusError.errors.QueryError, ['filter value is undefined']);
 			}
 
 			if (name === 'exists' && typeof value !== 'string') {
-				throw new TelepatError(TelepatError.errors.QueryError, ['filter value for "exists" must be a string']);
+				throw new NexxusError(NexxusError.errors.QueryError, ['filter value for "exists" must be a string']);
 			}
 
 			if (['is', 'not', 'range', 'in_array', 'like'].indexOf(name) !== -1 && typeof value !== 'object') {
-				throw new TelepatError(TelepatError.errors.QueryError, [`filter value for "${name}" must be an object`]);
+				throw new NexxusError(NexxusError.errors.QueryError, [`filter value for "${name}" must be an object`]);
 			}
 
 			const filter = {};
@@ -34,7 +34,7 @@ class BuilderNode {
 			filter[name] = value;
 			this.children.push(filter);
 		} else {
-			throw new TelepatError(TelepatError.errors.QueryError, [`invalid filter "${name}"`]);
+			throw new NexxusError(NexxusError.errors.QueryError, [`invalid filter "${name}"`]);
 		}
 	}
 
@@ -44,7 +44,7 @@ class BuilderNode {
 	 */
 	addNode (node) {
 		if (!(node instanceof BuilderNode)) {
-			throw new TelepatError(TelepatError.errors.ServerFailure,
+			throw new NexxusError(NexxusError.errors.ServerFailure,
 				['BuilderNode.addNode: argument must be instanceof BuilderNode']);
 		}
 
@@ -58,7 +58,7 @@ class BuilderNode {
 	 */
 	removeNode (node) {
 		if (!(node instanceof BuilderNode)) {
-			throw new TelepatError(TelepatError.errors.ServerFailure,
+			throw new NexxusError(NexxusError.errors.ServerFailure,
 				['BuilderNode.addNode: argument must be instanceof BuilderNode']);
 		}
 
@@ -179,7 +179,7 @@ class FilterBuilder {
 
 	build () {
 		if (this.isEmpty()) {
-			throw new TelepatError(TelepatError.errors.QueryError,
+			throw new NexxusError(NexxusError.errors.QueryError,
 				[`cannot build query with empty filter (${JSON.stringify(this.root.toObject())})`]);
 		}
 

@@ -23,7 +23,7 @@
     },
     "amqp": {
         "host": "localhost",
-        "user": "telepat",
+        "user": "nexxus",
         "password": "password"
     }
 }

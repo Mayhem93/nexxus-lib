@@ -1,8 +1,8 @@
-# Telepat Models Library
+# Nexxus Library
 
-This package is used by the [Telepat API](https://github.com/telepat-io/telepat-api) and the [Telepat Worker](https://github.com/telepat-io/telepat-worker).
+This package is used by the [Nexxus API](https://github.com/Mayhem93/nexxus-api) and the [Nexxus Worker](https://github.com/Mayhem93/nexxus-worker).
 
-This package contains the libraries for using various telepat resources:
+This package contains the libraries for using various Nexxus resources:
 
 * Databases:
   * At the moment only elasticSearch support is implemented (version 1.7.x). Configuration variables:
@@ -21,7 +21,7 @@ This package contains the libraries for using various telepat resources:
       * `TP_KFK_PORT`: Kafka (zooekeeper) server port
   * AMQP: we've tested it with RabbitMQ 3.5.5
     * `TP_AMQP_HOST`: AMQP server host
-    * `TP_AMQP_USER`: AMQP user used by Telepat
+    * `TP_AMQP_USER`: AMQP user used by the Nexxus nodes
     * `TP_AMQP_PASSWORD`: The password for the user
 
 * Loggers:

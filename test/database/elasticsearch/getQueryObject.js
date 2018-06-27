@@ -7,7 +7,7 @@ chai.should();
 chai.use(require('chai-things'));
 
 var sinon = require('sinon');
-var TelepatError = require('../../../lib/TelepatError');
+var NexxusError = require('../../../lib/NexxusError');
 var FilterBuilder = require('../../../utils/filterbuilder').FilterBuilder;
 
 module.exports = function getQueryObject() {
@@ -17,7 +17,7 @@ module.exports = function getQueryObject() {
 				var ret = esAdapterConnection.getQueryObject(undefined);
 				assert.fail(ret, undefined, 'method should throw error');
 			} catch(e) {
-				expect(e).to.be.instanceof(TelepatError);
+				expect(e).to.be.instanceof(NexxusError);
 				expect(e).to.have.property('code', '002');
 				done();
 			}

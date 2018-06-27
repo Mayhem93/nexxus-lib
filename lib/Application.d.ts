@@ -1,0 +1,2 @@
+import NexxusError = require('./NexxusError');
+

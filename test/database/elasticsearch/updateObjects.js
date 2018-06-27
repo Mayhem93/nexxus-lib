@@ -11,8 +11,8 @@ var async = require('async');
 var es = require('elasticsearch');
 var guid = require('uuid');
 var esAdapter = require('../../../lib/database/adapters/elasticsearch_adapter');
-var TelepatError = require('../../../lib/TelepatError');
-var TelepatLogger = require('../../../lib/logger/logger');
+var NexxusError = require('../../../lib/NexxusError');
+var NexxusLogger = require('../../../lib/logger/logger');
 
 module.exports = function UpdateObjects() {
 	describe('ElasticSearchDB.updateObjects', function() {
@@ -25,8 +25,8 @@ module.exports = function UpdateObjects() {
 				function(cb) {
 					esAdapterConnection.updateObjects(undefined, function(errs, res) {
 						expect(errs).to.have.length(1);
-						expect(errs[0]).to.be.instanceof(TelepatError);
-						expect(errs[0]).to.have.property('code', TelepatError.errors.InvalidFieldValue.code);
+						expect(errs[0]).to.be.instanceof(NexxusError);
+						expect(errs[0]).to.have.property('code', NexxusError.errors.InvalidFieldValue.code);
 						expect(res).to.be.empty;
 
 						cb();
@@ -42,8 +42,8 @@ module.exports = function UpdateObjects() {
 				function(cb) {
 					esAdapterConnection.updateObjects([], function(errs, res) {
 						expect(errs).to.have.length(1);
-						expect(errs[0]).to.be.instanceof(TelepatError);
-						expect(errs[0]).to.have.property('code', TelepatError.errors.InvalidFieldValue.code);
+						expect(errs[0]).to.be.instanceof(NexxusError);
+						expect(errs[0]).to.have.property('code', NexxusError.errors.InvalidFieldValue.code);
 						expect(res).to.be.empty;
 
 						cb();
@@ -59,8 +59,8 @@ module.exports = function UpdateObjects() {
 				function(cb) {
 					esAdapterConnection.updateObjects([{}], function(errs, res) {
 						expect(errs).to.have.length(1);
-						expect(errs[0]).to.be.instanceof(TelepatError);
-						expect(errs[0]).to.have.property('code', TelepatError.errors.InvalidPatch.code);
+						expect(errs[0]).to.be.instanceof(NexxusError);
+						expect(errs[0]).to.have.property('code', NexxusError.errors.InvalidPatch.code);
 						expect(res).to.be.empty;
 
 						cb();
@@ -76,8 +76,8 @@ module.exports = function UpdateObjects() {
 				function(cb) {
 					esAdapterConnection.updateObjects([{op: 'replace', value: 0}], function(errs, res) {
 						expect(errs).to.have.length(1);
-						expect(errs[0]).to.be.instanceof(TelepatError);
-						expect(errs[0]).to.have.property('code', TelepatError.errors.InvalidPatch.code);
+						expect(errs[0]).to.be.instanceof(NexxusError);
+						expect(errs[0]).to.have.property('code', NexxusError.errors.InvalidPatch.code);
 						expect(res).to.be.empty;
 
 						cb();
@@ -93,8 +93,8 @@ module.exports = function UpdateObjects() {
 				function(cb) {
 					esAdapterConnection.updateObjects([{op: 'replace', path: 'test', value: 0}], function(errs, res) {
 						expect(errs).to.have.length(1);
-						expect(errs[0]).to.be.instanceof(TelepatError);
-						expect(errs[0]).to.have.property('code', TelepatError.errors.InvalidPatch.code);
+						expect(errs[0]).to.be.instanceof(NexxusError);
+						expect(errs[0]).to.have.property('code', NexxusError.errors.InvalidPatch.code);
 						expect(res).to.be.empty;
 
 						cb();
@@ -110,7 +110,7 @@ module.exports = function UpdateObjects() {
 				function(cb) {
 					esAdapterConnection.updateObjects([{op: 'replace', path: 'test/41312/value', value: 'some modified string'}], function(errs, res) {
 						expect(errs).to.have.lengthOf(1);
-						expect(errs[0]).to.have.property('code', TelepatError.errors.ObjectNotFound.code);
+						expect(errs[0]).to.have.property('code', NexxusError.errors.ObjectNotFound.code);
 						expect(res).to.be.empty;
 						cb();
 					});

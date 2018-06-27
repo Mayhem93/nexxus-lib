@@ -1,7 +1,7 @@
 const chai = require('chai');
 const expect = chai.expect;
-const TelepatLib = require('../index');
-const TelepatError = require('../lib/TelepatError');
+const NexxusLib = require('../index');
+const NexxusError = require('../lib/NexxusError');
 const promisify = require('util').promisify;
 const fs = require('fs');
 const writeFile = promisify(fs.writeFile);
@@ -27,7 +27,7 @@ describe('index.init', () => {
 
 	it('Sould fail because mainDatabase was not found due to badly configured config file and spec file', async () => {
 		try {
-			await TelepatLib.init({
+			await NexxusLib.init({
 				configFileSpec: CONFIG_FILE_SPEC,
 				configFile: CONFIG_FILE,
 				nodeIndex: 0,
@@ -36,7 +36,7 @@ describe('index.init', () => {
 
 			return new Error('Should throw error');
 		} catch (e) {
-			expect(e).to.be.instanceOf(TelepatError, e.stack);
+			expect(e).to.be.instanceOf(NexxusError, e.stack);
 			expect(e.code).to.be.eq('ServerFailure', e.stack);
 		}
 
@@ -55,7 +55,7 @@ describe('index.init', () => {
 		await writeFile(CONFIG_FILE, JSON.stringify(config, null, 4));
 		await writeFile(CONFIG_FILE_SPEC, JSON.stringify(configSpec, null, 4));
 
-		await TelepatLib.init({
+		await NexxusLib.init({
 			configFileSpec: CONFIG_FILE_SPEC,
 			configFile: CONFIG_FILE,
 			nodeIndex: 0,

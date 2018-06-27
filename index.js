@@ -4,11 +4,11 @@ const path = require('path');
 const Application = require('./lib/Application');
 const ConfigurationManager = require('./lib/ConfigurationManager');
 const Datasource = require('./lib/database/datasource');
-const TelepatLogger = require('./lib/logger/logger');
+const NexxusLogger = require('./lib/logger/logger');
 const SystemMessageProcessor = require('./lib/systemMessage');
 const Admin = require('./lib/Admin');
 const Context = require('./lib/Context');
-const TelepatError = require('./lib/TelepatError');
+const NexxusError = require('./lib/NexxusLogger');
 const User = require('./lib/User');
 const Delta = require('./lib/Delta');
 const Channel = require('./lib/Channel');
@@ -46,12 +46,12 @@ const init = async serviceOptions => {
 	configManager.test();
 	config = configManager.config;
 
-	Services.logger = new TelepatLogger(Object.assign(config.logger, { serviceName }));
+	Services.logger = new NexxusLogger(Object.assign(config.logger, { serviceName }));
 
 	let mainDatabase = config.main_database;
 
 	if (!acceptedServices[mainDatabase]) {
-		throw new TelepatError(TelepatError.errors.ServerFailure, `Unable to load "${mainDatabase}" main database: not found. Aborting...`);
+		throw new NexxusError(NexxusError.errors.ServerFailure, `Unable to load "${mainDatabase}" main database: not found. Aborting...`);
 	}
 
 	Services.datasource = new Datasource();
@@ -93,18 +93,18 @@ const init = async serviceOptions => {
 
 	let redisCacheConf = config.redisCache;
 
-	Services.redisCacheClient = Redis.createClient({
+	Services.redisClient = Redis.createClient({
 		port: redisCacheConf.port,
 		host: redisCacheConf.host,
 		retry_strategy: retryStrategy
 	});
 
-	Services.redisCacheClient.on('error', err => {
+	Services.redisClient.on('error', err => {
 		Services.logger.error(`Failed connecting to Redis Cache "${redisCacheConf.host}": ${err.message}. Retrying...`);
 	});
 
 	await (new Promise(resolve => {
-		Services.redisCacheClient.on('ready', () => {
+		Services.redisClient.on('ready', () => {
 			Services.logger.info('Client connected to Redis.');
 			resolve();
 		});
@@ -113,7 +113,7 @@ const init = async serviceOptions => {
 	let messagingClient = config.message_queue;
 
 	if (!acceptedServices[messagingClient]) {
-		throw new TelepatError(TelepatError.errors.ServerFailure, `Unable to load "${messagingClient}" messaging queue: not found. Aborting...`);
+		throw new NexxusError(NexxusError.errors.ServerFailure, `Unable to load "${messagingClient}" messaging queue: not found. Aborting...`);
 	}
 
 	let clientConfiguration = Object.assign(config[messagingClient], {
@@ -151,7 +151,7 @@ module.exports = {
 	messagingClient: Services.messagingClient,
 	Application,
 	Admin,
-	TelepatError,
+	NexxusError,
 	User,
 	Context,
 	Subscription,

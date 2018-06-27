@@ -1,6 +1,6 @@
 var builderNode = require('../../utils/filterbuilder').BuilderNode;
 var FilterBuilder = require('../../utils/filterbuilder').FilterBuilder;
-var TelepatError = require('../../lib/TelepatError');
+var NexxusError = require('../../lib/NexxusError');
 var chai = require('chai');
 var expect = chai.expect;
 var assert = chai.assert;
@@ -14,9 +14,9 @@ module.exports = function() {
 		it('Should throw an error because connector is not valid', function(done) {
 			try {
 				var bn = new builderNode('wtf');
-				assert.fail(undefined, TelepatError, 'Expected builderNode constructor to throw error');
+				assert.fail(undefined, NexxusError, 'Expected builderNode constructor to throw error');
 			} catch (e) {
-				if (e instanceof TelepatError) {
+				if (e instanceof NexxusError) {
 						expect(e).to.have.property('code', '048');
 				} else {
 					throw e;
@@ -24,9 +24,9 @@ module.exports = function() {
 
 				try {
 					var bn1 = new builderNode();
-					assert.fail(undefined, TelepatError, 'Expected builderNode constructor to throw error');
+					assert.fail(undefined, NexxusError, 'Expected builderNode constructor to throw error');
 				} catch (e1) {
-					if (e1 instanceof TelepatError) {
+					if (e1 instanceof NexxusError) {
 						expect(e1).to.have.property('code', '048');
 					} else {
 						throw e;
@@ -49,7 +49,7 @@ module.exports = function() {
 				expect(bn2).to.have.property('name', 'or');
 				expect(bn2.children).to.have.length(0);
 			} catch (e) {
-				if (e instanceof TelepatError){
+				if (e instanceof NexxusError){
 					assert.fail(e, undefined, 'Expected builderNode constructor to not throw error: ' + e);
 				} else {
 					throw e;
@@ -63,17 +63,17 @@ module.exports = function() {
 			try {
 				var bn1 = new builderNode('and');
 				bn1.addFilter('qwop');
-				assert.fail(undefined, TelepatError, 'Expected buildNode.addFilter to throw error');
+				assert.fail(undefined, NexxusError, 'Expected buildNode.addFilter to throw error');
 			} catch (e) {
-				expect(e).to.be.instanceof(TelepatError);
+				expect(e).to.be.instanceof(NexxusError);
 				expect(e).to.have.property('code', '048');
 
 				try {
 					bn1 = new builderNode('and');
 					bn1.addFilter('is');
-					assert.fail(undefined, TelepatError, 'Expected buildNode.addFilter to throw error');
+					assert.fail(undefined, NexxusError, 'Expected buildNode.addFilter to throw error');
 				} catch (e1) {
-					expect(e1).to.be.instanceof(TelepatError);
+					expect(e1).to.be.instanceof(NexxusError);
 					expect(e1).to.have.property('code', '048');
 				}
 
@@ -86,17 +86,17 @@ module.exports = function() {
 			try {
 				var bn1 = new builderNode('and');
 				bn1.addFilter('is', 'string wut');
-				assert.fail(undefined, TelepatError, 'Expected buildNode.addFilter to throw error');
+				assert.fail(undefined, NexxusError, 'Expected buildNode.addFilter to throw error');
 			} catch (e) {
-				expect(e).to.be.instanceof(TelepatError);
+				expect(e).to.be.instanceof(NexxusError);
 				expect(e).to.have.property('code', '048');
 
 				try {
 					bn1 = new builderNode('and');
 					bn1.addFilter('range', 'wut');
-					assert.fail(undefined, TelepatError, 'Expected buildNode.addFilter to throw error');
+					assert.fail(undefined, NexxusError, 'Expected buildNode.addFilter to throw error');
 				} catch (e1) {
-					expect(e1).to.be.instanceof(TelepatError);
+					expect(e1).to.be.instanceof(NexxusError);
 					expect(e1).to.have.property('code', '048');
 				}
 
@@ -137,7 +137,7 @@ module.exports = function() {
 				expect(bn1.children).to.deep.equal(filters);
 
 			} catch (e) {
-				if (e instanceof TelepatError){
+				if (e instanceof NexxusError){
 					assert.fail(e, undefined, 'Expected builderNode.addFilter to not throw error: ' + e);
 				} else {
 					throw e;
@@ -151,9 +151,9 @@ module.exports = function() {
 			try {
 				var bn1 = new builderNode('and');
 				bn1.addNode('string');
-				assert.fail(undefined, TelepatError, 'Expected builderNode.addNode to throw error');
+				assert.fail(undefined, NexxusError, 'Expected builderNode.addNode to throw error');
 			} catch (e) {
-				expect(e).to.be.instanceof(TelepatError);
+				expect(e).to.be.instanceof(NexxusError);
 				expect(e).to.have.property('code', '002');
 			}
 
@@ -171,7 +171,7 @@ module.exports = function() {
 				expect(bn2.parent).to.be.instanceof(builderNode);
 				expect(bn2.parent).to.have.property('name', 'and');
 			} catch (e) {
-				if (e instanceof TelepatError){
+				if (e instanceof NexxusError){
 					assert.fail(e, undefined, 'Expected builderNode constructor to not throw error: ' + e);
 				} else {
 					throw e;
@@ -185,9 +185,9 @@ module.exports = function() {
 			try {
 				var bn1 = new builderNode('and');
 				bn1.removeNode('string');
-				assert.fail(undefined, TelepatError, 'Expected builderNode.addNode to throw error');
+				assert.fail(undefined, NexxusError, 'Expected builderNode.addNode to throw error');
 			} catch (e) {
-				expect(e).to.be.instanceof(TelepatError);
+				expect(e).to.be.instanceof(NexxusError);
 				expect(e).to.have.property('code', '002');
 			}
 
@@ -208,7 +208,7 @@ module.exports = function() {
 				expect(result).to.be.instanceof(builderNode);
 				expect(result).to.have.property('name', 'or');
 			} catch (e) {
-				if (e instanceof TelepatError){
+				if (e instanceof NexxusError){
 					assert.fail(e, undefined, 'Expected builderNode.removeNode to not throw error: ' + e);
 				} else {
 					throw e;
@@ -346,7 +346,7 @@ module.exports = function() {
 				);
 
 			} catch (e) {
-				if (e instanceof TelepatError){
+				if (e instanceof NexxusError){
 					assert.fail(e, undefined, 'Expected builderNode.toObject to not throw error: ' + e);
 				} else {
 					throw e;
@@ -485,7 +485,7 @@ module.exports = function() {
 				var ret = fb.build();
 				assert.fail(ret, undefined, 'FilterBuilder.build should throw error');
 			} catch (e) {
-				expect(e).to.be.instanceof(TelepatError);
+				expect(e).to.be.instanceof(NexxusError);
 				expect(e).to.have.property('code', '048');
 				done();
 			}

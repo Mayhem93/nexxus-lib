@@ -10,8 +10,8 @@ var async = require('async');
 var es = require('elasticsearch');
 var guid = require('uuid');
 var esAdapter = require('../../../lib/database/adapters/elasticsearch_adapter');
-var TelepatError = require('../../../lib/TelepatError');
-var TelepatLogger = require('../../../lib/logger/logger');
+var NexxusError = require('../../../lib/NexxusError');
+var NexxusLogger = require('../../../lib/logger/logger');
 
 module.exports = function GetObjects() {
 	describe('ElasticSearchDB.getObjects', function() {
@@ -22,8 +22,8 @@ module.exports = function GetObjects() {
 				function(cb) {
 					esAdapterConnection.getObjects(undefined, function(errs, results, versions) {
 						expect(errs).to.have.lengthOf(1);
-						expect(errs[0]).to.be.instanceof(TelepatError);
-						expect(errs[0]).to.have.property('code', TelepatError.errors.InvalidFieldValue.code);
+						expect(errs[0]).to.be.instanceof(NexxusError);
+						expect(errs[0]).to.have.property('code', NexxusError.errors.InvalidFieldValue.code);
 						expect(results).to.be.empty;
 						expect(versions).to.be.empty;
 						cb();
@@ -39,8 +39,8 @@ module.exports = function GetObjects() {
 				function(cb) {
 					esAdapterConnection.getObjects([], function(errs, results, versions) {
 						expect(errs).to.have.lengthOf(1);
-						expect(errs[0]).to.be.instanceof(TelepatError);
-						expect(errs[0]).to.have.property('code', TelepatError.errors.InvalidFieldValue.code);
+						expect(errs[0]).to.be.instanceof(NexxusError);
+						expect(errs[0]).to.have.property('code', NexxusError.errors.InvalidFieldValue.code);
 						expect(results).to.be.empty;
 						expect(versions).to.be.empty;
 						cb();
@@ -98,7 +98,7 @@ module.exports = function GetObjects() {
 				function(cb) {
 					esAdapterConnection.getObjects([someId], function(errs, results, versions) {
 						expect(errs).to.have.lengthOf(1);
-						expect(errs[0]).to.have.property('code', TelepatError.errors.ObjectNotFound.code)
+						expect(errs[0]).to.have.property('code', NexxusError.errors.ObjectNotFound.code)
 						expect(results).to.be.empty;
 						expect(Object.keys(versions)).to.be.empty;
 						cb();

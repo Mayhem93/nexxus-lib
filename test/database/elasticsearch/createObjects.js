@@ -7,8 +7,8 @@ const sinon = require('sinon');
 const async = require('async');
 const guid = require('uuid');
 const EsAdapter = require('../../../lib/database/adapters/elasticsearch_adapter');
-const TelepatError = require('../../../lib/TelepatError');
-const TelepatLogger = require('../../../lib/logger/logger');
+const NexxusError = require('../../../lib/NexxusError');
+const NexxusLogger = require('../../../lib/logger/logger');
 
 module.exports = () => {
 	describe('ElasticSearchDB.createObjects', function() {
@@ -19,8 +19,8 @@ module.exports = () => {
 				function(cb) {
 					esAdapterConnection.createObjects(undefined, function(errs, results) {
 						expect(errs).to.have.lengthOf(1);
-						expect(errs[0]).to.be.instanceof(TelepatError);
-						expect(errs[0]).to.have.property('code', TelepatError.errors.InvalidFieldValue.code);
+						expect(errs[0]).to.be.instanceof(NexxusError);
+						expect(errs[0]).to.have.property('code', NexxusError.errors.InvalidFieldValue.code);
 						expect(results).to.be.empty;
 						cb();
 					});
@@ -35,8 +35,8 @@ module.exports = () => {
 				function(cb) {
 					esAdapterConnection.createObjects(undefined, function(errs, results) {
 						expect(errs).to.have.lengthOf(1);
-						expect(errs[0]).to.be.instanceof(TelepatError);
-						expect(errs[0]).to.have.property('code', TelepatError.errors.InvalidFieldValue.code);
+						expect(errs[0]).to.be.instanceof(NexxusError);
+						expect(errs[0]).to.have.property('code', NexxusError.errors.InvalidFieldValue.code);
 						expect(results).to.be.empty;
 						cb();
 					});
@@ -53,7 +53,7 @@ module.exports = () => {
 				test: 'some value'
 			};
 
-			var loggerWarning = sinon.spy(TelepatLogger.prototype, 'warning');
+			var loggerWarning = sinon.spy(NexxusLogger.prototype, 'warning');
 
 			async.series([
 				function(cb) {
@@ -171,7 +171,7 @@ module.exports = () => {
 				objects.push({id: i % 25 ? guid.v4() : undefined, type: i % 50 ? 'test' : undefined, value: i*i});
 			}
 
-			var loggerWarning = sinon.spy(TelepatLogger.prototype, 'warning');
+			var loggerWarning = sinon.spy(NexxusLogger.prototype, 'warning');
 
 			async.series([
 				function(cb) {
@@ -348,7 +348,7 @@ module.exports = () => {
 				float: 'this should a float, not a string'
 			};
 
-			var errorLog = sinon.spy(TelepatLogger.prototype, 'error');
+			var errorLog = sinon.spy(NexxusLogger.prototype, 'error');
 
 			async.series([
 				function(cb) {

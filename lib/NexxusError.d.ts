@@ -49,12 +49,13 @@ type ERRORS = 'ServerNotAvailable' |
 	'TilNotFound' |
 	'DeviceInvalid' |
 	'ServerConfigurationFailure' |
-	'ErrorCollection';
+	'ErrorCollection' |
+	'InvalidApplicationSchema';
 
-export declare class TelepatError extends Error {
+declare class NexxusError extends Error {
 	static errors: ERRORS;
 
 	constructor(err: ERRORS, placeholders?: Array<string>);
 }
 
-// export  TelepatError;
+export = NexxusError;

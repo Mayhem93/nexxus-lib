@@ -1,17 +1,30 @@
-import {MainDatabase, DatabaseSearchOptions, DatabaseCountOptions, DatabaseDeleteObjectsInput} from '../mainDatabase';
-import {TelepatPromise} from '../../../global';
-import TelepatError = require('../../TelepatError');
+import {
+	MainDatabase,
+	GetObjectsResultInterface,
+	SearchObjectsResultInterface,
+	CountObjectsResultInterface,
+	CreateObjectsResultInterface,
+	UpdateObjectsResultsInterface,
+	DeleteObjectsResultInterface,
+	DatabaseSearchOptions,
+	DatabaseCountOptions,
+	DatabaseDeleteObjectsInput
+} from '../mainDatabase';
+import {NexxusPromise} from '../../../global';
+import NexxusError = require('../../NexxusError');
 
 export class ElasticSearchDB extends MainDatabase {
 	constructor(config: object)
 
-	getObjects(ids: Array<string>): TelepatPromise<Array<Object>, Array<TelepatError>>;
+	getObjects(ids: Array<string>): NexxusPromise<GetObjectsResultInterface>;
 
-	searchObjects(options: DatabaseSearchOptions): TelepatPromise<Array<Object>, TelepatError>;
+	searchObjects(options: DatabaseSearchOptions): NexxusPromise<SearchObjectsResultInterface>;
 
-	countObjects(options: DatabaseCountOptions): TelepatPromise<object, TelepatError>;
+	countObjects(options: DatabaseCountOptions): NexxusPromise<CountObjectsResultInterface>;
 
-	createObjects(objects: Array<object>): TelepatPromise<Array<object>, Array<TelepatError>>;
+	createObjects(objects: Array<object>): NexxusPromise<CreateObjectsResultInterface>;
 
-	deleteObjects(objects: DatabaseDeleteObjectsInput): TelepatPromise<Array<object>, Array<TelepatError>>;
+	updateObjects(patches: Array<object>): NexxusPromise<UpdateObjectsResultsInterface>;
+
+	deleteObjects(objects: DatabaseDeleteObjectsInput): NexxusPromise<DeleteObjectsResultInterface>;
 }

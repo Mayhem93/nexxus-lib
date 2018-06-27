@@ -10,8 +10,8 @@ var async = require('async');
 var es = require('elasticsearch');
 var guid = require('uuid');
 var esAdapter = require('../../../lib/database/adapters/elasticsearch_adapter');
-var TelepatError = require('../../../lib/TelepatError');
-var TelepatLogger = require('../../../lib/logger/logger');
+var NexxusError = require('../../../lib/NexxusError');
+var NexxusLogger = require('../../../lib/logger/logger');
 
 module.exports = function DeleteObjects() {
 	describe('ElasticSearch.deleteObjects', function() {
@@ -20,7 +20,7 @@ module.exports = function DeleteObjects() {
 		it('Should return errors in the callback because of invalid param', function(done) {
 			esAdapterConnection.deleteObjects(undefined, function(errs) {
 				expect(errs).to.have.length(1);
-				expect(errs[0]).to.be.instanceof(TelepatError);
+				expect(errs[0]).to.be.instanceof(NexxusError);
 				expect(errs[0]).to.have.property('code', '038');
 
 				afterSubTest(done);
@@ -47,7 +47,7 @@ module.exports = function DeleteObjects() {
 		it('Should return object not found error in callback', function(done) {
 			esAdapterConnection.deleteObjects({'2349uh23i': 'some_type'}, function(errs) {
 				expect(errs).to.have.length(1);
-				expect(errs[0]).to.be.instanceof(TelepatError);
+				expect(errs[0]).to.be.instanceof(NexxusError);
 				expect(errs[0]).to.have.property('code', '034');
 
 				afterSubTest(done);
