@@ -4,10 +4,13 @@ import {NexxusApplicationSchema} from './ApplicationSchema';
 import NexxusContext = require('./Context');
 
 interface NexxusApplicationProps extends BaseModelProps {
-	type: 'application'
-	admins: Array<string>
-	keys: Array<string>
-	schema?: NexxusApplicationSchema<object>
+	readonly type: 'application'
+}
+
+interface NexxusApplicationParams {
+	readonly admins?: Array<string>
+	readonly keys?: Array<string>
+	readonly schema?: NexxusApplicationSchema<object>
 	apn_key?: string
 	apn_key_id?: string
 	apn_team_id?: string
@@ -16,9 +19,19 @@ interface NexxusApplicationProps extends BaseModelProps {
 }
 
 declare class NexxusApplication extends BaseModel {
-	properties: NexxusApplicationProps & {type?: ApplicationType}
+	models: object
+	users: object
+	static contexts: NexxusContext
 
-	constructor(props: NexxusApplicationProps)
+	properties: NexxusApplicationProps & NexxusApplicationParams
+	contexts: {
+		create: ReturnType<NexxusContext["create"]>
+		get: ReturnType<NexxusContext["get"]>
+		update: ReturnType<NexxusContext["update"]>
+		delete: ReturnType<NexxusContext["delete"]>
+	}
+
+	constructor(props: NexxusApplicationParams)
 
 	delete(): boolean
 
@@ -34,15 +47,13 @@ declare class NexxusApplication extends BaseModel {
 
 	deleteModel(modelName: string): boolean
 
-	static models: object
-	static users: object
-	static contexts: NexxusContext
-
 	static getAll(): Array<NexxusApplication>
 
-	static new(props: NexxusApplicationProps): NexxusApplication
+	static create(props: NexxusApplicationProps): NexxusApplication
 
-	static isAdmin(admin: {id: string, email: string}): boolean
+	static isAdmin(admin: { id: string, email: string }): boolean
 
 	static isBuiltinModel(modelName: string): boolean
 }
+
+export = NexxusApplication;

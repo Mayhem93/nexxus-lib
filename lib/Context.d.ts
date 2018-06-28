@@ -16,7 +16,7 @@ declare interface NexxusContext extends BaseModel {
 
 	getAll(appId: string): () => Array<INexxusContext>
 
-	new(appId: string): (props: NexxusContextProps) => INexxusContext
+	create(appId: string): (props: NexxusContextProps) => INexxusContext
 
 	delete(): (id: string) => void
 
