@@ -8,5 +8,7 @@ interface BaseModelProps {
 }
 
 export declare class BaseModel {
+	public properties: BaseModelProps
+
 	constructor(props: BaseModelProps, moreImmutableProperties: Array<string>);
 }
