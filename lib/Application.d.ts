@@ -23,7 +23,7 @@ declare class NexxusApp extends BaseModel {
 	users: object
 	static contexts: NexxusContext
 
-	properties: NexxusApplicationProps & NexxusApplicationParams
+	public properties: NexxusApplicationProps & NexxusApplicationParams
 	contexts: {
 		create: ReturnType<NexxusContext["create"]>
 		get: ReturnType<NexxusContext["get"]>
@@ -31,7 +31,7 @@ declare class NexxusApp extends BaseModel {
 		delete: ReturnType<NexxusContext["delete"]>
 	}
 
-	constructor(props: NexxusApplicationParams)
+	constructor(props: BaseModelProps & NexxusApplicationParams)
 
 	delete(): boolean
 
