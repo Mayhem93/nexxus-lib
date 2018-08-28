@@ -55,7 +55,7 @@ type ERRORS = 'ServerNotAvailable' |
 declare class NexxusError extends Error {
 	static errors: ERRORS;
 
-	constructor(err: ERRORS, placeholders?: Array<string>);
+	constructor(err: ERRORS, placeholders?: Array<string> | string);
 }
 
 export = NexxusError;

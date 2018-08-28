@@ -41,6 +41,10 @@
 		{
 			"name": "Gabi Dobocan",
 			"email": "gabi@appscend.com"
+		},
+		{
+			"name": "Adelina Enache",
+			"email": "adelina@appscend.com"
 		}
 	],
 	"license": "Apache-2.0",
