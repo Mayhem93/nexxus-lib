@@ -18,7 +18,7 @@ interface NexxusApplicationParams {
 	gcm_api_key?: string
 }
 
-declare class NexxusApplication extends BaseModel {
+declare class NexxusApp extends BaseModel {
 	models: object
 	users: object
 	static contexts: NexxusContext
@@ -47,13 +47,15 @@ declare class NexxusApplication extends BaseModel {
 
 	deleteModel(modelName: string): boolean
 
-	static getAll(): Array<NexxusApplication>
+	static getAll(): Array<NexxusApp>
 
-	static create(props: NexxusApplicationProps): NexxusApplication
+	static create(props: NexxusApplicationProps): NexxusApp
 
 	static isAdmin(admin: { id: string, email: string }): boolean
 
 	static isBuiltinModel(modelName: string): boolean
 }
 
-export = NexxusApplication;
+declare const NexxusApplication: (appId: string) => NexxusApp | NexxusApp
+
+export = NexxusApplication
