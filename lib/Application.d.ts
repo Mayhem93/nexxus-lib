@@ -53,7 +53,9 @@ declare class NexxusApp extends BaseModel {
 
 	static isAdmin(admin: { id: string, email: string }): boolean
 
-	static isBuiltinModel(modelName: string): boolean
+	hasModel(modelName: string): boolean
+
+	hasSchema(): boolean
 }
 
 declare const NexxusApplication: (appId: string) => NexxusApp | NexxusApp
