@@ -3,7 +3,7 @@ import {FilterBuilder} from '../../utils/filterbuilder';
 import NexxusError = require('../NexxusError');
 import {NexxusPromise} from '../../global';
 
-declare namespace MainDatabase {
+declare namespace DBAdapter {
 	const enum SortType {
 		'geo' = 'geo'
 	}
@@ -98,4 +98,4 @@ declare namespace MainDatabase {
 	}
 }
 
-export = MainDatabase
+export = DBAdapter

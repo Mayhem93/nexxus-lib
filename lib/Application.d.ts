@@ -58,6 +58,6 @@ declare class NexxusApp extends BaseModel {
 	hasSchema(): boolean
 }
 
-declare const NexxusApplication: (appId: string) => NexxusApp | NexxusApp
+declare const NexxusApplication: NexxusApp | ((appId: string) => NexxusApp)
 
 export = NexxusApplication

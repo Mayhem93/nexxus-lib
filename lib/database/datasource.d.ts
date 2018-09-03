@@ -1,15 +1,15 @@
-import {MainDatabaseAdapter} from './mainDatabase';
-import {RedisClient} from 'redis';
+import DBAdapter = require('./mainDatabase')
+import {RedisClient} from 'redis'
 
-declare const redisClient: RedisClient;
+declare const redisClient: RedisClient
 
-export declare class Datasource {
-	readonly dataStorage: MainDatabaseAdapter
+declare class Datasource {
+	readonly dataStorage: DBAdapter.Adapter
 	readonly cacheStorage: RedisClient
 
-	constructor();
+	constructor()
 
-	setMainDatabase(database: MainDatabaseAdapter): void;
+	setMainDatabase(database: DBAdapter.Adapter): void
 
-	setCacheStorage(database: RedisClient): void;
+	setCacheStorage(database: RedisClient): void
 }
