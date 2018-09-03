@@ -1,30 +1,24 @@
-import {
-	MainDatabase,
-	GetObjectsResultInterface,
-	SearchObjectsResultInterface,
-	CountObjectsResultInterface,
-	CreateObjectsResultInterface,
-	UpdateObjectsResultsInterface,
-	DeleteObjectsResultInterface,
-	DatabaseSearchOptions,
-	DatabaseCountOptions,
-	DatabaseDeleteObjectsInput
-} from '../mainDatabase';
+import MainDatabase = require('../mainDatabase');
 import {NexxusPromise} from '../../../global';
 import NexxusError = require('../../NexxusError');
+import {Client, ConfigOptions} from 'elasticsearch'
 
-export class ElasticSearchDB extends MainDatabase {
-	constructor(config: object)
+declare class ElasticSearchDB extends MainDatabase.Adapter {
+	private connection: Client
 
-	getObjects(ids: Array<string>): NexxusPromise<GetObjectsResultInterface>;
+	constructor(config: object | ConfigOptions)
 
-	searchObjects(options: DatabaseSearchOptions): NexxusPromise<SearchObjectsResultInterface>;
+	getObjects(applicationId: string, ids: Array<string>): NexxusPromise<MainDatabase.GetObjectsResultInterface>;
 
-	countObjects(options: DatabaseCountOptions): NexxusPromise<CountObjectsResultInterface>;
+	searchObjects(applicationId: string, options: MainDatabase.DatabaseSearchOptions): NexxusPromise<MainDatabase.SearchObjectsResultInterface>;
 
-	createObjects(objects: Array<object>): NexxusPromise<CreateObjectsResultInterface>;
+	countObjects(applicationId: string, options: MainDatabase.DatabaseCountOptions): NexxusPromise<MainDatabase.CountObjectsResultInterface>;
 
-	updateObjects(patches: Array<object>): NexxusPromise<UpdateObjectsResultsInterface>;
+	createObjects(applicationId: string, objects: Array<object>): NexxusPromise<MainDatabase.CreateObjectsResultInterface>;
 
-	deleteObjects(objects: DatabaseDeleteObjectsInput): NexxusPromise<DeleteObjectsResultInterface>;
+	updateObjects(applicationId: string, patches: Array<object>): NexxusPromise<MainDatabase.UpdateObjectsResultsInterface>;
+
+	deleteObjects(applicationId: string, objects: MainDatabase.DatabaseDeleteObjectsInput): NexxusPromise<MainDatabase.DeleteObjectsResultInterface>;
 }
+
+export = ElasticSearchDB
