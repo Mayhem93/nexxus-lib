@@ -18,20 +18,27 @@ interface NexxusApplicationParams {
 	gcm_api_key?: string
 }
 
-declare class NexxusApp extends BaseModel {
+interface NexxusApplicationConstructor extends BaseModel {
+	readonly prototype: NexxusApp
+	new(props: BaseModelProps & NexxusApplicationParams): NexxusApp
+
+	contexts: NexxusContext
 	models: object
 	users: object
-	static contexts: NexxusContext
 
-	public properties: NexxusApplicationProps & NexxusApplicationParams
+	getAll(): Array<NexxusApp>
+	create(props: NexxusApplicationProps & NexxusApplicationParams): NexxusApp
+	isAdmin(admin: { id: string, email: string }): boolean
+}
+
+declare interface NexxusApp extends BaseModel {
+	properties: NexxusApplicationProps & NexxusApplicationParams
 	contexts: {
 		create: ReturnType<NexxusContext["create"]>
 		get: ReturnType<NexxusContext["get"]>
 		update: ReturnType<NexxusContext["update"]>
 		delete: ReturnType<NexxusContext["delete"]>
 	}
-
-	constructor(props: BaseModelProps & NexxusApplicationParams)
 
 	delete(): boolean
 
@@ -47,15 +54,11 @@ declare class NexxusApp extends BaseModel {
 
 	deleteModel(modelName: string): boolean
 
-	static getAll(): Array<NexxusApp>
-
-	static create(props: NexxusApplicationProps & NexxusApplicationParams): NexxusApp
-
-	static isAdmin(admin: { id: string, email: string }): boolean
-
 	hasModel(modelName: string): boolean
 
 	hasSchema(): boolean
 }
 
-export = NexxusApp
+declare const NexxusApplication: NexxusApplicationConstructor
+
+export = NexxusApplication
