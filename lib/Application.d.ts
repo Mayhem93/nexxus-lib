@@ -49,7 +49,7 @@ declare class NexxusApp extends BaseModel {
 
 	static getAll(): Array<NexxusApp>
 
-	static create(props: NexxusApplicationProps): NexxusApp
+	static create(props: NexxusApplicationProps & NexxusApplicationParams): NexxusApp
 
 	static isAdmin(admin: { id: string, email: string }): boolean
 
@@ -58,6 +58,4 @@ declare class NexxusApp extends BaseModel {
 	hasSchema(): boolean
 }
 
-declare const NexxusApplication: NexxusApp | ((appId: string) => NexxusApp)
-
-export = NexxusApplication
+export = NexxusApp
