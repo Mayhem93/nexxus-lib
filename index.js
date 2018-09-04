@@ -1,21 +1,23 @@
 const Redis = require('redis');
 const fs = require('fs');
 const path = require('path');
-const Application = require('./lib/Application');
+const NexxusApplication = require('./lib/Application');
 const ConfigurationManager = require('./lib/ConfigurationManager');
 const Datasource = require('./lib/database/datasource');
 const NexxusLogger = require('./lib/logger/logger');
 const SystemMessageProcessor = require('./lib/systemMessage');
-const Admin = require('./lib/Admin');
-const Context = require('./lib/Context');
+const NexxusAdmin = require('./lib/Admin');
+const NexxusContext = require('./lib/Context');
 const NexxusError = require('./lib/NexxusLogger');
-const User = require('./lib/User');
-const Delta = require('./lib/Delta');
-const Channel = require('./lib/Channel');
-const Subscription = require('./lib/Subscription');
-const Model = require('./lib/Model');
+const NexxusUser = require('./lib/User');
+const NexxusDelta = require('./lib/Delta');
+const NexxusChannel = require('./lib/Channel');
+const NexxusSubscription = require('./lib/Subscription');
+const NexxusModel = require('./lib/Model');
 const FilterBuilder = require('./utils/filterbuilder');
 const Services = require('./lib/Services');
+const NexxusDevice = require('./lib/Device');
+const constants = require('./lib/constants');
 
 let config;
 const acceptedServices = {};
@@ -131,7 +133,7 @@ const init = async serviceOptions => {
 		});
 	}));
 
-	await Application.getAll();
+	await NexxusApplication.getAll();
 };
 
 /* const appsModule = new Proxy(Application, {
@@ -147,17 +149,19 @@ const init = async serviceOptions => {
 module.exports = {
 	init,
 	config,
+	constants,
 	logger: Services.logger,
 	messagingClient: Services.messagingClient,
-	Application,
-	Admin,
+	NexxusApplication,
+	NexxusAdmin,
 	NexxusError,
-	User,
-	Context,
-	Subscription,
-	Model,
-	Delta,
-	Channel,
+	NexxusUser,
+	NexxusContext,
+	NexxusSubscription,
+	NexxusDevice,
+	NexxusModel,
+	NexxusDelta,
+	NexxusChannel,
 	FilterBuilder,
 	SystemMessageProcessor
 };
