@@ -1,5 +1,7 @@
 # Nexxus Library
 
+[![Greenkeeper badge](https://badges.greenkeeper.io/Mayhem93/nexxus-lib.svg)](https://greenkeeper.io/)
+
 This package is used by the [Nexxus API](https://github.com/Mayhem93/nexxus-api) and the [Nexxus Worker](https://github.com/Mayhem93/nexxus-worker).
 
 This package contains the libraries for using various Nexxus resources:
