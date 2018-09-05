@@ -84,17 +84,17 @@ declare namespace DBAdapter {
 	abstract class Adapter extends EventEmitter {
 		constructor(connection: any);
 
-		abstract getObjects(applicationId: string, ids: Array<string>): NexxusPromise<GetObjectsResultInterface>;
+		abstract getObjects(ids: Array<string>): NexxusPromise<GetObjectsResultInterface>;
 
-		abstract searchObjects(applicationId: string, options: DatabaseSearchOptions): NexxusPromise<SearchObjectsResultInterface>;
+		abstract searchObjects(options: DatabaseSearchOptions): NexxusPromise<SearchObjectsResultInterface>;
 
-		abstract countObjects(applicationId: string, options: DatabaseCountOptions): NexxusPromise<CountObjectsResultInterface>;
+		abstract countObjects(options: DatabaseCountOptions): NexxusPromise<CountObjectsResultInterface>;
 
-		abstract createObjects(applicationId: string, objects: Array<object>): NexxusPromise<CreateObjectsResultInterface>;
+		abstract createObjects(objects: Array<object>): NexxusPromise<CreateObjectsResultInterface>;
 
-		abstract updateObjects(applicationId: string, patches: Array<object>): NexxusPromise<UpdateObjectsResultsInterface>;
+		abstract updateObjects(patches: Array<object>): NexxusPromise<UpdateObjectsResultsInterface>;
 
-		abstract deleteObjects(applicationId: string, objects: DatabaseDeleteObjectsInput): NexxusPromise<DeleteObjectsResultInterface>;
+		abstract deleteObjects(objects: DatabaseDeleteObjectsInput): NexxusPromise<DeleteObjectsResultInterface>;
 	}
 }
 

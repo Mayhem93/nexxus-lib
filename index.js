@@ -105,10 +105,10 @@ const init = async serviceOptions => {
 		nodeIndex
 	});
 
-	messagingClient = new acceptedServices[messagingClient](clientConfiguration);
+	Services.messagingClient = new acceptedServices[messagingClient](clientConfiguration);
 
 	await (new Promise(resolve => {
-		messagingClient.on('ready', () => {
+		Services.messagingClient.on('ready', () => {
 			Services.logger.info('Messaging services connected');
 			resolve();
 		});
@@ -121,8 +121,7 @@ module.exports = {
 	init,
 	config,
 	constants,
-	logger: Services.logger,
-	messagingClient: Services.messagingClient,
+	Services,
 	NexxusApplication,
 	NexxusAdmin,
 	NexxusError,
