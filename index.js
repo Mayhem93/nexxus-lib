@@ -8,7 +8,7 @@ const NexxusLogger = require('./lib/logger/logger');
 const SystemMessageProcessor = require('./lib/systemMessage');
 const NexxusAdmin = require('./lib/Admin');
 const NexxusContext = require('./lib/Context');
-const NexxusError = require('./lib/NexxusLogger');
+const NexxusError = require('./lib/NexxusError');
 const NexxusUser = require('./lib/User');
 const NexxusDelta = require('./lib/Delta');
 const NexxusChannel = require('./lib/Channel');
@@ -26,7 +26,7 @@ fs.readdirSync(path.join(__dirname, '/lib/database/adapters')).forEach(filename 
 	let filenameParts = filename.split('_');
 
 	if (filenameParts.pop() === 'adapter.js') {
-		acceptedServices[filenameParts.join('_')] = require(`./lib/database/adapters/${filename}`);
+		acceptedServices[filenameParts[0]] = require(`./lib/database/adapters/${filename}`);
 	}
 });
 
@@ -34,7 +34,7 @@ fs.readdirSync(path.join(__dirname, '/lib/message_queue/adapters')).forEach(file
 	let filenameParts = filename.split('_');
 
 	if (filenameParts.pop() === 'queue.js') {
-		acceptedServices[filenameParts.join('_')] = require(`./lib/message_queue/adapters/${filename}`);
+		acceptedServices[filenameParts[0]] = require(`./lib/message_queue/adapters/${filename}`);
 	}
 });
 
@@ -93,25 +93,6 @@ const init = async serviceOptions => {
 		});
 	}));
 
-	let redisCacheConf = config.redisCache;
-
-	Services.redisClient = Redis.createClient({
-		port: redisCacheConf.port,
-		host: redisCacheConf.host,
-		retry_strategy: retryStrategy
-	});
-
-	Services.redisClient.on('error', err => {
-		Services.logger.error(`Failed connecting to Redis Cache "${redisCacheConf.host}": ${err.message}. Retrying...`);
-	});
-
-	await (new Promise(resolve => {
-		Services.redisClient.on('ready', () => {
-			Services.logger.info('Client connected to Redis.');
-			resolve();
-		});
-	}));
-
 	let messagingClient = config.message_queue;
 
 	if (!acceptedServices[messagingClient]) {
@@ -135,16 +116,6 @@ const init = async serviceOptions => {
 
 	await NexxusApplication.getAll();
 };
-
-/* const appsModule = new Proxy(Application, {
-	get: (object, prop) => {
-		if (object[prop] instanceof Function) {
-			return object[prop];
-		}
-
-		return object.get(prop);
-	}
-}); */
 
 module.exports = {
 	init,
