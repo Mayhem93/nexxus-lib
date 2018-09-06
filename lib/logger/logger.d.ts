@@ -2,8 +2,12 @@ import NexxusError = require('../NexxusError');
 
 type LOG_LEVEL = 'debug' | 'info' | 'notice' | 'warning' | 'error' | 'critical' | 'alert' | 'emergency';
 
-export declare class NexxusLogger {
-	constructor(options?: object);
+declare interface NexxusLoggerConstructor {
+	readonly prototype: NexxusLogger
+	new(options?: object): NexxusLogger
+}
+
+declare class NexxusLogger {
 	private log(level: LOG_LEVEL, message: string | NexxusError)
 	debug(message: string| NexxusError);
 	info(message: string | NexxusError);
@@ -14,3 +18,5 @@ export declare class NexxusLogger {
 	alert(message: string | NexxusError);
 	emergency(message: string | NexxusError);
 }
+
+export = NexxusLoggerConstructor

@@ -1,15 +1,23 @@
 import * as Global from './global';
+import NexxusAdmin = require('./lib/Admin');
+import NexxusApplication = require('./lib/Application')
 import NexxusError = require('./lib/NexxusError');
-import {NexxusLogger} from './lib/logger/logger';
-import {Datasource} from './lib/database/datasource';
-import {MessagingClient} from './lib/message_queue/messaging_client';
+import NexxusUser = require('./lib/User');
+import Datasource = require('./lib/database/datasource');
+import MessagingClient = require('./lib/message_queue/messaging_client');
+import Services = require('./lib/Services');
 
-declare namespace NexxusLib {
-	export function init(serviceOptions: Global.ServiceOptions): Global.NexxusPromise<null>;
-	export const config: object;
-	export const logger: NexxusLogger;
-	export const messagingClient: MessagingClient;
-	export const NexxusError;
+declare interface NexxusLibInterface {
+	init(serviceOptions: Global.ServiceOptions): Global.NexxusPromise<null>
+	config: Global.ServiceOptions
+	constants: Global.constants
+	Services: typeof Services
+	NexxusAdmin: NexxusAdmin
+	NexxusApplication: NexxusApplication & ((id: string) => NexxusApplication)
+	NexxusError: NexxusError
+	NexxusUser: NexxusUser
 }
 
-export = NexxusLib;
+declare const NexxusLib: NexxusLibInterface
+
+export = NexxusLib

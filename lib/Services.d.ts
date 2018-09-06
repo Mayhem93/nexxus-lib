@@ -1,9 +1,13 @@
-import {NexxusLogger} from './logger/logger';
-import {MessagingClient} from './message_queue/messaging_client';
-import {Datasource} from './database/datasource';
-import {RedisClient} from 'redis';
+import NexxusLogger = require('./logger/logger');
+import MessagingClient = require('./message_queue/messaging_client');
+import Datasource = require('./database/datasource');
 
-export const logger: NexxusLogger;
-export const messagingClient: MessagingClient;
-export const datasource: Datasource;
-export const redisClient: RedisClient;
+declare interface Services {
+	logger: InstanceType<NexxusLogger>;
+	messagingClient: InstanceType<MessagingClient>;
+	datasource: InstanceType<Datasource>;
+}
+
+declare const NexxusServices: Services
+
+export = NexxusServices

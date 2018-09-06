@@ -52,10 +52,17 @@ type ERRORS = 'ServerNotAvailable' |
 	'ErrorCollection' |
 	'InvalidApplicationSchema';
 
-declare class NexxusError extends Error {
-	static errors: ERRORS;
-
-	constructor(err: ERRORS, placeholders?: Array<string> | string);
+declare interface NexxusErrorConstructor {
+	readonly prototype: NexxusError
+	new(err: ERRORS, placeholders?: Array<string> | string): NexxusError
+	errors: ERRORS;
 }
 
-export = NexxusError;
+declare interface NexxusError extends Error {
+	name: string,
+	code: string,
+	placeholders: Array<string>
+	message: string
+}
+
+export = NexxusErrorConstructor;

@@ -19,19 +19,19 @@ interface NexxusApplicationParams {
 }
 
 interface NexxusApplicationConstructor extends BaseModel {
-	readonly prototype: NexxusApp
-	new(props: BaseModelProps & NexxusApplicationParams): NexxusApp
+	readonly prototype: NexxusApplication
+	new(props: BaseModelProps & NexxusApplicationParams): NexxusApplication
 
-	contexts: NexxusContext
+	contexts: typeof NexxusContext
 	models: object
 	users: object
 
-	getAll(): Array<NexxusApp>
-	create(props: NexxusApplicationProps & NexxusApplicationParams): NexxusApp
+	getAll(): Array<NexxusApplication>
+	create(props: NexxusApplicationProps & NexxusApplicationParams): NexxusApplication
 	isAdmin(admin: { id: string, email: string }): boolean
 }
 
-declare interface NexxusApp extends BaseModel {
+declare interface NexxusApplication extends BaseModel {
 	properties: NexxusApplicationProps & NexxusApplicationParams
 	contexts: {
 		create: ReturnType<NexxusContext["create"]>
@@ -59,6 +59,6 @@ declare interface NexxusApp extends BaseModel {
 	hasSchema(): boolean
 }
 
-declare const NexxusApplication: NexxusApplicationConstructor
+declare const NexxusApplicationConstructor: NexxusApplicationConstructor & NexxusApplication
 
-export = NexxusApplication
+export = NexxusApplicationConstructor

@@ -5,24 +5,25 @@ interface NexxusContextProps extends BaseModelProps {
 	application_id: string
 }
 
-declare interface INexxusContext extends BaseModel {
-	properties: NexxusContextProps
-
-	constructor(props: NexxusContextProps)
+declare interface NexxusContextConstructor {
+	readonly prototype: NexxusContext
+	new(props: NexxusContextProps): NexxusContext
 }
 
 declare interface NexxusContext extends BaseModel {
-	get(): (id: string) => INexxusContext
+	properties: NexxusContextProps
 
-	getAll(appId: string): () => Array<INexxusContext>
+	get(): (id: string) => NexxusContext
 
-	create(appId: string): (props: NexxusContextProps) => INexxusContext
+	getAll(appId: string): () => Array<NexxusContext>
+
+	create(appId: string): (props: NexxusContextProps) => NexxusContext
 
 	delete(): (id: string) => void
 
 	update(): (patches: string) => void
 }
 
-declare class NexxusContext implements NexxusContext {}
+declare const NexxusContextConstructor: NexxusContextConstructor & NexxusContext
 
-export = NexxusContext;
+export = NexxusContextConstructor

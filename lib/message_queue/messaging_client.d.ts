@@ -9,10 +9,16 @@ interface MessagingClientConfig {
 
 declare type MessageQueueConfig = MessagingClientConfig & Global.ServiceOptions
 
-export declare abstract class MessagingClient extends EventEmitter {
-	constructor(config: MessageQueueConfig);
+declare interface MessagingClientConstructor {
+	readonly prototype: MessagingClient
+	new(config: MessageQueueConfig): MessagingClient
+}
+
+declare interface MessagingClient extends EventEmitter {
 	send(messages: Array<string>, channel: string): NexxusPromise<undefined>
 	sendSystemMessages(to: string, action: string, messages: Array<string>): NexxusPromise<undefined>
 	publish(messages: Array<string>, channel: string): NexxusPromise<undefined>
 	shutdown(): NexxusPromise<undefined>
 }
+
+export = MessagingClientConstructor
