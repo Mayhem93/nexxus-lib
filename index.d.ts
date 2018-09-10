@@ -15,6 +15,7 @@ declare interface NexxusLibInterface {
 	NexxusAdmin: NexxusAdmin
 	NexxusApplication: NexxusApplication & ((id: string) => NexxusApplication)
 	NexxusError: NexxusError
+	NexxusSubscription: any
 	NexxusUser: NexxusUser
 }
 

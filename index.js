@@ -114,7 +114,7 @@ const init = async serviceOptions => {
 		});
 	}));
 
-	await NexxusApplication.getAll();
+	await NexxusApplication.retrieveAll();
 };
 
 module.exports = {

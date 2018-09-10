@@ -26,9 +26,10 @@ interface NexxusApplicationConstructor extends BaseModel {
 	models: object
 	users: object
 
-	getAll(): Array<NexxusApplication>
+
+	apps(): Map<string, NexxusApplication>
+	retrieveAll(): Map<string, NexxusApplication>
 	create(props: NexxusApplicationProps & NexxusApplicationParams): NexxusApplication
-	isAdmin(admin: { id: string, email: string }): boolean
 }
 
 declare interface NexxusApplication extends BaseModel {
@@ -45,6 +46,8 @@ declare interface NexxusApplication extends BaseModel {
 	update(patches: Array<object>): boolean
 
 	hasContext(contextId: string): boolean
+
+	isAdmin(id: string): boolean
 
 	isAPNConfigured(): boolean
 
