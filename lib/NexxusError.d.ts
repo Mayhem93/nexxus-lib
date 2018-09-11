@@ -52,7 +52,7 @@ type ERRORS = 'ServerNotAvailable' |
 	'ErrorCollection' |
 	'InvalidApplicationSchema';
 
-declare interface NexxusErrorConstructor {
+declare interface NexxusErrorConstructor extends Error {
 	readonly prototype: NexxusError
 	new(err: ERRORS, placeholders?: Array<string> | string): NexxusError
 	errors: ERRORS;
@@ -64,5 +64,7 @@ declare interface NexxusError extends Error {
 	placeholders: Array<string>
 	message: string
 }
+
+declare const NexxusErrorConstructor : NexxusErrorConstructor & NexxusError
 
 export = NexxusErrorConstructor;

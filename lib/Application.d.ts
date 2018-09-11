@@ -22,17 +22,6 @@ interface NexxusApplicationConstructor extends BaseModel {
 	readonly prototype: NexxusApplication
 	new(props: BaseModelProps & NexxusApplicationParams): NexxusApplication
 
-	contexts: typeof NexxusContext
-	models: object
-	users: object
-
-
-	apps(): Map<string, NexxusApplication>
-	retrieveAll(): Map<string, NexxusApplication>
-	create(props: NexxusApplicationProps & NexxusApplicationParams): NexxusApplication
-}
-
-declare interface NexxusApplication extends BaseModel {
 	properties: NexxusApplicationProps & NexxusApplicationParams
 	contexts: {
 		create: ReturnType<NexxusContext["create"]>
@@ -60,6 +49,17 @@ declare interface NexxusApplication extends BaseModel {
 	hasModel(modelName: string): boolean
 
 	hasSchema(): boolean
+}
+
+declare interface NexxusApplication extends BaseModel {
+	contexts: typeof NexxusContext
+	models: object
+	users: object
+
+
+	apps(): Map<string, NexxusApplication>
+	retrieveAll(): Map<string, NexxusApplication>
+	create(props: NexxusApplicationProps & NexxusApplicationParams): NexxusApplication
 }
 
 declare const NexxusApplicationConstructor: NexxusApplicationConstructor & NexxusApplication
