@@ -1,7 +1,8 @@
 import NexxusError = require('./NexxusError');
 import {BaseModel, BaseModelProps} from './BaseModel';
-import {NexxusApplicationSchema} from './ApplicationSchema';
+import NexxusApplicationSchema = require('./ApplicationSchema');
 import NexxusContext = require('./Context');
+import NexxusPatch = require('./Patch');
 
 interface NexxusApplicationProps extends BaseModelProps {
 	readonly type: 'application'
@@ -10,7 +11,7 @@ interface NexxusApplicationProps extends BaseModelProps {
 interface NexxusApplicationParams {
 	readonly admins?: Array<string>
 	readonly keys?: Array<string>
-	readonly schema?: NexxusApplicationSchema<object>
+	readonly schema?: typeof NexxusApplicationSchema
 	apn_key?: string
 	apn_key_id?: string
 	apn_team_id?: string
@@ -32,7 +33,7 @@ interface NexxusApplicationConstructor extends BaseModel {
 
 	delete(): boolean
 
-	update(patches: Array<object>): boolean
+	update(patches: Array<NexxusPatch>): boolean
 
 	hasContext(contextId: string): boolean
 
@@ -55,7 +56,6 @@ declare interface NexxusApplication extends BaseModel {
 	contexts: typeof NexxusContext
 	models: object
 	users: object
-
 
 	apps(): Map<string, NexxusApplication>
 	retrieveAll(): Map<string, NexxusApplication>

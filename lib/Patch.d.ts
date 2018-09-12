@@ -15,8 +15,8 @@ interface ObjectPatch {
 
 interface NexxusPatchConstructor {
 	readonly prototype: NexxusPatch
-	new(objectPatch: object): NexxusPatch
-	new(objectPatch: object, applicationId: string): NexxusPatch
+	new(objectPatch: ObjectPatch): NexxusPatch
+	new(objectPatch: ObjectPatch, applicationId: string): NexxusPatch
 
 	op: PatchOperations
 	path: string

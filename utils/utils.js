@@ -1,6 +1,11 @@
 const lz4Module = require('lz4');
 const stream = require('stream');
-const async = require('async');
+const NexxusAdmin = require('../lib/Admin');
+const NexxusApplication = require('../lib/Application');
+const NexxusContext = require('../lib/Context');
+const NexxusUser = require('../lib/User');
+const NexxusModel = require('../lib/Model');
+
 /**
  * Transform the object that is sent in the request body in the subscribe endpoint so its compatible with
  * the elasticsearch query object.
@@ -39,7 +44,7 @@ const async = require('async');
   ]
 }</pre>
  */
-let parseQueryObject = filterObject => {
+const parseQueryObject = filterObject => {
 	let objectKey = Object.keys(filterObject)[0];
 	let result = {};
 
@@ -95,7 +100,7 @@ let parseQueryObject = filterObject => {
  * @param Object query The simplified query object (not the elasticsearch one).
  * @returns {boolean}
  */
-function testObject (object, query) {
+const testObject = (object, query) => {
 	if (typeof object !== 'object') {
 		return false;
 	}
@@ -205,9 +210,9 @@ function testObject (object, query) {
 	}
 
 	return !!result;
-}
+};
 
-let lz4 = ((() => {
+const lz4 = ((() => {
 	/**
 	 * @callback lz4ResultCb
 	 * @param {Buffer} result The result of compression/decompression
@@ -271,37 +276,29 @@ let lz4 = ((() => {
 	};
 }))();
 
-let scanRedisKeysPattern = (pattern, redisInstance, callback) => {
-	let redisScanCursor = -1;
-	let results = [];
-
-	let scanAndGet = callback1 => {
-		redisInstance.scan([redisScanCursor === -1 ? 0 : redisScanCursor, 'MATCH', pattern, 'COUNT', 100000], (err, partialResults) => {
-			if (err) {
-				return callback1(err);
-			}
-
-			redisScanCursor = partialResults[0];
-			results = results.concat(partialResults[1]);
-
-			return callback1();
-		});
-	};
-
-	async.during(
-		callback1 => {
-			callback1(null, redisScanCursor !== 0);
-		},
-		scanAndGet,
-		err => {
-			callback(err, results);
+const getProperModel = object => {
+	switch (object.type) {
+		case 'admin': {
+			return new NexxusAdmin(object);
 		}
-	);
+		case 'application': {
+			return new NexxusApplication(object);
+		}
+		case 'context': {
+			return new NexxusContext(object);
+		}
+		case 'user': {
+			return new NexxusUser(object);
+		}
+		default: {
+			return new NexxusModel(object);
+		}
+	}
 };
 
 module.exports = {
 	parseQueryObject,
+	getProperModel,
 	testObject,
-	scanRedisKeysPattern,
 	lz4
 };

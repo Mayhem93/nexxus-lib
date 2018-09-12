@@ -1,4 +1,5 @@
 import { BaseModel, BaseModelProps } from './BaseModel';
+import NexxusPatch = require('./Patch');
 
 interface NexxusAdminProps extends BaseModelProps {
 	type: 'admin'
@@ -14,7 +15,7 @@ declare interface NexxusAdminConstructor extends BaseModel {
 	create(props: NexxusAdminConstructorProps): NexxusAdmin
 	get(id: string): NexxusAdmin
 	delete(id: string): void
-	update(patches: Array<object>): void
+	update(patches: Array<NexxusPatch>): void
 }
 
 declare interface NexxusAdmin extends BaseModel {

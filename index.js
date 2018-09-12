@@ -2,6 +2,7 @@ const Redis = require('redis');
 const fs = require('fs');
 const path = require('path');
 const NexxusApplication = require('./lib/Application');
+const NexxusApplicationSchema = require('./lib/ApplicationSchema');
 const ConfigurationManager = require('./lib/ConfigurationManager');
 const Datasource = require('./lib/database/datasource');
 const NexxusLogger = require('./lib/logger/logger');
@@ -17,6 +18,7 @@ const NexxusModel = require('./lib/Model');
 const FilterBuilder = require('./utils/filterbuilder');
 const Services = require('./lib/Services');
 const NexxusDevice = require('./lib/Device');
+const NexxusPatch = require('./lib/Patch');
 const constants = require('./lib/constants');
 
 let config;
@@ -123,6 +125,7 @@ module.exports = {
 	constants,
 	Services,
 	NexxusApplication,
+	NexxusApplicationSchema,
 	NexxusAdmin,
 	NexxusError,
 	NexxusUser,
@@ -132,6 +135,7 @@ module.exports = {
 	NexxusModel,
 	NexxusDelta,
 	NexxusChannel,
+	NexxusPatch,
 	FilterBuilder,
 	SystemMessageProcessor
 };

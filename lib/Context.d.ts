@@ -1,4 +1,5 @@
 import {BaseModel, BaseModelProps} from './BaseModel';
+import NexxusPatch = require('./Patch');
 
 interface NexxusContextProps extends BaseModelProps {
 	type: 'context'
@@ -21,7 +22,7 @@ declare interface NexxusContext extends BaseModel {
 
 	delete(): (id: string) => void
 
-	update(): (patches: string) => void
+	update(): (patches: Array<NexxusPatch>) => void
 }
 
 declare const NexxusContextConstructor: NexxusContextConstructor & NexxusContext

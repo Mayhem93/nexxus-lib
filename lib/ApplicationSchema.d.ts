@@ -1,9 +1,23 @@
-export declare class NexxusApplicationSchema<T> {
-	private schema: T
+interface SchemaFields {
+	[modelName: string]: {
+		properties: {
+			[fieldName: string]: {
+				type: string
+			}
+		},
+		acl_read: Number
+		acl_write: Number
+		acl_meta: Number
+	}
+}
 
-	constructor(schema: T)
+interface NexxusApplicationSchemaConstructor<T> {
+	readonly prototype: NexxusApplicationSchema<T>
+	new(schema: T): NexxusApplicationSchema<T>
 
-	private validate()
+	schema: T
+
+	validate()
 
 	deleteModel(modelName: keyof T): boolean
 
@@ -13,3 +27,11 @@ export declare class NexxusApplicationSchema<T> {
 
 	hasMany(modelName: keyof T, parentModel: keyof T): boolean
 }
+
+interface NexxusApplicationSchema<T> {
+
+}
+
+declare const NexxusApplicationSchemaConstructor: NexxusApplicationSchemaConstructor<SchemaFields> & NexxusApplicationSchema<SchemaFields>
+
+export = NexxusApplicationSchemaConstructor

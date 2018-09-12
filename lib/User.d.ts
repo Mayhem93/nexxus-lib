@@ -9,7 +9,7 @@ interface NexxusUserProps extends BaseModelProps {
 interface NexxusUserConstructor extends BaseModel {
 	readonly prototype: NexxusUser
 	new(props: NexxusUserProps): NexxusUser
-	get(user: object): NexxusUser
+	get(id: string): NexxusUser
 }
 
 interface NexxusUser extends BaseModel {
