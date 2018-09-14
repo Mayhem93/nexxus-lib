@@ -50,14 +50,16 @@ declare namespace DBAdapter {
 		aggregation?: AggregationOption
 	}
 
-	interface DatabaseDeleteObjectsInput {
-		[id: string]: string
+	interface DatabaseDeleteObjectsInputKeyValue {
+		id: string
+		applicationId: string
+		type: string
 	}
 
 	interface GetObjectsResultInterface {
 		errors: Array<NexxusError>
 		results: Array<object>
-		versions?: Array<Number>
+		versions?: Map<string, Number>
 	}
 
 	interface SearchObjectsResultInterface {
@@ -94,7 +96,7 @@ declare namespace DBAdapter {
 
 		abstract updateObjects(patches: Array<object>): NexxusPromise<UpdateObjectsResultsInterface>;
 
-		abstract deleteObjects(objects: DatabaseDeleteObjectsInput): NexxusPromise<DeleteObjectsResultInterface>;
+		abstract deleteObjects(objects: Map<string, DatabaseDeleteObjectsInputKeyValue>): NexxusPromise<DeleteObjectsResultInterface>;
 	}
 }
 

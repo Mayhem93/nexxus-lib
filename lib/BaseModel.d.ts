@@ -7,8 +7,15 @@ interface BaseModelProps {
 	readonly updated: Number
 }
 
-export declare class BaseModel {
-	public properties: BaseModelProps
-
-	constructor(props: BaseModelProps, moreImmutableProperties: Array<string>);
+interface NexxusBaseModelConstructor {
+	readonly: NexxusBaseModel
+	new(props: BaseModelProps, moreImmutableProperties: Array<string>): NexxusBaseModel
 }
+
+interface NexxusBaseModel {
+	properties: BaseModelProps
+}
+
+declare const NexxusBaseModelConstructor: NexxusBaseModelConstructor & NexxusBaseModel
+
+export = NexxusBaseModelConstructor

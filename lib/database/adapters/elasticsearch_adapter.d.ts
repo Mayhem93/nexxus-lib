@@ -19,7 +19,7 @@ declare class ElasticSearchDB extends DBAdapter.Adapter {
 
 	updateObjects(patches: Array<NexxusPatch>): NexxusPromise<DBAdapter.UpdateObjectsResultsInterface>;
 
-	deleteObjects(objects: DBAdapter.DatabaseDeleteObjectsInput): NexxusPromise<DBAdapter.DeleteObjectsResultInterface>;
+	deleteObjects(objects: Map<string, DBAdapter.DatabaseDeleteObjectsInputKeyValue>): NexxusPromise<DBAdapter.DeleteObjectsResultInterface>;
 }
 
 export = ElasticSearchDB
