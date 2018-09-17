@@ -16,8 +16,11 @@ interface NexxusApplicationSchemaConstructor<T> {
 	new(schema: T): NexxusApplicationSchema<T>
 
 	schema: T
+	applicationId: string
 
 	validate()
+
+	getModelNames(): Array<string>
 
 	deleteModel(modelName: keyof T): boolean
 

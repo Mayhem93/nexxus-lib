@@ -1,5 +1,5 @@
 import NexxusError = require('./NexxusError');
-import {BaseModel, BaseModelProps} from './BaseModel';
+import BaseModel = require('./BaseModel');
 import NexxusApplicationSchema = require('./ApplicationSchema');
 import NexxusContext = require('./Context');
 import NexxusPatch = require('./Patch');
@@ -37,7 +37,7 @@ interface NexxusApplicationConstructor extends BaseModel {
 
 	hasContext(contextId: string): boolean
 
-	isAdmin(id: string): boolean
+	setSchema(schemaObject: typeof NexxusApplicationSchema): void
 
 	isAPNConfigured(): boolean
 
