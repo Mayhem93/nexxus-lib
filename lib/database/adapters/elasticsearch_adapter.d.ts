@@ -4,10 +4,11 @@ import NexxusError = require('../../NexxusError');
 import NexxusPatch = require('../../Patch');
 import {Client, ConfigOptions} from 'elasticsearch'
 
-declare class ElasticSearchDB extends DBAdapter.Adapter {
-	private connection: Client
+interface ElasticSearchDBConstructor extends DBAdapter.Adapter {
+	readonly prototype: ElasticSearchDB
+	new(config: object | ConfigOptions): ElasticSearchDB
 
-	constructor(config: object | ConfigOptions)
+	connection: Client
 
 	getObjects(ids: Array<string>): NexxusPromise<DBAdapter.GetObjectsResultInterface>;
 
@@ -22,4 +23,8 @@ declare class ElasticSearchDB extends DBAdapter.Adapter {
 	deleteObjects(objects: Map<string, DBAdapter.DatabaseDeleteObjectsInputKeyValue>): NexxusPromise<DBAdapter.DeleteObjectsResultInterface>;
 }
 
-export = ElasticSearchDB
+interface ElasticSearchDB extends DBAdapter.Adapter { }
+
+declare const ElasticSearchDBConstructor : ElasticSearchDBConstructor & ElasticSearchDB
+
+export = ElasticSearchDBConstructor
