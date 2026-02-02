@@ -101,14 +101,19 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<NexxusTranspo
     }
 
     for (const [transport, deviceChannelsMap] of transportToDeviceChannelsMap.entries()) {
-      this.publish(transport as NexxusQueueName, {
-        event: 'device_message',
-        deviceIds: Array.from(deviceChannelsMap.keys()),
-        data: {
-          event: 'model_created',
-          data
-        }
-      });
+      for (const [deviceId, channelKeys] of deviceChannelsMap.entries()) {
+        this.publish(transport as NexxusQueueName, {
+          event: 'device_message',
+          deviceIds: [ deviceId ],
+          data: {
+            event: 'model_created',
+            model: data,
+            metadata: {
+              channels: channelKeys
+            }
+          }
+        });
+      }
 
       NexxusTransportManagerWorker.logger.debug(
         `Notifying ${deviceChannelsMap.size} devices about new model with ID: "${data.id}" via transport: "${transport}"`,
@@ -191,14 +196,19 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<NexxusTranspo
     }
 
     for (const [transport, deviceChannelsMap] of transportToDeviceChannelsMap.entries()) {
-      this.publish(transport as NexxusQueueName, {
-        event: 'device_message',
-        deviceIds: Array.from(deviceChannelsMap.keys()),
-        data: {
-          event: 'model_deleted',
-          data
-        }
-      });
+      for (const [deviceId, channelKeys] of deviceChannelsMap.entries()) {
+        this.publish(transport as NexxusQueueName, {
+          event: 'device_message',
+          deviceIds: [deviceId],
+          data: {
+            event: 'model_deleted',
+            model: data,
+            metadata: {
+              channels: channelKeys
+            }
+          }
+        });
+      }
 
       NexxusTransportManagerWorker.logger.debug(
         `Notifying ${deviceChannelsMap.size} devices about deleted model with ID: "${data.id}" via transport: "${transport}"`,

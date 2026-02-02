@@ -32,6 +32,31 @@ export interface NexxusWebSocketJsonPatchMetadata {
 }
 
 /**
+ * Metadata for WebSocket model created/deleted events
+ */
+export interface NexxusWebSocketMetadata {
+  channels: Array<string>;
+}
+
+/**
+ * Payload for WebSocket Transport - model created
+ */
+export type NexxusWebSocketModelCreatedPayload = {
+  event: 'model_created';
+  model: NexxusAppModelType;
+  metadata: NexxusWebSocketMetadata;
+};
+
+/**
+ * Payload for WebSocket Transport - model deleted
+ */
+export type NexxusWebSocketModelDeletedPayload = {
+  event: 'model_deleted';
+  model: NexxusModelDeletedData;
+  metadata: NexxusWebSocketMetadata;
+};
+
+/**
  * JsonPatch type for WebSocket transport workers
  */
 export type NexxusWebSocketJsonPatch = Omit<NexxusJsonPatchInternal, 'metadata'> & {
@@ -50,7 +75,7 @@ export type NexxusWebSocketModelUpdatedPayload = {
 export type NexxusWebsocketPayload = {
   event: 'device_message';
   deviceIds: Array<string>;
-  data: NexxusModelCreatedPayload | NexxusWebSocketModelUpdatedPayload | NexxusModelDeletedPayload;
+  data: NexxusWebSocketModelCreatedPayload | NexxusWebSocketModelUpdatedPayload | NexxusWebSocketModelDeletedPayload;
 };
 
 export type NexxusMqttPayload =

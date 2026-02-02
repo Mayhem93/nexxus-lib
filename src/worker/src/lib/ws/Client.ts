@@ -7,7 +7,13 @@ import {
 import { NexxusWebsocketsTransportWorker } from "../WebsocketsTransportWorker";
 
 import { NexxusDevice, RedisKeyNotFoundException } from "@mayhem93/nexxus-redis";
-import { NexxusAppModelType, NexxusModelDeletedData, NexxusWebSocketJsonPatch } from "@mayhem93/nexxus-core-lib";
+import {
+  NexxusModelDeletedData,
+  NexxusWebSocketJsonPatch,
+  NexxusWebSocketModelCreatedPayload,
+  NexxusWebSocketModelDeletedPayload,
+  NexxusWebSocketModelUpdatedPayload
+} from "@mayhem93/nexxus-core-lib";
 
 import { WebSocket, Data as WebSocketData } from "ws";
 
@@ -36,9 +42,9 @@ export type NexxusWsServerMessage = {
     success: boolean;
     message?: string;
   };
-  model_created: NexxusAppModelType;
-  model_updated: NexxusWebSocketJsonPatch[];
-  model_deleted: NexxusModelDeletedData;
+  model_created: NexxusWebSocketModelCreatedPayload
+  model_updated: NexxusWebSocketModelUpdatedPayload
+  model_deleted: NexxusWebSocketModelDeletedPayload;
   error: {
     message: string;
     code?: string;
@@ -127,10 +133,10 @@ export class NexxusWsClient extends EventEmitter<ClientEventMap> {
   }
 
   public sendMessage<E extends keyof NexxusWsServerMessage>(event: E, data: NexxusWsServerMessage[E]) {
-    const message: NexxusWsServerEvent<E> = { event, data };
+    // const message: NexxusWsServerEvent<E> = data;
 
-    this.socket.send(JSON.stringify(message));
-    NexxusWebsocketsTransportWorker.logger.debug(`Sent message to client ${this.id}: "${JSON.stringify(message)}"`, 'NexxusWsClient');
+    this.socket.send(JSON.stringify(data));
+    NexxusWebsocketsTransportWorker.logger.debug(`Sent ${event} message to client ${this.id}: "${JSON.stringify(data)}"`, 'NexxusWsClient');
   }
 
   private async registerDevice(msg: NexxusWsClientEvent<'register'>) {

@@ -109,20 +109,20 @@ export class NexxusWebsocketsTransportWorker extends NexxusBaseWorker<NexxusWebs
               case 'model_created':
                 NexxusWebsocketsTransportWorker.logger.debug(`Sending model_created to device ID: "${deviceId}"`, NexxusWebsocketsTransportWorker.loggerLabel);
 
-                client.sendMessage('model_created', payload.data.data);
+                client.sendMessage('model_created', payload.data);
 
                 break;
               case 'model_updated':
                 NexxusWebsocketsTransportWorker.logger.debug(`Sending model_updated to device ID: "${deviceId}"`, NexxusWebsocketsTransportWorker.loggerLabel);
 
-                client.sendMessage('model_updated', payload.data.data);
+                client.sendMessage('model_updated', payload.data);
 
                 break;
 
               case 'model_deleted':
                 NexxusWebsocketsTransportWorker.logger.debug(`Sending model_deleted to device ID: "${deviceId}"`, NexxusWebsocketsTransportWorker.loggerLabel);
 
-                client.sendMessage('model_deleted', payload.data.data);
+                client.sendMessage('model_deleted', payload.data);
 
                 break;
 
