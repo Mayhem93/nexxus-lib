@@ -1,8 +1,8 @@
 import {
-  NexxusBaseModel,
   INexxusBaseModel,
   MODEL_REGISTRY
 } from "./BaseModel";
+import { NexxusBuiltinModel } from "./BuiltinModel";
 import { NexxusFieldDef, NexxusModelDef } from "../common/ModelTypes";
 import { NexxusUserDetailSchema } from "./User";
 
@@ -16,7 +16,7 @@ export interface NexxusUserTypeConfig {
   private?: boolean; // if true users can only be created through the nexxus hub API; defaults to false if not specified
 }
 
-export type NexxusApplicationModelType = INexxusBaseModel<'application'> & {
+export interface INexxusApplication extends INexxusBaseModel<'application'> {
   name: string;
   description?: string;
   schema: NexxusApplicationSchema;
@@ -28,10 +28,10 @@ export type NexxusApplicationModelType = INexxusBaseModel<'application'> & {
   userDetailSchema?: {
     [userType: string]: NexxusUserDetailSchema;
   };
-};
+}
 
-export class NexxusApplication extends NexxusBaseModel<NexxusApplicationModelType> {
-  constructor(data: NexxusApplicationModelType) {
+export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
+  constructor(data: INexxusApplication) {
     super({ ...data, type: MODEL_REGISTRY.application });
 
     if (Object.keys(data.schema).length === 0) {
@@ -130,4 +130,3 @@ export class NexxusApplication extends NexxusBaseModel<NexxusApplicationModelTyp
     return filterableFields;
   }
 }
-

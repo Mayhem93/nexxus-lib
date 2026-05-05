@@ -8,7 +8,7 @@ import {
   NexxusApplication,
   MODEL_REGISTRY,
   FatalErrorException,
-  NexxusUserModelType
+  INexxusUser
 } from '@mayhem93/nexxus-core-lib';
 import {
   NexxusDatabaseAdapter,
@@ -62,7 +62,7 @@ export interface NexxusApiRequest extends Express.Request {
   user?: NexxusApiUser;
 }
 
-export type NexxusApiUser = Pick<NexxusUserModelType, | 'username' | 'userType' | 'authProviders' | 'details' | 'appId'> & {
+export type NexxusApiUser = Pick<INexxusUser, | 'username' | 'userType' | 'authProviders' | 'details' | 'appId'> & {
   id: string;
   iat?: number;
   exp?: number;

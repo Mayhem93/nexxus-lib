@@ -1,26 +1,23 @@
-import { NexxusApplication, NexxusApplicationModelType } from "./Application";
-import { NexxusApplicationUser, NexxusUserModelType } from "./User";
-import { NexxusAppModel, NexxusAppModelType } from "./AppModel";
+import type { NexxusApplication, INexxusApplication } from "./Application";
+import type { NexxusUser, INexxusUser } from "./User";
+import type { NexxusAppModel, INexxusAppModel } from "./AppModel";
 
 import { randomUUID } from "node:crypto"
-
-export type AnyNexxusModel = NexxusApplication | NexxusApplicationUser | NexxusAppModel; // Extend this union as more built-in models are added
-export type AnyNexxusModelType = NexxusApplicationModelType | NexxusUserModelType | NexxusAppModelType; // Extend this union as more built-in models are added
-
-export interface INexxusBaseModel<TType extends string = string> {
-  id?: string;
-  createdAt?: number;
-  updatedAt?: number;
-  type: TType;
-}
 
 export const MODEL_REGISTRY = {
   application: 'application',
   user: 'user'
 } as const;
 
-export type NexxusBuiltinModelTypeName = typeof MODEL_REGISTRY[keyof typeof MODEL_REGISTRY];
-export type NexxusModelTypeName = NexxusBuiltinModelTypeName | string;
+export type NexxusBuiltinTypeName = typeof MODEL_REGISTRY[keyof typeof MODEL_REGISTRY];
+export type NexxusModelTypeName = NexxusBuiltinTypeName | (string & {});
+
+export interface INexxusBaseModel<TType extends NexxusModelTypeName = NexxusModelTypeName> {
+  id?: string;
+  createdAt?: number;
+  updatedAt?: number;
+  type: TType;
+}
 
 export abstract class NexxusBaseModel<T extends INexxusBaseModel = INexxusBaseModel> {
   protected data: T;
@@ -53,3 +50,8 @@ export abstract class NexxusBaseModel<T extends INexxusBaseModel = INexxusBaseMo
     return this.data;
   }
 }
+
+export type AnyNexxusBuiltinModel     = NexxusApplication | NexxusUser;
+export type AnyNexxusBuiltinModelData = INexxusApplication | INexxusUser;
+export type AnyNexxusModel            = AnyNexxusBuiltinModel | NexxusAppModel;
+export type AnyNexxusModelData        = AnyNexxusBuiltinModelData | INexxusAppModel;

@@ -12,7 +12,7 @@ import {
   type NexxusBuiltinModelType
 } from './BuiltinSchemas';
 import type {
-  NexxusAppModelType
+  INexxusAppModel
 } from '../models/AppModel';
 import type { NexxusUserDetailSchema } from '../models/User';
 
@@ -100,11 +100,11 @@ export class NexxusFilterQuery {
     yield* this.traverseNodes(this.nodes, 0);
   }
 
-  public test(object: Partial<NexxusAppModelType>): boolean {
+  public test(object: Partial<INexxusAppModel>): boolean {
     return this.nodes.every(node => this.testNode(node, object));
   }
 
-  private testNode(node: FilterNode, object: Partial<NexxusAppModelType>): boolean {
+  private testNode(node: FilterNode, object: Partial<INexxusAppModel>): boolean {
     if (node.type === 'field') {
       return this.testFieldCondition(node, object);
     }
@@ -162,7 +162,7 @@ export class NexxusFilterQuery {
 
   private testFieldCondition(
     node: FilterNode & { type: 'field' },
-    object: Partial<NexxusAppModelType>
+    object: Partial<INexxusAppModel>
   ): boolean {
     const actualValue = dot.getProperty(object, node.field);
 

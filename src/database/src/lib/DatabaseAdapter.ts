@@ -5,13 +5,13 @@ import {
   NexxusConfig,
   NexxusBaseModel,
   NexxusApplication,
-  NexxusApplicationUser,
+  NexxusUser,
   NexxusAppModel,
   NexxusModelTypeName,
   AnyNexxusModel,
   NexxusJsonPatch,
   NexxusFilterQuery,
-  AnyNexxusModelType
+  AnyNexxusModelData
 } from '@mayhem93/nexxus-core-lib';
 
 export type NexxusDatabaseAdapterEvents = {
@@ -64,12 +64,12 @@ export abstract class NexxusDatabaseAdapter<T extends NexxusConfig, Ev extends N
   abstract createItems(collection: Array<AnyNexxusModel>): Promise<void>;
   // abstract getItems(options: NexxusDbGetOptions): Promise<Array<NexxusBaseModel | null>>;
   abstract getItems(options: NexxusDbGetOptions<'application'>): Promise<Array<NexxusApplication | null>>;
-  abstract getItems(options: NexxusDbGetOptions<'user'>): Promise<Array<NexxusApplicationUser | null>>;
+  abstract getItems(options: NexxusDbGetOptions<'user'>): Promise<Array<NexxusUser | null>>;
   abstract getItems(options: NexxusDbGetOptions<string>): Promise<Array<NexxusAppModel | null>>;
   abstract searchItems(options: NexxusDbSearchOptions<'application'>): Promise<NexxusApplication[]>;
-  abstract searchItems(options: NexxusDbSearchOptions<'user'>): Promise<NexxusApplicationUser[]>;
+  abstract searchItems(options: NexxusDbSearchOptions<'user'>): Promise<NexxusUser[]>;
   abstract searchItems(options: NexxusDbSearchOptions<string>): Promise<NexxusAppModel[]>;
-  abstract updateItems(collection: Array<NexxusJsonPatch>, options?: NexxusDbUpdateOptions): Promise<Array<Partial<AnyNexxusModelType>> | void>;
+  abstract updateItems(collection: Array<NexxusJsonPatch>, options?: NexxusDbUpdateOptions): Promise<Array<Partial<AnyNexxusModelData>> | void>;
   abstract deleteItems(collection: Array<NexxusBaseModel>): Promise<void>;
 
   protected abstract buildQuery(filter: NexxusFilterQuery): string | object;

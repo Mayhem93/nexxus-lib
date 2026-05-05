@@ -1,4 +1,4 @@
-import { NexxusAppModelType } from '../models/AppModel';
+import { INexxusAppModel } from '../models/AppModel';
 import { NexxusJsonPatchInternal, NexxusJsonPatchMetadata } from '../common/JsonPatch';
 
 export interface NexxusBaseQueuePayload {
@@ -6,17 +6,17 @@ export interface NexxusBaseQueuePayload {
   [key: string]: any;
 }
 
-export type NexxusModelCreatedPayload = { event: 'model_created'; data: NexxusAppModelType; };
+export type NexxusModelCreatedPayload = { event: 'model_created'; data: INexxusAppModel; };
 export type NexxusModelUpdatedPayload = { event: 'model_updated'; data: Array<NexxusJsonPatchInternal>; };
 
-export type NexxusModelDeletedData = Pick<NexxusAppModelType, 'id' | 'type' | 'appId' | 'userId'>;
+export type NexxusModelDeletedData = Pick<INexxusAppModel, 'id' | 'type' | 'appId' | 'userId'>;
 export type NexxusModelDeletedPayload = { event: 'model_deleted'; data: NexxusModelDeletedData; };
 
 // Built-in worker payloads
 export type NexxusWriterPayload = NexxusModelCreatedPayload | NexxusModelUpdatedPayload | NexxusModelDeletedPayload;
 
 export type NexxusTransportManagetJsonPatch = Omit<NexxusJsonPatchInternal, 'metadata'> & {
-  metadata: NexxusJsonPatchMetadata & { partialModel: Partial<NexxusAppModelType> };
+  metadata: NexxusJsonPatchMetadata & { partialModel: Partial<INexxusAppModel> };
 };
 
 export type NexxusTransportManagerModelUpdatedPayload = {
@@ -43,7 +43,7 @@ export interface NexxusWebSocketMetadata {
  */
 export type NexxusWebSocketModelCreatedPayload = {
   event: 'model_created';
-  model: NexxusAppModelType;
+  model: INexxusAppModel;
   metadata: NexxusWebSocketMetadata;
 };
 

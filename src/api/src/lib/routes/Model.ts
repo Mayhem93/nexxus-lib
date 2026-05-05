@@ -5,7 +5,7 @@ import { RequiredHeadersMiddleware, AppExistsMiddleware, AuthMiddleware } from '
 import {
   NexxusAppModel,
   NexxusJsonPatch,
-  type NexxusAppModelType,
+  type INexxusAppModel,
   type NexxusApplicationSchema,
   InvalidJsonPatchException,
   NexxusJsonPatchInternal
@@ -23,7 +23,7 @@ interface GetModelRequest extends NexxusApiRequest {
 }
 
 interface CreateAppModelRequest extends NexxusApiRequest {
-  body: NexxusAppModelType;
+  body: INexxusAppModel;
 }
 
 type UpdateAppModelBody = {

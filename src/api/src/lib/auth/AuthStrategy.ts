@@ -2,9 +2,9 @@ import { NexxusApi, NexxusApiUser } from '../Api';
 import { UserAuthenticationFailedException } from '../Exceptions';
 
 import {
-  NexxusApplicationUser,
+  NexxusUser,
   NexxusFilterQuery,
-  NexxusUserModelType
+  INexxusUser
 } from '@mayhem93/nexxus-core-lib';
 
 import jwt from 'jsonwebtoken';
@@ -69,7 +69,7 @@ export default abstract class NexxusAuthStrategy<T extends NexxusBaseAuthStrateg
   /**
    * Find user by username (email)
    */
-  public async findUserByUsername(appId: string, username: string): Promise<NexxusApplicationUser | null> {
+  public async findUserByUsername(appId: string, username: string): Promise<NexxusUser | null> {
     const app = NexxusApi.getStoredApp(appId);
     const fq = new NexxusFilterQuery({ username }, { modelType: 'user', userDetailsSchema: app?.getUserDetailSchema()!});
 
@@ -93,8 +93,8 @@ export default abstract class NexxusAuthStrategy<T extends NexxusBaseAuthStrateg
     password?: string;
     authProviders: NexxusAuthProviders[];
     details?: Record<string, any>;
-  }): Promise<NexxusApplicationUser> {
-    const userData: NexxusUserModelType = {
+  }): Promise<NexxusUser> {
+    const userData: INexxusUser = {
       type: 'user',
       appId,
       userType: data.userType || 'default',
@@ -104,7 +104,7 @@ export default abstract class NexxusAuthStrategy<T extends NexxusBaseAuthStrateg
       devices: [],
       details: data.details || {}
     };
-    const user = new NexxusApplicationUser(userData);
+    const user = new NexxusUser(userData);
 
     await NexxusApi.database.createItems([ user ]);
 
@@ -119,10 +119,10 @@ export default abstract class NexxusAuthStrategy<T extends NexxusBaseAuthStrateg
     userType?: string;
     authProvider: NexxusAuthProviders;
     details?: Record<string, any>;
-  }): Promise<[NexxusApplicationUser, 'found' | 'created']> {
+  }): Promise<[NexxusUser, 'found' | 'created']> {
     let user = await this.findUserByUsername(appId, data.username);
     const app = NexxusApi.getStoredApp(appId);
-    let result: [NexxusApplicationUser, 'found' | 'created'];
+    let result: [NexxusUser, 'found' | 'created'];
 
     if (!user) {
       user = await this.createUser(appId, {
@@ -144,7 +144,7 @@ export default abstract class NexxusAuthStrategy<T extends NexxusBaseAuthStrateg
     return result;
   }
 
-  protected static convertToApiUser(user: NexxusApplicationUser): NexxusApiUser {
+  protected static convertToApiUser(user: NexxusUser): NexxusApiUser {
     const data = user.getData();
 
     return {

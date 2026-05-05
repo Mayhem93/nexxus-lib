@@ -10,7 +10,7 @@ import type {
   NexxusModelFieldType,
   PrimitiveFieldDef
 } from '../common/ModelTypes';
-import { NexxusAppModelType } from '../models/AppModel';
+import { INexxusAppModel } from '../models/AppModel';
 import {
   NexxusBuiltinModelType,
   NEXXUS_BUILTIN_MODEL_SCHEMAS,
@@ -196,8 +196,8 @@ export class NexxusJsonPatch {
     return this.valid;
   }
 
-  public getPartialModel(): Partial<NexxusAppModelType> {
-    const partialModel: Partial<NexxusAppModelType> = {
+  public getPartialModel(): Partial<INexxusAppModel> {
+    const partialModel: Partial<INexxusAppModel> = {
       id: this.fullPatch.metadata.id,
       type: this.fullPatch.metadata.type,
       appId: this.fullPatch.metadata.appId

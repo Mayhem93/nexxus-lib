@@ -1,12 +1,12 @@
 import {
-  NexxusBaseModel,
   INexxusBaseModel,
   MODEL_REGISTRY
 } from "./BaseModel";
+import { NexxusBuiltinModel } from "./BuiltinModel";
 import { NexxusFieldDef } from "../common/ModelTypes";
 import { InvalidUserModelException } from "../lib/Exceptions";
 
-export type NexxusUserModelType = INexxusBaseModel<'user'> & {
+export interface INexxusUser extends INexxusBaseModel<'user'> {
   appId: string;
   userType: string;
   username: string;
@@ -14,14 +14,14 @@ export type NexxusUserModelType = INexxusBaseModel<'user'> & {
   authProviders: Array<string>; // auth provider when the user was created; does not change
   devices: Array<string>; // list of device IDs associated with the user
   details?: Record<string, any>; // application specific user details
-};
+}
 
 export interface NexxusUserDetailSchema {
   [field: string]: NexxusFieldDef;
 }
 
-export class NexxusApplicationUser extends NexxusBaseModel<NexxusUserModelType> {
-  constructor(data: NexxusUserModelType) {
+export class NexxusUser extends NexxusBuiltinModel<INexxusUser> {
+  constructor(data: INexxusUser) {
     super({ ...data, type: MODEL_REGISTRY.user });
 
     if (this.data.appId === undefined || typeof this.data.appId !== 'string') {

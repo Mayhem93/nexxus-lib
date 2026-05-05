@@ -13,13 +13,13 @@ import {
   INexxusBaseServices,
   type INexxusBaseModel,
   type AnyNexxusModel,
-  type AnyNexxusModelType,
+  type AnyNexxusModelData,
   NexxusApplication,
-  NexxusApplicationModelType,
+  INexxusApplication,
   NexxusAppModel,
-  NexxusAppModelType,
-  NexxusApplicationUser,
-  NexxusUserModelType,
+  INexxusAppModel,
+  NexxusUser,
+  INexxusUser,
   NexxusJsonPatch,
   NexxusFilterQuery,
   NexxusLogicalOperator,
@@ -150,7 +150,7 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
     let waitForRefresh = true;
 
     for (const item of collection) {
-      let itemData : AnyNexxusModelType;
+      let itemData : AnyNexxusModelData;
       let index;
 
       switch (item.constructor) {
@@ -159,8 +159,8 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
           index = `${NEXXUS_PREFIX_LC}-application`;
 
           break;
-        case NexxusApplicationUser:
-          itemData = (item as NexxusApplicationUser).getData();
+        case NexxusUser:
+          itemData = (item as NexxusUser).getData();
           index = `${NEXXUS_PREFIX_LC}-app-${itemData.appId}-${itemData.type}`;
 
           break;
@@ -187,7 +187,7 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
   }
 
   async searchItems(options: NexxusDbSearchOptions<'application'>): Promise<NexxusApplication[]>;
-  async searchItems(options: NexxusDbSearchOptions<'user'>): Promise<NexxusApplicationUser[]>;
+  async searchItems(options: NexxusDbSearchOptions<'user'>): Promise<NexxusUser[]>;
   async searchItems(options: NexxusDbSearchOptions<string>): Promise<NexxusAppModel[]>;
 
   async searchItems(options: NexxusDbSearchOptions<string>): Promise<Array<AnyNexxusModel>> {
@@ -248,13 +248,13 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
     const models: Array<AnyNexxusModel> = searchResults.hits.hits.map(res => {
       switch (options.type) {
         case 'application':
-          return new NexxusApplication(res._source as NexxusApplicationModelType);
+          return new NexxusApplication(res._source as INexxusApplication);
 
         case 'user':
-          return new NexxusApplicationUser(res._source as NexxusUserModelType);
+          return new NexxusUser(res._source as INexxusUser);
 
         default:
-          return new NexxusAppModel(res._source as NexxusAppModelType);
+          return new NexxusAppModel(res._source as INexxusAppModel);
       }
     });
 
@@ -262,7 +262,7 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
   }
 
   async getItems(options: NexxusDbGetOptions<'application'>): Promise<Array<NexxusApplication | null>>;
-  async getItems(options: NexxusDbGetOptions<'user'>): Promise<Array<NexxusApplicationUser | null>>;
+  async getItems(options: NexxusDbGetOptions<'user'>): Promise<Array<NexxusUser | null>>;
   async getItems(options: NexxusDbGetOptions<string>): Promise<Array<NexxusAppModel | null>>;
 
   async getItems(options: NexxusDbGetOptions<string>): Promise<Array<NexxusBaseModel | null>> {
@@ -311,13 +311,13 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
 
         switch(options.type) {
           case 'application':
-            return new NexxusApplication(doc._source as NexxusApplicationModelType);
+            return new NexxusApplication(doc._source as INexxusApplication);
 
           case 'user':
-            return new NexxusApplicationUser(doc._source as NexxusUserModelType);
+            return new NexxusUser(doc._source as INexxusUser);
 
           default:
-            return new NexxusAppModel(doc._source as NexxusAppModelType);
+            return new NexxusAppModel(doc._source as INexxusAppModel);
         }
       });
     } catch (e: Error | unknown) {
@@ -329,7 +329,7 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
     }
   }
 
-  async updateItems(collection: Array<NexxusJsonPatch>, options?: NexxusDbUpdateOptions): Promise<Array<Partial<AnyNexxusModelType>>> {
+  async updateItems(collection: Array<NexxusJsonPatch>, options?: NexxusDbUpdateOptions): Promise<Array<Partial<AnyNexxusModelData>>> {
     const bulkBody: Array<BulkOperationContainer | BulkUpdateAction> = [];
     const collectedModelFields = new Set<string>();
     let waitForRefresh = true;
@@ -444,7 +444,7 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
 
     const returnFields = options?.returnFields ? collectedModelFields.union(options.returnFields) : collectedModelFields;
     const result = await this.client.bulk({ operations: bulkBody, _source: Array.from(returnFields), refresh: waitForRefresh ? 'wait_for' : false });
-    const collectedPartialModels: Array<Partial<AnyNexxusModelType>> = [];
+    const collectedPartialModels: Array<Partial<AnyNexxusModelData>> = [];
 
     NexxusElasticsearchDb.logger.debug(`Bulk update result: ${JSON.stringify(result)}`, NexxusDatabaseAdapter.loggerLabel);
 
@@ -453,7 +453,7 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
         collectedPartialModels.push({
           id: item.update._id,
           ...(item.update.get!._source)
-        } as Partial<AnyNexxusModelType>);
+        } as Partial<AnyNexxusModelData>);
       } else {
         NexxusElasticsearchDb.logger.warn(`Failed to update item ID ${item.update?._id} in Elasticsearch: ${JSON.stringify(item.update?.error)}`, NexxusDatabaseAdapter.loggerLabel);
       }

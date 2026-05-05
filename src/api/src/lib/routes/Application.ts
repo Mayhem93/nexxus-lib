@@ -5,14 +5,14 @@ import {
   NexxusApi
 } from '../Api';
 import {
-  type NexxusApplicationModelType,
+  type INexxusApplication,
   NexxusApplication
 } from '@mayhem93/nexxus-core-lib';
 
 import type { Router, RequestHandler } from 'express';
 
 interface CreateApplicationRequest extends NexxusApiRequest {
-  body: Pick<NexxusApplicationModelType, "name" | "description" | "schema">;
+  body: Pick<INexxusApplication, "name" | "description" | "schema">;
 }
 
 export default class ApplicationRoute extends NexxusApiBaseRoute {
@@ -35,7 +35,7 @@ export default class ApplicationRoute extends NexxusApiBaseRoute {
       throw new InvalidParametersException('Invalid or missing schema in request body');
     }
 
-    const newApp = new NexxusApplication(req.body as NexxusApplicationModelType);
+    const newApp = new NexxusApplication(req.body as INexxusApplication);
 
     await NexxusApi.messageQueue.publishMessage('writer', { data: newApp.getData(), event: 'app_created' });
 

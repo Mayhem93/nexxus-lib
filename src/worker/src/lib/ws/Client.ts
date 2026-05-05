@@ -106,6 +106,7 @@ export class NexxusWsClient extends EventEmitter<ClientEventMap> {
       switch (message.event) {
         case 'register':
           await this.registerDevice(message);
+
           break;
         default:
           NexxusWebsocketsTransportWorker.logger.warn(`Unknown client event: ${message.event}`, 'NexxusWsClient');
@@ -135,7 +136,7 @@ export class NexxusWsClient extends EventEmitter<ClientEventMap> {
   public sendMessage<E extends keyof NexxusWsServerMessage>(event: E, data: NexxusWsServerMessage[E]) {
     // const message: NexxusWsServerEvent<E> = data;
 
-    this.socket.send(JSON.stringify(data));
+    this.socket.send(JSON.stringify({ event, data }));
     NexxusWebsocketsTransportWorker.logger.debug(`Sent ${event} message to client ${this.id}: "${JSON.stringify(data)}"`, 'NexxusWsClient');
   }
 

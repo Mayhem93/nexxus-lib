@@ -8,7 +8,7 @@ import {
   NexxusJsonPatch,
   NexxusBaseQueuePayload,
   NexxusTransportManagetJsonPatch,
-  NexxusAppModelType
+  INexxusAppModel
 } from '@mayhem93/nexxus-core-lib';
 import { NexxusQueueMessage } from '@mayhem93/nexxus-message-queue-lib';
 import {
@@ -88,7 +88,7 @@ export class NexxusWriterWorker extends NexxusBaseWorker<NexxusWriterWorkerConfi
             {
               returnFields: app?.getModelFilterableFields(patchData.metadata.type)
             }
-          ) as Array<Partial<NexxusAppModelType>>;
+          ) as Array<Partial<INexxusAppModel>>;
 
           const transformedPatchData = jsonPatch.get();
           const transformedUpdatedAtPatchData = updateUpdatedAtPatch.get();

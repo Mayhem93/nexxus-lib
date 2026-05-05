@@ -1,18 +1,18 @@
 import { NexxusBaseModel, INexxusBaseModel } from "./BaseModel";
 
-export type NexxusAppModelType = INexxusBaseModel & {
+export interface INexxusAppModel extends INexxusBaseModel {
   appId: string;
   userId?: string;
   [key: string]: any;
-};
+}
 
-export class NexxusAppModel extends NexxusBaseModel<NexxusAppModelType> {
-  constructor(props: NexxusAppModelType) {
+export class NexxusAppModel extends NexxusBaseModel<INexxusAppModel> {
+  constructor(props: INexxusAppModel) {
     super(props);
 
     // Validate required field
     if (!props.appId) {
-      throw new Error('AppModel requires appId');
+      throw new Error('AppModel requires AppId');
     }
   }
 }

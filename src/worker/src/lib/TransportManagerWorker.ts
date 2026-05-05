@@ -10,7 +10,7 @@ import {
   NexxusModelDeletedPayload,
   NexxusBaseQueuePayload,
   NexxusFilterQuery,
-  NexxusAppModelType,
+  INexxusAppModel,
   NexxusWebSocketJsonPatch
 } from '@mayhem93/nexxus-core-lib';
 import { NexxusQueueMessage } from '@mayhem93/nexxus-message-queue-lib';
@@ -272,7 +272,7 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<NexxusTranspo
               return filter.test(singleChange.metadata.partialModel);
             });
           } else {
-            matchesFilter = filter.test(changes as Partial<NexxusAppModelType>);
+            matchesFilter = filter.test(changes as Partial<INexxusAppModel>);
           }
 
           // Test if ANY change matches
