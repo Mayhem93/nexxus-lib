@@ -7,7 +7,7 @@ import {
   NexxusAppModel,
   NexxusJsonPatch,
   NexxusBaseQueuePayload,
-  NexxusTransportManagetJsonPatch,
+  NexxusTransportManagerJsonPatch,
   INexxusAppModel
 } from '@mayhem93/nexxus-core-lib';
 import { NexxusQueueMessage } from '@mayhem93/nexxus-message-queue-lib';
@@ -65,14 +65,14 @@ export class NexxusWriterWorker extends NexxusBaseWorker<NexxusWriterWorkerConfi
       }
 
       case 'model_updated': {
-        const validatedPatches: Array<NexxusTransportManagetJsonPatch> = [];
+        const validatedPatches: Array<NexxusTransportManagerJsonPatch> = [];
 
         for (const patchData of payload.data) {
           const app = NexxusWriterWorker.loadedApps.get(patchData.metadata.appId);
-          const appSchema = app!.getSchema();
+          const modelSchema = app!.getAppModelSchema(patchData.metadata.type);
           const jsonPatch = new NexxusJsonPatch(patchData);
 
-          jsonPatch.validate({ appSchema });
+          jsonPatch.validate(modelSchema);
 
           const updateUpdatedAtPatch = new NexxusJsonPatch({
             op: 'replace',
@@ -81,7 +81,7 @@ export class NexxusWriterWorker extends NexxusBaseWorker<NexxusWriterWorkerConfi
             metadata: jsonPatch.get().metadata
           });
 
-          updateUpdatedAtPatch.validate({ appSchema });
+          updateUpdatedAtPatch.validate(modelSchema);
 
           const result = await NexxusWriterWorker.database.updateItems(
             [jsonPatch, updateUpdatedAtPatch],

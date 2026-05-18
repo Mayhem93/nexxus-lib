@@ -4,6 +4,8 @@ import {
 } from "./BaseModel";
 import { NexxusBuiltinModel } from "./BuiltinModel";
 import { NexxusFieldDef, NexxusModelDef } from "../common/ModelTypes";
+import { InferModel } from "../common/InferModel";
+import { NEXXUS_BUILTIN_MODEL_SCHEMAS } from "../common/BuiltinSchemas";
 import { NexxusUserDetailSchema } from "./User";
 
 import * as Dot from 'dot-prop';
@@ -16,19 +18,14 @@ export interface NexxusUserTypeConfig {
   private?: boolean; // if true users can only be created through the nexxus hub API; defaults to false if not specified
 }
 
-export interface INexxusApplication extends INexxusBaseModel<'application'> {
-  name: string;
-  description?: string;
-  schema: NexxusApplicationSchema;
-  authEnabled: boolean;
-  allowMultipleLogin: boolean | null;
-  userTypes?: {
-    [userType: string]: NexxusUserTypeConfig;
-  }
-  userDetailSchema?: {
-    [userType: string]: NexxusUserDetailSchema;
+export type INexxusApplication =
+  & INexxusBaseModel<'application'>
+  & InferModel<typeof NEXXUS_BUILTIN_MODEL_SCHEMAS.application>
+  & {
+    schema: NexxusApplicationSchema;
+    userTypes?: { [userType: string]: NexxusUserTypeConfig };
+    userDetailSchema?: { [userType: string]: NexxusUserDetailSchema };
   };
-}
 
 export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
   constructor(data: INexxusApplication) {
@@ -55,7 +52,7 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
         throw new Error("Application 'userSchema' must be provided when 'authEnabled' is enabled");
       }
 
-      if (typeof data.allowMultipleLogin !== 'boolean' && data.allowMultipleLogin !== undefined) {
+      if (typeof data.allowMultipleLogin !== 'boolean' && data.allowMultipleLogin !== undefined && data.allowMultipleLogin !== null) {
         throw new Error("Application 'allowMultipleLogin' must be a boolean when 'authEnabled' is enabled");
       }
 
@@ -63,7 +60,7 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
         throw new Error("Application 'userTypes' must be an object when 'authEnabled' is enabled");
       }
 
-      this.data.allowMultipleLogin = data.allowMultipleLogin || true;
+      this.data.allowMultipleLogin = data.allowMultipleLogin ?? true;
       this.data.userTypes = data.userTypes ? { ...data.userTypes, ...{ default: {} } } : { default: {} };
     } else {
       this.data.allowMultipleLogin = null;
@@ -86,6 +83,29 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
 
   public hasAuthEnabled(): boolean {
     return this.data.authEnabled;
+  }
+
+  /**
+   * Runtime field schema for one of the developer-declared models in this
+   * application's `schema` field. Built-in models (user, application) have
+   * their own static `getModelSchema` and are not resolved here.
+   */
+  public getAppModelSchema(modelType: string): NexxusModelDef {
+    const appModelDef = this.data.schema[modelType];
+
+    if (!appModelDef) {
+      throw new Error(`Unknown app model type: ${modelType}`);
+    }
+
+    return { ...appModelDef, userId: { type: 'string', required: false } };
+  }
+
+  /**
+   * Runtime field schema for Application records. Static because the schema
+   * is global — not per-app.
+   */
+  public static getModelSchema(): NexxusModelDef {
+    return { ...NEXXUS_BUILTIN_MODEL_SCHEMAS.application };
   }
 
   public getAppModelFieldType(modelType: string, fieldPath: string): string | undefined {

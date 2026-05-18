@@ -129,7 +129,7 @@ export default class ModelRoute extends NexxusApiBaseRoute {
         }
       });
 
-      jsonPatch.validate({ appSchema });
+      jsonPatch.validate(NexxusApi.getStoredApp(appId)!.getAppModelSchema(req.body.type));
 
       await NexxusApi.messageQueue.publishMessage('writer', { event: 'model_updated', data: [ jsonPatch.get() ] });
 

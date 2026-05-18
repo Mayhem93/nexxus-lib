@@ -6,15 +6,10 @@ import type {
   NexxusFieldDef,
   NexxusModelDef
 } from '../common/ModelTypes';
-import {
-  NEXXUS_UNIVERSAL_FIELDS,
-  NEXXUS_BUILTIN_MODEL_SCHEMAS,
-  type NexxusBuiltinModelType
-} from './BuiltinSchemas';
+import { NEXXUS_UNIVERSAL_FIELDS } from './BuiltinSchemas';
 import type {
   INexxusAppModel
 } from '../models/AppModel';
-import type { NexxusUserDetailSchema } from '../models/User';
 
 import * as dot from 'dot-prop';
 import sortKeys from 'sort-keys';
@@ -54,37 +49,15 @@ type FilterNodeWithContext = FilterNode & {
   parentOperator?: NexxusLogicalOperator;
 };
 
-export type NexxusFilterQueryConfig =
-  | { appModelDef: NexxusModelDef}  // For app-defined models
-  | { modelType: NexxusBuiltinModelType, userDetailsSchema?: NexxusUserDetailSchema }; // For built-in models (user, application)
-
 export class NexxusFilterQuery {
   private nodes: FilterNode[] = [];
   private modelDef: NexxusModelDef;
 
   constructor(
     private query: NexxusFilterQueryType,
-    config: NexxusFilterQueryConfig
+    schema: NexxusModelDef
   ) {
-    // Determine which schema to use and merge with universal fields
-    if ('appModelDef' in config) {
-      // Merge universal fields + app model fields
-      this.modelDef = { ...NEXXUS_UNIVERSAL_FIELDS, ...config.appModelDef, ...{ userId: { type: 'string', required: false } } };
-    } else {
-      // Merge universal fields + built-in model schema
-      const builtinSchema = NEXXUS_BUILTIN_MODEL_SCHEMAS[config.modelType];
-
-      this.modelDef = { ...NEXXUS_UNIVERSAL_FIELDS, ...builtinSchema };
-
-      if (config.modelType === 'user') {
-        if (!config.userDetailsSchema) {
-          throw new InvalidQueryFilterException("User detail schema must be provided for 'user' model queries");
-        }
-
-        this.modelDef.details = { type: 'object', properties: config.userDetailsSchema!, required: false };
-      }
-    }
-
+    this.modelDef = { ...NEXXUS_UNIVERSAL_FIELDS, ...schema };
     this.validateAndParse();
   }
 

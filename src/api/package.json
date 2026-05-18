@@ -52,7 +52,7 @@
     "@types/passport-google-oauth20": "^2.0.17",
     "@types/passport-local": "^1.0.38",
     "concurrently": "^9.2.1",
-    "typescript": "5.9.3"
+    "typescript": "^6.0.0"
   },
   "repository": {
     "type": "git",

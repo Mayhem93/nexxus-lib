@@ -125,7 +125,7 @@ export default class SubscriptionRoute extends NexxusApiBaseRoute {
       }
 
       try {
-        subscriptionFilter = new NexxusFilterQuery(req.body.filter, { appModelDef: appSchema[req.body.model] });
+        subscriptionFilter = new NexxusFilterQuery(req.body.filter, NexxusApi.getStoredApp(appId)!.getAppModelSchema(req.body.model));
       } catch (e) {
         if (e instanceof InvalidQueryFilterException) {
           throw new InvalidParametersException(`Invalid filter parameter: ${e.message}`);
@@ -137,6 +137,7 @@ export default class SubscriptionRoute extends NexxusApiBaseRoute {
 
     let databaseFilter: NexxusFilterQuery | undefined;
 
+    //we merge "id" and "userId" queries to a db filter since these two are handled separately in the request
     if (req.body.filter !== undefined || req.body.id !== undefined || req.body.userId !== undefined) {
       const dbFilterInput: NexxusFilterQueryType = {
         ...structuredClone(req.body.filter || {}),
@@ -145,7 +146,7 @@ export default class SubscriptionRoute extends NexxusApiBaseRoute {
       };
 
       try {
-        databaseFilter = new NexxusFilterQuery(dbFilterInput, { appModelDef: appSchema[req.body.model] });
+        databaseFilter = new NexxusFilterQuery(dbFilterInput, NexxusApi.getStoredApp(appId)!.getAppModelSchema(req.body.model));
       } catch (e) {
         if (e instanceof InvalidQueryFilterException) {
           throw new InvalidParametersException(`Invalid filter parameter: ${e.message}`);

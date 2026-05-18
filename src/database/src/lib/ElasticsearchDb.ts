@@ -29,13 +29,13 @@ import {
 } from "@mayhem93/nexxus-core-lib";
 
 import * as ElasticSearch from '@elastic/elasticsearch';
-import type {
-  BulkOperationBase,
-  BulkOperationContainer,
-  BulkUpdateAction,
-  QueryDslQueryContainer,
-  QueryDslBoolQuery
-} from "@elastic/elasticsearch/lib/api/typesWithBodyKey";
+import type { estypesWithBody } from '@elastic/elasticsearch';
+
+type BulkOperationBase = estypesWithBody.BulkOperationBase;
+type BulkOperationContainer = estypesWithBody.BulkOperationContainer;
+type BulkUpdateAction = estypesWithBody.BulkUpdateAction;
+type QueryDslQueryContainer = estypesWithBody.QueryDslQueryContainer;
+type QueryDslBoolQuery = estypesWithBody.QueryDslBoolQuery;
 
 import * as path from "node:path";
 

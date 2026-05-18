@@ -8,7 +8,7 @@ import { AppExistsMiddleware, AuthMiddleware, RequiredHeadersMiddleware } from '
 import { InvalidParametersException, NotFoundException } from '../Exceptions';
 
 import { NexxusDevice, NexxusDeviceProps } from '@mayhem93/nexxus-redis';
-import { NexxusJsonPatch } from '@mayhem93/nexxus-core-lib';
+import { NexxusJsonPatch, NexxusUser } from '@mayhem93/nexxus-core-lib';
 
 import type { Router, RequestHandler } from 'express';
 
@@ -98,8 +98,10 @@ export default class DeviceRoute extends NexxusApiBaseRoute {
         }
       });
 
-      updateUserDevicesPatch.validate({ modelType: 'user', userDetailsSchema: app?.getUserDetailSchema()! });
-      updatedAtPatch.validate({ modelType: 'user', userDetailsSchema: app?.getUserDetailSchema()! });
+      const userSchema = NexxusUser.getModelSchema(app.getUserDetailSchema());
+
+      updateUserDevicesPatch.validate(userSchema);
+      updatedAtPatch.validate(userSchema);
 
       await NexxusApi.database.updateItems([updateUserDevicesPatch, updatedAtPatch]);
     }

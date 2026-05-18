@@ -33,7 +33,7 @@
     "@types/amqplib": "^0.10.8",
     "@types/node": "^24.10.0",
     "concurrently": "^9.2.1",
-    "typescript": "5.9.3"
+    "typescript": "^6.0.0"
   },
   "dependencies": {
     "@mayhem93/nexxus-core-lib": "0.0.1",

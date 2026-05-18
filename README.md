@@ -54,7 +54,7 @@ Every major component is **replaceable**:
 | **Transports** | WebSockets | MQTT, SSE, gRPC, Socket.IO |
 | **Logger** | Winston | Rollbar, Datadog, custom loggers |
 | **Config Provider** | File/Env/CLI | AWS Secrets Manager, Vault, etcd |
-| **Workers** | Writer, Transport Manager | Custom business logic workers |
+| **Workers** | Writer, Transport Manager, Transport (hardcoded with websockets at the moment) | Custom business logic workers |
 
 ### 🚀 Real-Time by Design
 
@@ -90,9 +90,24 @@ Nexxus follows a **distributed worker architecture** where different services ha
 4. **Writer Worker** → Publishes `model_created` event to Transport Manager Queue
 5. **Transport Manager** → Queries Redis for devices subscribed to `app:myapp:model:task`
 6. **Transport Manager** → Filters subscriptions (e.g., only tasks with `priority=high`)
-7. **Transport Manager** → Routes notification to WebSocket Queue for matched devices
-8. **WebSocket Worker** → Pushes real-time update to connected clients
+7. **Transport Manager** → Routes notification to the right transport worker
+8. **Transport Worker** → Pushes real-time update to connected clients
 9. **Client** → Receives notification and updates UI
+
+At the moment pluggable (custom) workers are not supported but the way they would work is:
+
+- Through another piece of software called Nexxus Hub (not yet implemented) we design how the whole process looks
+- The hub is responsible for holding information about the nodes including information about the data flow in the pipeline
+- We may have "sync" workers that can be added before the write worker (so API would send it to this worker instead), afterwards it will forward the message to the write worker
+- "Async" workers these do not require to have an "output" eg: they don't pass the message to another worker
+
+### About database models
+
+These come in two flavors (they share a common base):
+
+- Nexxus builtins like for example Application, User, Admin etc
+- Nexxus application models which are application bound, the name of a model cannot be a reserved nexxus builtin name
+- They share a common base like "id", "createdAt" and "updatedAt"
 
 ---
 
@@ -473,6 +488,10 @@ export class PostgresDatabaseAdapter extends DatabaseAdapter {
 }
 ```
 
+At the moment different adapters are only plugged in via code in the api/worker code itself (this will be a separate project that builds upon the library that we have here).
+
+Idealy in the future we want to specify which adapters to use via the "conf.json" file so in the could it would be opaque which adapter would actually be used, this requires dynamic imports of course. When it comes to provisioning of course there will be an extra steps to install those adapters as npm dependencies
+
 **Register in config:**
 
 ```typescript
@@ -608,6 +627,8 @@ export class RollbarLogger extends BaseLogger {
 
 ### 🚧 In Progress
 
+- User ACL management
+- Application admins (and their ACL as well)
 - Plugin architecture finalization
 - Abstract classes for transports (MQTT, SSE, etc.)
 - Configuration schema and validation

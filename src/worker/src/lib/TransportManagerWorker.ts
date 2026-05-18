@@ -6,7 +6,7 @@ import {
   NexxusTransportManagerPayload,
   NexxusModelCreatedPayload,
   NexxusTransportManagerModelUpdatedPayload,
-  NexxusTransportManagetJsonPatch,
+  NexxusTransportManagerJsonPatch,
   NexxusModelDeletedPayload,
   NexxusBaseQueuePayload,
   NexxusFilterQuery,
@@ -220,11 +220,11 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<NexxusTranspo
   private async getDevicesFromGeneratedChannels<T>(channel: NexxusBaseSubscriptionChannel, change?: T | T[]): Promise<Map<NexxusDeviceTransportString, Set<string>>> {
     const deviceToChannelsMap = new Map<NexxusDeviceTransportString, Set<string>>();
 
-    const appSchema = NexxusTransportManagerWorker.loadedApps.get(channel.appId)?.getData().schema;
+    const app = NexxusTransportManagerWorker.loadedApps.get(channel.appId);
 
-    if (!appSchema) {
+    if (!app) {
       NexxusTransportManagerWorker.logger.warn(
-        `Application schema not found for appId: "${channel.appId}" when getting devices for channel: ${JSON.stringify(channel)}`,
+        `Application not found for appId: "${channel.appId}" when getting devices for channel: ${JSON.stringify(channel)}`,
         NexxusTransportManagerWorker.loggerLabel
       );
 
@@ -264,11 +264,11 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<NexxusTranspo
 
         // Step 3: For each filter, test if ANY change matches
         for (const [filterId, filterQuery] of Object.entries(filters)) {
-          const filter = new NexxusFilterQuery(filterQuery, { appModelDef: appSchema[channelPattern.model] });
+          const filter = new NexxusFilterQuery(filterQuery, app.getAppModelSchema(channelPattern.model));
           let matchesFilter = false;
 
           if (Array.isArray(changes)) {
-            matchesFilter = (changes as Array<NexxusTransportManagetJsonPatch>).some(singleChange => {
+            matchesFilter = (changes as Array<NexxusTransportManagerJsonPatch>).some(singleChange => {
               return filter.test(singleChange.metadata.partialModel);
             });
           } else {

@@ -21,6 +21,7 @@ import {
   InvalidJsonPatchException,
   NexxusJsonPatch,
   NexxusJsonPatchInternal,
+  NexxusUser,
 } from '@mayhem93/nexxus-core-lib';
 
 import type { Router, RequestHandler } from 'express';
@@ -184,13 +185,15 @@ export default class UserRoute extends NexxusApiBaseRoute {
     patches.push(updatedAtPatch);
 
     try {
+      const userSchema = NexxusUser.getModelSchema(app?.getUserDetailSchema(user.userType));
+
       if (authProvidersPatch) {
-        authProvidersPatch.validate({ modelType: 'user', userDetailsSchema: app?.getUserDetailSchema(user.userType)! });
+        authProvidersPatch.validate(userSchema);
         patches.push(authProvidersPatch);
       }
 
-      jsonPatch.validate({ modelType: 'user', userDetailsSchema: app?.getUserDetailSchema(user.userType)! });
-      updatedAtPatch.validate({ modelType: 'user', userDetailsSchema: app?.getUserDetailSchema(user.userType)! });
+      jsonPatch.validate(userSchema);
+      updatedAtPatch.validate(userSchema);
 
       await NexxusApi.database.updateItems(patches);
 

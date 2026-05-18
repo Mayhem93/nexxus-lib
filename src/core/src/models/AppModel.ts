@@ -3,7 +3,7 @@ import { NexxusBaseModel, INexxusBaseModel } from "./BaseModel";
 export interface INexxusAppModel extends INexxusBaseModel {
   appId: string;
   userId?: string;
-  [key: string]: any;
+  [key: string]: unknown;
 }
 
 export class NexxusAppModel extends NexxusBaseModel<INexxusAppModel> {

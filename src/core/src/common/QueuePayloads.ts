@@ -15,13 +15,13 @@ export type NexxusModelDeletedPayload = { event: 'model_deleted'; data: NexxusMo
 // Built-in worker payloads
 export type NexxusWriterPayload = NexxusModelCreatedPayload | NexxusModelUpdatedPayload | NexxusModelDeletedPayload;
 
-export type NexxusTransportManagetJsonPatch = Omit<NexxusJsonPatchInternal, 'metadata'> & {
+export type NexxusTransportManagerJsonPatch = Omit<NexxusJsonPatchInternal, 'metadata'> & {
   metadata: NexxusJsonPatchMetadata & { partialModel: Partial<INexxusAppModel> };
 };
 
 export type NexxusTransportManagerModelUpdatedPayload = {
   event: 'model_updated';
-  data: Array<NexxusTransportManagetJsonPatch>;
+  data: Array<NexxusTransportManagerJsonPatch>;
 }
 
 export type NexxusTransportManagerPayload = NexxusModelCreatedPayload | NexxusTransportManagerModelUpdatedPayload | NexxusModelDeletedPayload;

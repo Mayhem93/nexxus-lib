@@ -1,6 +1,3 @@
-import {
-  NexxusApplicationSchema
-} from '../models/Application';
 import type {
   NexxusFieldDef,
   NexxusModelDef,
@@ -11,12 +8,7 @@ import type {
   PrimitiveFieldDef
 } from '../common/ModelTypes';
 import { INexxusAppModel } from '../models/AppModel';
-import {
-  NexxusBuiltinModelType,
-  NEXXUS_BUILTIN_MODEL_SCHEMAS,
-  NEXXUS_UNIVERSAL_FIELDS
-} from './BuiltinSchemas';
-import type { NexxusUserDetailSchema } from '../models/User';
+import { NEXXUS_UNIVERSAL_FIELDS } from './BuiltinSchemas';
 import { InvalidJsonPatchException } from '../lib/Exceptions';
 
 import * as dot from 'dot-prop';
@@ -56,10 +48,6 @@ type NexxusJsonPatchMetadataInternal = NexxusJsonPatchMetadata & {
 };
 
 export type NexxusJsonPatchMetadataConstructor = Omit<NexxusJsonPatchMetadata, 'pathFieldTypes'>;
-
-export type NexxusJsonPatchValidationConfig =
-  | { appSchema: NexxusApplicationSchema }  // For app-defined models
-  | { modelType: NexxusBuiltinModelType, userDetailsSchema?: NexxusUserDetailSchema }; // For built-in models (user, application)
 
 type OperationRule = {
   allowedTypes: NexxusModelFieldType[];
@@ -214,46 +202,11 @@ export class NexxusJsonPatch {
     return partialModel;
   }
 
-  public validate(config: NexxusJsonPatchValidationConfig): void {
-    const modelType = this.fullPatch.metadata.type;
-    let modelSpec: NexxusModelDef;
-
-    // Determine which schema to use
-    if ('appSchema' in config) {
-      const appModelSpec = config.appSchema[modelType];
-
-      if (!appModelSpec) {
-        throw new InvalidJsonPatchException(`Model type "${modelType}" not found in application schema`);
-      }
-
-      modelSpec = {
-        updatedAt: NEXXUS_UNIVERSAL_FIELDS.updatedAt,
-        ...appModelSpec
-      };
-    } else {
-      // Built-in model: only include updatedAt from universal fields + built-in schema
-      const builtinSchema = NEXXUS_BUILTIN_MODEL_SCHEMAS[modelType as NexxusBuiltinModelType];
-
-      modelSpec = {
-        updatedAt: NEXXUS_UNIVERSAL_FIELDS.updatedAt,
-        ...builtinSchema
-      };
-
-      switch (config.modelType) {
-        case 'user':
-          if (config.modelType === 'user' && !config.userDetailsSchema) {
-            throw new InvalidJsonPatchException("User detail schema must be provided for 'user' model patches");
-          }
-
-          modelSpec.details = { type: 'object', properties: config.userDetailsSchema!, required: false };
-
-          break;
-        case 'application':
-          break;
-        default:
-          throw new InvalidJsonPatchException(`Unsupported built-in model type: ${config.modelType}`);
-      }
-    }
+  public validate(schema: NexxusModelDef): void {
+    const modelSpec: NexxusModelDef = {
+      updatedAt: NEXXUS_UNIVERSAL_FIELDS.updatedAt,
+      ...schema
+    };
 
     const operationRule = NexxusJsonPatch.OPERATION_RULES[this.fullPatch.op];
 

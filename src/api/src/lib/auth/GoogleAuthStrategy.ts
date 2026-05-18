@@ -7,7 +7,7 @@ import {
 } from '../Api';
 import { UserAuthenticationFailedException } from '../Exceptions';
 
-import { NexxusJsonPatch } from '@mayhem93/nexxus-core-lib';
+import { NexxusJsonPatch, NexxusUser } from '@mayhem93/nexxus-core-lib';
 
 import type { NextFunction, Request, Response } from 'express';
 import passport from 'passport';
@@ -93,8 +93,10 @@ export default class NexxusGoogleAuthStrategy extends NexxusAuthStrategy<NexxusG
               }
             });
 
-            patch.validate({ modelType: 'user', userDetailsSchema: app?.getUserDetailSchema(userType)! });
-            updatedAtPatch.validate({ modelType: 'user', userDetailsSchema: app?.getUserDetailSchema(userType)! });
+            const userSchema = NexxusUser.getModelSchema(app?.getUserDetailSchema(userType));
+
+            patch.validate(userSchema);
+            updatedAtPatch.validate(userSchema);
 
             await NexxusApi.database.updateItems([patch, updatedAtPatch]);
           }

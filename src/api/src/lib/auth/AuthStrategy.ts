@@ -71,7 +71,7 @@ export default abstract class NexxusAuthStrategy<T extends NexxusBaseAuthStrateg
    */
   public async findUserByUsername(appId: string, username: string): Promise<NexxusUser | null> {
     const app = NexxusApi.getStoredApp(appId);
-    const fq = new NexxusFilterQuery({ username }, { modelType: 'user', userDetailsSchema: app?.getUserDetailSchema()!});
+    const fq = new NexxusFilterQuery({ username }, NexxusUser.getModelSchema(app?.getUserDetailSchema()));
 
     const res = await NexxusApi.database.searchItems({
       appId,
