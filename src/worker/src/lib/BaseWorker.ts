@@ -36,6 +36,7 @@ export abstract class NexxusBaseWorker<T extends NexxusConfig, Ev extends Nexxus
 
   public static logger: NexxusBaseLogger<any>;
 
+  protected initialized: boolean = false;
   protected static loggerLabel: Readonly<string> = "NxxWorker";
   protected static readonly loadedApps: Map<string, NexxusApplication> = new Map();
   protected abstract queueName: NexxusQueueName;
@@ -69,6 +70,7 @@ export abstract class NexxusBaseWorker<T extends NexxusConfig, Ev extends Nexxus
   public async init() : Promise<void> {
     await NexxusBaseWorker.loadApps();
     await NexxusBaseWorker.messageQueue.consumeMessages(this.queueName, this.processMessage.bind(this) as any);
+    this.initialized = true;
   }
 
   protected async publish<Q extends NexxusQueueName>(

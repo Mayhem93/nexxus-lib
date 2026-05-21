@@ -46,13 +46,26 @@ export class NexxusWebsocketsTransportWorker extends NexxusBaseWorker<NexxusWebs
   };
   protected static schemaPath: string = path.join(__dirname, "../../src/schemas/websockets-transport-worker.schema.json");
 
-  private server : WebSocketServer;
+  private server! : WebSocketServer;
   private unregisteredClients: Set<NexxusWsClient> = new Set();
   private registeredClients : Map<string, NexxusWsClient> = new Map(); // Map of deviceId to WebSocket client
   private wsToNexxusClientMap: Map<WebSocket, NexxusWsClient> = new Map();
 
   constructor(services: NexxusWorkerServices) {
     super(services);
+  }
+
+  public async init() : Promise<void> {
+    if (this.initialized) {
+      NexxusWebsocketsTransportWorker.logger.warn("NexxusWebsocketsTransportWorker already initialized", NexxusWebsocketsTransportWorker.loggerLabel);
+
+      return Promise.resolve();
+    }
+
+    // TODO: Support multiple workers with IDs
+    this.queueName += `_${this.config.workerId || 1}`;
+
+    await super.init();
 
     this.server = new WebSocketServer({
       port: this.config.port,
@@ -74,16 +87,16 @@ export class NexxusWebsocketsTransportWorker extends NexxusBaseWorker<NexxusWebs
       }
     });
 
-    this.server.on('listening', () => {
-      NexxusWebsocketsTransportWorker.logger.info(`WebSocket server listening on port ${this.config.port}`, NexxusWebsocketsTransportWorker.loggerLabel);
-    });
-    this.server.on('connection', this.handleConnection.bind(this));
-  }
+    await new Promise<void>((resolve, reject) => {
+      this.server.once('listening', () => {
+        NexxusWebsocketsTransportWorker.logger.info(`WebSocket server listening on port ${this.config.port}`, NexxusWebsocketsTransportWorker.loggerLabel);
+        resolve();
+      });
 
-  public async init() : Promise<void> {
-    // TODO: Support multiple workers with IDs
-    this.queueName += `_${this.config.workerId || 1}`;
-    await super.init();
+      this.server.once('error', reject);
+    });
+
+    this.server.on('connection', this.handleConnection.bind(this));
   }
 
   protected async processMessage(msg: NexxusQueueMessage<NexxusWebsocketPayload>): Promise<void> {
@@ -158,11 +171,13 @@ export class NexxusWebsocketsTransportWorker extends NexxusBaseWorker<NexxusWebs
         client.sendMessage('register', { success: true });
 
         NexxusWebsocketsTransportWorker.logger.info(`Client "${clientId}" registered with device ID: "${deviceId}"`, NexxusWebsocketsTransportWorker.loggerLabel);
-      } catch (e) {
+      } catch (e : Error | unknown) {
         if (e instanceof RedisDeviceInvalidParamsException) {
           client.sendError(new NexxusWsInvalidParametersException(`Invalid parameters for device with ID "${deviceId}": ${e.message}`));
         } else {
           client.sendError(new NexxusWsInternalServerException('An unexpected error occurred while registering the device.'));
+
+          NexxusWebsocketsTransportWorker.logger.error(`Unexpected error during client registration for device ID "${deviceId}": ${e instanceof Error ? e.message : String(e)}`, NexxusWebsocketsTransportWorker.loggerLabel);
         }
       }
     });
