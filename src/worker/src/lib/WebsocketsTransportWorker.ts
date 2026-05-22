@@ -100,7 +100,7 @@ export class NexxusWebsocketsTransportWorker extends NexxusBaseWorker<NexxusWebs
   }
 
   protected async processMessage(msg: NexxusQueueMessage<NexxusWebsocketPayload>): Promise<void> {
-    NexxusWebsocketsTransportWorker.logger.debug(`Processing message: ${JSON.stringify(msg.payload)}`, NexxusWebsocketsTransportWorker.loggerLabel);
+    NexxusWebsocketsTransportWorker.logger.debug('Processing message', { payload: msg.payload }, NexxusWebsocketsTransportWorker.loggerLabel);
 
     const payload = msg.payload;
 
@@ -120,30 +120,30 @@ export class NexxusWebsocketsTransportWorker extends NexxusBaseWorker<NexxusWebs
           if (client) {
             switch (payload.data.event) {
               case 'model_created':
-                NexxusWebsocketsTransportWorker.logger.debug(`Sending model_created to device ID: "${deviceId}"`, NexxusWebsocketsTransportWorker.loggerLabel);
+                NexxusWebsocketsTransportWorker.logger.debug(`Sending model_created to device ID: "${deviceId}"`, { deviceId }, NexxusWebsocketsTransportWorker.loggerLabel);
 
                 client.sendMessage('model_created', payload.data);
 
                 break;
               case 'model_updated':
-                NexxusWebsocketsTransportWorker.logger.debug(`Sending model_updated to device ID: "${deviceId}"`, NexxusWebsocketsTransportWorker.loggerLabel);
+                NexxusWebsocketsTransportWorker.logger.debug(`Sending model_updated to device ID: "${deviceId}"`, { deviceId }, NexxusWebsocketsTransportWorker.loggerLabel);
 
                 client.sendMessage('model_updated', payload.data);
 
                 break;
 
               case 'model_deleted':
-                NexxusWebsocketsTransportWorker.logger.debug(`Sending model_deleted to device ID: "${deviceId}"`, NexxusWebsocketsTransportWorker.loggerLabel);
+                NexxusWebsocketsTransportWorker.logger.debug(`Sending model_deleted to device ID: "${deviceId}"`, { deviceId }, NexxusWebsocketsTransportWorker.loggerLabel);
 
                 client.sendMessage('model_deleted', payload.data);
 
                 break;
 
               default:
-                NexxusWebsocketsTransportWorker.logger.warn(`Unknown event "${(payload.data as NexxusBaseQueuePayload).event}"`, NexxusWebsocketsTransportWorker.loggerLabel);
+                NexxusWebsocketsTransportWorker.logger.warn(`Unknown event "${(payload.data as NexxusBaseQueuePayload).event}"`, { deviceId }, NexxusWebsocketsTransportWorker.loggerLabel);
             }
           } else {
-            NexxusWebsocketsTransportWorker.logger.warn(`No registered client found for device ID: "${deviceId}"`, NexxusWebsocketsTransportWorker.loggerLabel);
+            NexxusWebsocketsTransportWorker.logger.warn(`No registered client found for device ID: "${deviceId}"`, { deviceId }, NexxusWebsocketsTransportWorker.loggerLabel);
           }
         }
 
@@ -177,7 +177,7 @@ export class NexxusWebsocketsTransportWorker extends NexxusBaseWorker<NexxusWebs
         } else {
           client.sendError(new NexxusWsInternalServerException('An unexpected error occurred while registering the device.'));
 
-          NexxusWebsocketsTransportWorker.logger.error(`Unexpected error during client registration for device ID "${deviceId}": ${e instanceof Error ? e.message : String(e)}`, NexxusWebsocketsTransportWorker.loggerLabel);
+          NexxusWebsocketsTransportWorker.logger.error(`Unexpected error during client registration for device ID "${deviceId}"`, { error: e, deviceId }, NexxusWebsocketsTransportWorker.loggerLabel);
         }
       }
     });
@@ -213,13 +213,14 @@ export class NexxusWebsocketsTransportWorker extends NexxusBaseWorker<NexxusWebs
 
       NexxusWebsocketsTransportWorker.logger.info(
         `Client "${nxxWsClient.id}" disconnected with device ID: "${deviceId || 'null'}. Code ${code}, Reason: "${reason.toString()}"`,
+        { deviceId, code, reason: reason.toString() },
         NexxusWebsocketsTransportWorker.loggerLabel
       );
     } catch (e) {
       if (e instanceof RedisDeviceInvalidParamsException) {
-        NexxusWebsocketsTransportWorker.logger.error(`Error updating device on disconnect for device ID "${deviceId}": ${e.message}`, NexxusWebsocketsTransportWorker.loggerLabel);
+        NexxusWebsocketsTransportWorker.logger.error(`Error updating device on disconnect for device ID "${deviceId}"`, { error: e, deviceId }, NexxusWebsocketsTransportWorker.loggerLabel);
       } else {
-        NexxusWebsocketsTransportWorker.logger.error(`Unexpected error on client disconnect: ${e instanceof Error ? e.message : String(e)}`, NexxusWebsocketsTransportWorker.loggerLabel);
+        NexxusWebsocketsTransportWorker.logger.error('Unexpected error on client disconnect', { error: e, deviceId }, NexxusWebsocketsTransportWorker.loggerLabel);
       }
     }
   }

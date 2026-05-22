@@ -11,20 +11,46 @@ import { NEXXUS_PREFIX_LC } from '@mayhem93/nexxus-core-lib';
 
 import crypto from 'crypto';
 
+type NexxusDeviceTransportType = 'volatile' | 'persistent' | 'unknown';
+
 export interface NexxusDeviceProps {
   id: string;
   appId: string;
   name: string;
   userId?: string | null;
-  type: "volatile" | "persistent" | "unknown";
+  /**
+   * "volatile" - devices are connected to transports that are connection-oriented, their subscriptions only exist while they
+   * are connected
+   *
+   * "persistent" - devices are connected to transports that are not connection-oriented (eg: Apple Push Notifications), their
+   * subscriptions persist until the 3rd party service confirms that the subscription is removed, or the device is manually
+   * removed from the system.
+   *
+   * "unknown" - device type is not known until it registers with a transport, at which point it will be classified as either
+   * "volatile" or "persistent" based on the transport type
+   */
+  type: NexxusDeviceTransportType;
   status: 'online' | 'offline' | 'unknown';
+  /**
+   * The transport this device is currently connected to, or null if it's not currently connected to any transport. This field is
+   * required to determine which transport's subscription management logic should be applied to this device.
+   *
+   * TODO: rename this field to "transport" because persistent transports are connectionless but devices can still be connected
+   * to them in the logical sense that they have an active subscription to that transport
+   */
   connectedTo: string | null;
+  /**
+   * Irelevant for persistent devices, for volatile devices this is the timestamp of the last time the device was seen online.
+   * This field is required to determine if a volatile device that is not currently connected to any transport should be considered
+   * online or offline based on the last timestamp of the connection. Does not tell information about the device's true connection
+   * status (eg: pings).
+   */
   lastSeen: Date;
   subscriptions: NexxusRedisSubscription[];
 }
 
 type NexxusDeviceConstructorProps = Omit<NexxusDeviceProps, 'lastSeen' |'subscriptions' | 'connectedTo' | 'type'> & {
-  type?: "volatile" | "persistent" | "unknown";
+  type?: NexxusDeviceTransportType;
   connectedTo?: string | null;
   lastSeen?: string;
   subscriptions: NexxusRedisSubscription[] | [];
@@ -217,7 +243,7 @@ export class NexxusDevice extends NexxusRedisBaseModel<NexxusDeviceProps> {
 
   public async removeSubscription(subscription: NexxusRedisSubscription): Promise<boolean> {
     if (!this.val.connectedTo) {
-      throw new RedisDeviceNotConnectedException(`Device with id "${this.val.id}" is not connected to any transport`);
+      throw new RedisDeviceNotConnectedException(`Device with id "${this.val.id}" is not registered with any transport`);
     }
 
     subscription.setAppId(this.val.appId);
@@ -263,12 +289,12 @@ export class NexxusDevice extends NexxusRedisBaseModel<NexxusDeviceProps> {
       subscriptions: subscriptionKeys
     });
 
-    for (const subInstance of this.val.subscriptions) {
-      await subInstance.addDevice(this.val.id, this.val.connectedTo!);
-    }
-
     if (!res) {
       throw new RedisCommandErrorException(`Failed to save device with id "${this.val.id}"`);
+    }
+
+    for (const subInstance of this.val.subscriptions) {
+      await subInstance.addDevice(this.val.id, this.val.connectedTo!);
     }
 
     NexxusRedis.logger.debug(`Saved device with id "${this.val.id}"`);

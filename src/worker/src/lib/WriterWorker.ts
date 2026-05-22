@@ -45,7 +45,7 @@ export class NexxusWriterWorker extends NexxusBaseWorker<NexxusWriterWorkerConfi
   }
 
   protected async processMessage(msg: NexxusQueueMessage<NexxusWriterPayload>): Promise<void> {
-    NexxusWriterWorker.logger.debug(`Processing message: ${JSON.stringify(msg.payload)}`, NexxusWriterWorker.loggerLabel);
+    NexxusWriterWorker.logger.debug('Processing message', { payload: msg.payload }, NexxusWriterWorker.loggerLabel);
 
     const payload = msg.payload;
 

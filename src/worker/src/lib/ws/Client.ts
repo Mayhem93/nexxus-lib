@@ -116,7 +116,7 @@ export class NexxusWsClient extends EventEmitter<ClientEventMap> {
         e = new NexxusWsInternalServerException('An unexpected error occurred while processing the message.');
       }
 
-      NexxusWebsocketsTransportWorker.logger.error(`Error processing message from client "${this.id}": ${e.message}`, 'NexxusWsClient');
+      NexxusWebsocketsTransportWorker.logger.error(`Error processing message from client "${this.id}"`, { error: e }, 'NexxusWsClient');
       this.sendError(e);
     }
   }
@@ -137,7 +137,7 @@ export class NexxusWsClient extends EventEmitter<ClientEventMap> {
     // const message: NexxusWsServerEvent<E> = data;
 
     this.socket.send(JSON.stringify({ event, data }));
-    NexxusWebsocketsTransportWorker.logger.debug(`Sent ${event} message to client ${this.id}: "${JSON.stringify(data)}"`, 'NexxusWsClient');
+    NexxusWebsocketsTransportWorker.logger.debug(`Sent ${event} message to client ${this.id}`, { data }, 'NexxusWsClient');
   }
 
   private async registerDevice(msg: NexxusWsClientEvent<'register'>) {

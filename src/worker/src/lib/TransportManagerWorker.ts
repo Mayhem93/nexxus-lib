@@ -54,7 +54,7 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<NexxusTranspo
   }
 
   protected async processMessage(msg: NexxusQueueMessage<NexxusTransportManagerPayload>): Promise<void> {
-    NexxusTransportManagerWorker.logger.debug(`Processing message: ${JSON.stringify(msg.payload)}`, NexxusTransportManagerWorker.loggerLabel);
+    NexxusTransportManagerWorker.logger.debug('Processing message', { payload: msg.payload }, NexxusTransportManagerWorker.loggerLabel);
 
     const payload = msg.payload;
 
@@ -66,14 +66,14 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<NexxusTranspo
       case "model_updated":
         await this.handleModelUpdated(payload.data);
 
-        NexxusTransportManagerWorker.logger.debug(`Processing model update with data: ${JSON.stringify(payload.data)}`, NexxusTransportManagerWorker.loggerLabel);
+        NexxusTransportManagerWorker.logger.debug('Processing model update', { data: payload.data }, NexxusTransportManagerWorker.loggerLabel);
 
         break;
 
       case "model_deleted":
         await this.handleModelDeleted(payload.data);
 
-        NexxusTransportManagerWorker.logger.debug(`Processing model delete with data: ${JSON.stringify(payload.data)}`, NexxusTransportManagerWorker.loggerLabel);
+        NexxusTransportManagerWorker.logger.debug('Processing model delete', { data: payload.data }, NexxusTransportManagerWorker.loggerLabel);
 
         break;
       default:

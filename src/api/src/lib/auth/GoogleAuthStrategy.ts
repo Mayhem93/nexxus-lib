@@ -68,7 +68,7 @@ export default class NexxusGoogleAuthStrategy extends NexxusAuthStrategy<NexxusG
               ));
             }
 
-            NexxusApi.logger.debug(`status: ${status}; user: ${JSON.stringify(user.getData())}`, 'GoogleAuthStrategy');
+            NexxusApi.logger.debug(`Google auth status: ${status}`, { user: user.getData() }, 'GoogleAuthStrategy');
 
             // update user with additional auth provider
             const patch = new NexxusJsonPatch({

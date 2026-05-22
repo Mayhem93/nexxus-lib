@@ -72,7 +72,7 @@ export default class UserRoute extends NexxusApiBaseRoute {
   private async me(req: NexxusApiRequest, res: NexxusApiResponse): Promise<void> {
     const { iat, exp, aud, iss, ...userData } = req.user!;
 
-    NexxusApi.logger.debug(`Fetching current user data: ${JSON.stringify(req.user!)}`, 'UserRoute');
+    NexxusApi.logger.debug('Fetching current user data', { user: req.user! }, 'UserRoute');
 
     res.status(200).json(userData);
   }

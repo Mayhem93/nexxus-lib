@@ -241,7 +241,7 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
       query: this.buildQuery(options.filter)
     };
 
-    NexxusElasticsearchDb.logger.debug(`Executing Elasticsearch search with request: ${JSON.stringify(esSearchRequest)}`, NexxusDatabaseAdapter.loggerLabel);
+    NexxusElasticsearchDb.logger.debug('Executing Elasticsearch search', { request: esSearchRequest }, NexxusDatabaseAdapter.loggerLabel);
 
     const searchResults = await this.client.search(esSearchRequest);
 
@@ -300,7 +300,7 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
 
       return esMgetResponse.docs.map(doc => {
         if ('error' in doc) {
-          NexxusElasticsearchDb.logger.warn(`Error retrieving document ID ${doc._id} from Elasticsearch: ${JSON.stringify(doc.error)}`, NexxusDatabaseAdapter.loggerLabel);
+          NexxusElasticsearchDb.logger.warn(`Error retrieving document ID ${doc._id} from Elasticsearch`, { error: doc.error }, NexxusDatabaseAdapter.loggerLabel);
 
           return null;
         }
@@ -440,13 +440,13 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
       return [];
     }
 
-    NexxusElasticsearchDb.logger.debug(`Executing bulk update in Elasticsearch with ${JSON.stringify(bulkBody)}`, NexxusDatabaseAdapter.loggerLabel);
+    NexxusElasticsearchDb.logger.debug('Executing bulk update in Elasticsearch', { bulkBody }, NexxusDatabaseAdapter.loggerLabel);
 
     const returnFields = options?.returnFields ? collectedModelFields.union(options.returnFields) : collectedModelFields;
     const result = await this.client.bulk({ operations: bulkBody, _source: Array.from(returnFields), refresh: waitForRefresh ? 'wait_for' : false });
     const collectedPartialModels: Array<Partial<AnyNexxusModelData>> = [];
 
-    NexxusElasticsearchDb.logger.debug(`Bulk update result: ${JSON.stringify(result)}`, NexxusDatabaseAdapter.loggerLabel);
+    NexxusElasticsearchDb.logger.debug('Bulk update result', { result }, NexxusDatabaseAdapter.loggerLabel);
 
     result.items.forEach(item => {
       if (item.update && item.update.status >= 200 && item.update.status < 300) {
@@ -455,7 +455,7 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
           ...(item.update.get!._source)
         } as Partial<AnyNexxusModelData>);
       } else {
-        NexxusElasticsearchDb.logger.warn(`Failed to update item ID ${item.update?._id} in Elasticsearch: ${JSON.stringify(item.update?.error)}`, NexxusDatabaseAdapter.loggerLabel);
+        NexxusElasticsearchDb.logger.warn(`Failed to update item ID ${item.update?._id} in Elasticsearch`, { error: item.update?.error }, NexxusDatabaseAdapter.loggerLabel);
       }
     });
 
@@ -560,7 +560,7 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
       }
     }
 
-    NexxusDatabaseAdapter.logger.debug(`Built Elasticsearch query: ${JSON.stringify(root)}`, NexxusDatabaseAdapter.loggerLabel);
+    NexxusDatabaseAdapter.logger.debug('Built Elasticsearch query', { query: root }, NexxusDatabaseAdapter.loggerLabel);
 
     return root;
   }

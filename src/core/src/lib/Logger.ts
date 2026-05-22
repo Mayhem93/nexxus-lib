@@ -6,7 +6,7 @@ import * as Winston from 'winston';
 
 import * as path from "node:path";
 
-type LoggableType = string | object | number | boolean | null | undefined;
+export type LogAttributes = Record<string, unknown>;
 
 export const enum NexxusLoggerLevels {
   EMERGENCY = "emerg",
@@ -27,11 +27,11 @@ type WinstonNexxusLoggerConfig = {
 } & NexxusConfig;
 
 export interface INexxusLogger {
-  log(level: NexxusLoggerLevels, message: LoggableType, label?: string): void
+  log(level: NexxusLoggerLevels, message: string, attributes?: LogAttributes, label?: string): void
 }
 
-export interface INexxusAsyncLogger extends INexxusLogger {
-  log(level: NexxusLoggerLevels, message: LoggableType, label?: string): Promise<void>
+export interface INexxusAsyncLogger {
+  log(level: NexxusLoggerLevels, message: string, attributes?: LogAttributes, label?: string): Promise<void>
 }
 
 interface NexxusLoggerServices extends Omit<INexxusBaseServices, 'logger'> {}
@@ -42,34 +42,94 @@ export abstract class NexxusBaseLogger<T extends NexxusConfig> extends NexxusBas
     super(services.configManager.getConfig('logger') as T);
   }
 
-  public abstract log(level: NexxusLoggerLevels, message: LoggableType, label?: string): void
+  public abstract log(level: NexxusLoggerLevels, message: string, attributes?: LogAttributes, label?: string): void;
 
-  public debug(message: LoggableType, label?: string): void {
-    this.log(NexxusLoggerLevels.DEBUG, message, label);
+  protected static serializeError(err: Error): Record<string, unknown> {
+    const out: Record<string, unknown> = {
+      name: err.name,
+      message: err.message,
+      stack: err.stack,
+    };
+
+    if (err.cause !== undefined) {
+      out.cause = err.cause;
+    }
+
+    return out;
   }
 
-  public info(message: LoggableType, label?: string): void {
-    this.log(NexxusLoggerLevels.INFO, message, label);
+  protected static makeSafeReplacer(): (key: string, value: unknown) => unknown {
+    const seen = new WeakSet<object>();
+
+    return (_key, value) => {
+      if (value instanceof Error) {
+        return NexxusBaseLogger.serializeError(value);
+      }
+
+      if (value !== null && typeof value === 'object') {
+        if (seen.has(value as object)) {
+          return '[circular]';
+        }
+
+        seen.add(value as object);
+      }
+
+      return value;
+    };
   }
 
-  public warn(message: LoggableType, label?: string): void {
-    this.log(NexxusLoggerLevels.WARNING, message, label);
+  protected static safeStringify(value: unknown): string {
+    return JSON.stringify(value, NexxusBaseLogger.makeSafeReplacer());
   }
 
-  public error(message: LoggableType, label?: string): void {
-    this.log(NexxusLoggerLevels.ERROR, message, label);
+  public debug(message: string, label?: string): void;
+  public debug(message: string, attributes: LogAttributes, label?: string): void;
+  public debug(message: string, attributesOrLabel?: LogAttributes | string, label?: string): void {
+    this.dispatch(NexxusLoggerLevels.DEBUG, message, attributesOrLabel, label);
   }
 
-  public critical(message: LoggableType, label?: string): void {
-    this.log(NexxusLoggerLevels.CRITICAL, message, label);
+  public info(message: string, label?: string): void;
+  public info(message: string, attributes: LogAttributes, label?: string): void;
+  public info(message: string, attributesOrLabel?: LogAttributes | string, label?: string): void {
+    this.dispatch(NexxusLoggerLevels.INFO, message, attributesOrLabel, label);
   }
 
-  public alert(message: LoggableType, label?: string): void {
-    this.log(NexxusLoggerLevels.ALERT, message, label);
+  public warn(message: string, label?: string): void;
+  public warn(message: string, attributes: LogAttributes, label?: string): void;
+  public warn(message: string, attributesOrLabel?: LogAttributes | string, label?: string): void {
+    this.dispatch(NexxusLoggerLevels.WARNING, message, attributesOrLabel, label);
   }
 
-  public emerg(message: LoggableType, label?: string): void {
-    this.log(NexxusLoggerLevels.EMERGENCY, message, label);
+  public error(message: string, label?: string): void;
+  public error(message: string, attributes: LogAttributes, label?: string): void;
+  public error(message: string, attributesOrLabel?: LogAttributes | string, label?: string): void {
+    this.dispatch(NexxusLoggerLevels.ERROR, message, attributesOrLabel, label);
+  }
+
+  public critical(message: string, label?: string): void;
+  public critical(message: string, attributes: LogAttributes, label?: string): void;
+  public critical(message: string, attributesOrLabel?: LogAttributes | string, label?: string): void {
+    this.dispatch(NexxusLoggerLevels.CRITICAL, message, attributesOrLabel, label);
+  }
+
+  public alert(message: string, label?: string): void;
+  public alert(message: string, attributes: LogAttributes, label?: string): void;
+  public alert(message: string, attributesOrLabel?: LogAttributes | string, label?: string): void {
+    this.dispatch(NexxusLoggerLevels.ALERT, message, attributesOrLabel, label);
+  }
+
+  public emerg(message: string, label?: string): void;
+  public emerg(message: string, attributes: LogAttributes, label?: string): void;
+  public emerg(message: string, attributesOrLabel?: LogAttributes | string, label?: string): void {
+    this.dispatch(NexxusLoggerLevels.EMERGENCY, message, attributesOrLabel, label);
+  }
+
+  private dispatch(level: NexxusLoggerLevels, message: string, attributesOrLabel: LogAttributes | string | undefined, label: string | undefined): void {
+    if (typeof attributesOrLabel === 'string') {
+      this.log(level, message, undefined, attributesOrLabel);
+    } else {
+      this.log(level, message, attributesOrLabel, label);
+    }
   }
 }
 
@@ -93,35 +153,28 @@ export class WinstonNexxusLogger extends NexxusBaseLogger<WinstonNexxusLoggerCon
   constructor(services: NexxusLoggerServices) {
     super(services);
 
-    let format : Winston.Logform.Format;
+    let format: Winston.Logform.Format;
 
     if (this.config.logType === "json") {
-      format = Winston.format.json({
-        circularValue: '[circular]'
+      format = Winston.format.printf(info => {
+        const record: Record<string, unknown> = {};
+
+        if (info.timestamp) {
+          record.time = info.timestamp;
+        }
+
+        record.level = info.level;
+        record.label = (info.label as string | undefined) ?? "default-label";
+        record.msg = info.message;
+
+        const attrs = info.attrs as LogAttributes | undefined;
+
+        if (attrs && typeof attrs === 'object' && Object.keys(attrs).length > 0) {
+          record.attrs = attrs;
+        }
+
+        return WinstonNexxusLogger.safeStringify(record);
       });
-
-      format = Winston.format.combine(
-        Winston.format.printf(info => {
-          const msg = info.message as string;
-
-          if (msg.startsWith("{") || msg.startsWith("[")) {
-            try {
-              info.message = JSON.parse(msg);
-            } catch (e) {
-              if (e.message.includes("Unexpected")) {
-                info.message = msg;
-              } else {
-                throw e;
-              }
-            }
-          }
-
-          info.label = info.label || "default-label";
-
-          return JSON.stringify(info);
-        }),
-        format
-      );
 
       if (this.config.timestamps) {
         format = Winston.format.combine(
@@ -131,27 +184,24 @@ export class WinstonNexxusLogger extends NexxusBaseLogger<WinstonNexxusLoggerCon
       }
     } else {
       format = Winston.format.printf(info => {
-        let result = '';
+        const label = (info.label as string | undefined) ?? "default-label";
+        const timestampPrefix = info.timestamp ? `[${info.timestamp}] ` : '';
+        const header = `${timestampPrefix}${info.level.toLocaleUpperCase()} [${label}]: ${info.message}`;
 
-        if (info.message === undefined) {
-          const isMetadataEmpty = Object.keys(info.metadata as object).length === 0;
+        const attrs = info.attrs as LogAttributes | undefined;
 
-          info.message = isMetadataEmpty ? 'undefined' :JSON.stringify(info.metadata);
+        if (!attrs || typeof attrs !== 'object' || Object.keys(attrs).length === 0) {
+          return header;
         }
 
-        info.label = info.label || "default-label";
+        const lines = [header];
 
-        if (info.timestamp){
-          result += `[${info.timestamp}] `;
+        for (const [k, v] of Object.entries(attrs)) {
+          lines.push(`  ${k}: ${WinstonNexxusLogger.safeStringify(v)}`);
         }
 
-        return result + `${info.level.toLocaleUpperCase()} [${info.label}]: ${info.message}`;
+        return lines.join('\n');
       });
-
-      format = Winston.format.combine(
-        Winston.format.metadata({ fillExcept: ['message', 'level', 'timestamp', 'label'] }),
-        format
-      );
 
       if (this.config.timestamps) {
         format = Winston.format.combine(
@@ -177,12 +227,7 @@ export class WinstonNexxusLogger extends NexxusBaseLogger<WinstonNexxusLoggerCon
     });
   }
 
-  public log(level: NexxusLoggerLevels, message: LoggableType, label?: string): void {
-    if (typeof message === 'object' || Array.isArray(message)) {
-      message = JSON.stringify(message);
-    } else {
-      message = String(message);
-    }
-    this.winston.log(level, message, { label });
+  public log(level: NexxusLoggerLevels, message: string, attributes?: LogAttributes, label?: string): void {
+    this.winston.log(level, message, { label, attrs: attributes });
   }
 }
