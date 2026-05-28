@@ -8,11 +8,9 @@ import { NexxusWebsocketsTransportWorker } from "../WebsocketsTransportWorker";
 
 import { NexxusDevice, RedisKeyNotFoundException } from "@mayhem93/nexxus-redis";
 import {
-  NexxusModelDeletedData,
-  NexxusWebSocketJsonPatch,
-  NexxusWebSocketModelCreatedPayload,
-  NexxusWebSocketModelDeletedPayload,
-  NexxusWebSocketModelUpdatedPayload
+  NexxusTransportModelCreatedPayload,
+  NexxusTransportModelDeletedPayload,
+  NexxusTransportModelUpdatedPayload
 } from "@mayhem93/nexxus-core-lib";
 
 import { WebSocket, Data as WebSocketData } from "ws";
@@ -42,9 +40,9 @@ export type NexxusWsServerMessage = {
     success: boolean;
     message?: string;
   };
-  model_created: NexxusWebSocketModelCreatedPayload
-  model_updated: NexxusWebSocketModelUpdatedPayload
-  model_deleted: NexxusWebSocketModelDeletedPayload;
+  model_created: NexxusTransportModelCreatedPayload;
+  model_updated: NexxusTransportModelUpdatedPayload;
+  model_deleted: NexxusTransportModelDeletedPayload;
   error: {
     message: string;
     code?: string;

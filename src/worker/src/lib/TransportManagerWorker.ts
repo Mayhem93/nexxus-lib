@@ -11,7 +11,7 @@ import {
   NexxusBaseQueuePayload,
   NexxusFilterQuery,
   INexxusAppModel,
-  NexxusWebSocketJsonPatch
+  NexxusTransportJsonPatch
 } from '@mayhem93/nexxus-core-lib';
 import { NexxusQueueMessage } from '@mayhem93/nexxus-message-queue-lib';
 import {
@@ -149,7 +149,7 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<NexxusTranspo
     for (const [transport, deviceChannelsMap] of transportToDeviceChannelsMap.entries()) {
       // For each device, create patches with their specific matching channels
       for (const [deviceId, channelKeys] of deviceChannelsMap.entries()) {
-        const websocketPatches: Array<NexxusWebSocketJsonPatch> = data.map(patch => ({
+        const websocketPatches: Array<NexxusTransportJsonPatch> = data.map(patch => ({
           op: patch.op,
           path: patch.path,
           value: patch.value,

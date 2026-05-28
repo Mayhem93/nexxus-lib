@@ -26,61 +26,63 @@ export type NexxusTransportManagerModelUpdatedPayload = {
 
 export type NexxusTransportManagerPayload = NexxusModelCreatedPayload | NexxusTransportManagerModelUpdatedPayload | NexxusModelDeletedPayload;
 
-export interface NexxusWebSocketJsonPatchMetadata {
+export interface NexxusTransportJsonPatchMetadata {
   id: string;
   channels: Array<string>; // Channel key from NexxusRedisSubscription.getKey()
 }
 
 /**
- * Metadata for WebSocket model created/deleted events
+ * Metadata for transport-bound model created/deleted events.
+ * Carries the channels that matched the subscription router, so the transport
+ * worker can correlate the event with the device's subscriptions if needed.
  */
-export interface NexxusWebSocketMetadata {
+export interface NexxusTransportMetadata {
   channels: Array<string>;
 }
 
 /**
- * Payload for WebSocket Transport - model created
+ * Payload for any transport worker - model created
  */
-export type NexxusWebSocketModelCreatedPayload = {
+export type NexxusTransportModelCreatedPayload = {
   event: 'model_created';
   model: INexxusAppModel;
-  metadata: NexxusWebSocketMetadata;
+  metadata: NexxusTransportMetadata;
 };
 
 /**
- * Payload for WebSocket Transport - model deleted
+ * Payload for any transport worker - model deleted
  */
-export type NexxusWebSocketModelDeletedPayload = {
+export type NexxusTransportModelDeletedPayload = {
   event: 'model_deleted';
   model: NexxusModelDeletedData;
-  metadata: NexxusWebSocketMetadata;
+  metadata: NexxusTransportMetadata;
 };
 
 /**
- * JsonPatch type for WebSocket transport workers
+ * JsonPatch type for transport workers - slim metadata with just channels.
  */
-export type NexxusWebSocketJsonPatch = Omit<NexxusJsonPatchInternal, 'metadata'> & {
-  metadata: NexxusWebSocketJsonPatchMetadata;
+export type NexxusTransportJsonPatch = Omit<NexxusJsonPatchInternal, 'metadata'> & {
+  metadata: NexxusTransportJsonPatchMetadata;
 };
 
 /**
- * Payload for WebSocket Transport - slim metadata with just channel
+ * Payload for any transport worker - model updated
  */
-export type NexxusWebSocketModelUpdatedPayload = {
+export type NexxusTransportModelUpdatedPayload = {
   event: 'model_updated';
-  data: Array<NexxusWebSocketJsonPatch>;
+  data: Array<NexxusTransportJsonPatch>;
 };
 
-// Payload for websocket workers (dynamic instances)
-export type NexxusWebsocketPayload = {
+/**
+ * Canonical payload consumed by ALL transport workers (volatile and persistent alike).
+ * The shape is identical across transports; each transport translates the inner `data`
+ * into its own wire format inside its `sendToDevice` implementation.
+ */
+export type NexxusTransportWorkerPayload = {
   event: 'device_message';
   deviceIds: Array<string>;
-  data: NexxusWebSocketModelCreatedPayload | NexxusWebSocketModelUpdatedPayload | NexxusWebSocketModelDeletedPayload;
+  data: NexxusTransportModelCreatedPayload | NexxusTransportModelUpdatedPayload | NexxusTransportModelDeletedPayload;
 };
-
-export type NexxusMqttPayload =
-  | { event: 'mqtt_publish'; topic: string; payload: Buffer; }
-  | { event: 'mqtt_subscribe'; topic: string; };
 
 // Map of built-in queue names to their payloads
 export interface NexxusBuiltInQueuePayloadMap {
@@ -88,10 +90,12 @@ export interface NexxusBuiltInQueuePayloadMap {
   'transport-manager': NexxusTransportManagerPayload;
 }
 
-// Map of dynamic queue patterns to their payloads
+// Map of dynamic queue patterns to their payloads.
+// All transport-worker queues carry the same canonical payload; the queue-name
+// prefix only identifies which transport worker pool consumes from it.
 export interface NexxusDynamicQueuePayloadMap {
-  'websockets-transport': NexxusWebsocketPayload;
-  'mqtt-transport': NexxusMqttPayload;
+  'websockets-transport': NexxusTransportWorkerPayload;
+  'mqtt-transport': NexxusTransportWorkerPayload;
 }
 
 // Built-in queue names (static)

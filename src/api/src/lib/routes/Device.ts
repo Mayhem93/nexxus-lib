@@ -15,7 +15,7 @@ import type { Router, RequestHandler } from 'express';
 import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 
-type RegisterDeviceRequestBody = Omit<NexxusDeviceProps, 'id' | 'appId' | 'status' | 'lastSeen' | 'subscriptions' | 'connectedTo' | 'type'>;
+type RegisterDeviceRequestBody = Omit<NexxusDeviceProps, 'id' | 'appId' | 'status' | 'lastSeen' | 'subscriptions' | 'transport' | 'type'>;
 type UpdateDeviceRequestBody = Pick<NexxusDeviceProps, 'name'>;
 
 interface RegisterDeviceRequest extends NexxusApiRequest {
@@ -68,8 +68,6 @@ export default class DeviceRoute extends NexxusApiBaseRoute {
       appId: req.headers['nxx-app-id'] as string,
       userId: userId || null,
       name: req.body.name,
-      status: 'offline',
-      lastSeen: (new Date(0)).toDateString(),
       subscriptions: []
     });
 
