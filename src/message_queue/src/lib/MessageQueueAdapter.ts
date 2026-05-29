@@ -23,6 +23,7 @@ export interface NexxusQueueMessage<TPayload = NexxusBaseQueuePayload> {
 export abstract class NexxusMessageQueueAdapter<T extends NexxusConfig, Ev extends NexxusMessageQueueAdapterEvents>
   extends NexxusBaseService<T, Ev extends NexxusMessageQueueAdapterEvents ? Ev : NexxusMessageQueueAdapterEvents> {
 
+  protected static configRootKey: string = "message_queue";
   protected static loggerLabel: Readonly<string> = "NxxMessageQueue";
   protected abstract reconnectDelayMs: number;
 

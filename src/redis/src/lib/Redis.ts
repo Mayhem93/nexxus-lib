@@ -23,15 +23,10 @@ export class NexxusRedis extends NexxusBaseService<NexxusRedisConfig> {
   private client: Redis.RedisClientType | Redis.RedisClusterType | null = null;
 
   protected static loggerLabel: Readonly<string> = 'NxxRedis';
+  protected static configRootKey: string = "redis";
   protected static schemaPath: string = path.join(__dirname, "../../src/schemas/redis.schema.json");
-  protected static envVars: ConfigEnvVars = {
-    source: this.name,
-    specs: []
-  };
-  protected static cliArgs: ConfigCliArgs = {
-    source: this.name,
-    specs: []
-  };
+  protected static envVars: ConfigEnvVars = [];
+  protected static cliArgs: ConfigCliArgs = [];
 
   public static logger: NexxusBaseLogger<any>;
   public static instance: NexxusRedis;

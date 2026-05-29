@@ -1,13 +1,13 @@
 {
   "$id": "nexxus-api",
-  "$comment": "app",
   "type": "object",
   "properties": {
     "name": {
       "type": "string"
     },
     "port": {
-      "type": "number"
+      "type": "number",
+      "default": 5000
     },
     "ssl": {
       "type": "object",
@@ -28,7 +28,8 @@
           "type": "string"
         },
         "jwtExpiresIn": {
-          "type": "string"
+          "type": "string",
+          "default": "30d"
         },
         "strategies": {
           "type": "object",
@@ -68,7 +69,6 @@
     }
   },
   "required": [
-    "name",
-    "port"
+    "name"
   ]
 }

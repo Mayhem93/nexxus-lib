@@ -1,5 +1,4 @@
 {
-  "$comment": "message_queue",
   "type": "object",
   "properties": {
     "host": {

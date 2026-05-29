@@ -60,31 +60,13 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
   private lastRefreshTimes: Map<string, number> = new Map();
 
   protected static schemaPath: string = path.join(__dirname, "../../src/schemas/elasticsearch.schema.json");
-  protected static envVars: ConfigEnvVars = {
-    source: this.name,
-    specs: [
-      {
-        name: "DB_HOST",
-        location: "database.host"
-      },
-      {
-        name: "DB_PORT",
-        location: "database.port"
-      },
-      {
-        name: "DB_USERNAME",
-        location: "database.user"
-      },
-      {
-        name: "DB_PASSWORD",
-        location: "database.password"
-      }
-    ]
-  };
-  protected static cliArgs: ConfigCliArgs = {
-    source: this.name,
-    specs: []
-  };
+  protected static envVars: ConfigEnvVars = [
+    { name: "DB_HOST",     location: "host" },
+    { name: "DB_PORT",     location: "port" },
+    { name: "DB_USERNAME", location: "user" },
+    { name: "DB_PASSWORD", location: "password" }
+  ];
+  protected static cliArgs: ConfigCliArgs = [];
 
   constructor(services: INexxusBaseServices) {
     super(services);
@@ -347,7 +329,7 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
         index += `${patchData.metadata.type}`;
       } else {
         if (!patchData.metadata.appId) {
-          throw new Error("App ID is required for updating for user or app-specific models");
+          throw new Error("App ID is required for updating user or app-specific models");
         }
 
         index += `app-${patchData.metadata.appId}-${patchData.metadata.type}`;
@@ -472,6 +454,9 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
       if (item instanceof NexxusApplication) {
         itemData = item.getData();
         index = `${NEXXUS_PREFIX_LC}-applications`;
+      } else if (item instanceof NexxusUser) {
+        itemData = item.getData();
+        index = `${NEXXUS_PREFIX_LC}-${itemData.appId}-user`;
       } else {
         itemData = (item as NexxusAppModel).getData();
         index = `${NEXXUS_PREFIX_LC}-app-${itemData.appId}-${itemData.type}`;

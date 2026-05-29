@@ -30,14 +30,8 @@ type NexxusWriterWorkerEvents = NexxusBaseWorkerEvents & {
 export class NexxusWriterWorker extends NexxusBaseWorker<NexxusWriterWorkerConfig, NexxusWriterWorkerEvents, NexxusWriterPayload> {
   protected queueName : NexxusQueueName = 'writer';
   protected static loggerLabel: Readonly<string> = 'NxxWriterWorker';
-  protected static cliArgs: ConfigCliArgs = {
-    source: this.name,
-    specs: []
-  };
-  protected static envVars: ConfigEnvVars = {
-    source: this.name,
-    specs: []
-  };
+  protected static cliArgs: ConfigCliArgs = [];
+  protected static envVars: ConfigEnvVars = [];
   protected static schemaPath: string = path.join(__dirname, '../../src/schemas/writer-worker.schema.json');
 
   constructor(services: NexxusWorkerServices) {

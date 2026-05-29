@@ -43,6 +43,7 @@ export interface NexxusDbUpdateOptions {
 export abstract class NexxusDatabaseAdapter<T extends NexxusConfig, Ev extends NexxusDatabaseAdapterEvents>
   extends NexxusBaseService<T, Ev extends NexxusDatabaseAdapterEvents ? Ev : NexxusDatabaseAdapterEvents> {
 
+  protected static configRootKey: string = "database";
   public static logger: NexxusBaseLogger<any>;
 
   constructor(services: INexxusBaseServices) {

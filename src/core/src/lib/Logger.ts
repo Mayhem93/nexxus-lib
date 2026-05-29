@@ -38,6 +38,8 @@ interface NexxusLoggerServices extends Omit<INexxusBaseServices, 'logger'> {}
 
 export abstract class NexxusBaseLogger<T extends NexxusConfig> extends NexxusBaseService<T> implements INexxusLogger {
 
+  protected static configRootKey: string = "logger";
+
   constructor(services: NexxusLoggerServices) {
     super(services.configManager.getConfig('logger') as T);
   }
@@ -136,19 +138,10 @@ export abstract class NexxusBaseLogger<T extends NexxusConfig> extends NexxusBas
 export class WinstonNexxusLogger extends NexxusBaseLogger<WinstonNexxusLoggerConfig> {
   private winston : Winston.Logger;
   protected static schemaPath: string = path.join(__dirname, "../../src/schemas/winston-logger.schema.json");
-  protected static envVars: ConfigEnvVars = {
-    source: this.name,
-    specs: [
-      {
-        name: "LOG_LEVEL",
-        location: "logger.level"
-      }
-    ]
-  };
-  protected static cliArgs: ConfigCliArgs = {
-    source: this.name,
-    specs: []
-  }
+  protected static envVars: ConfigEnvVars = [
+    { name: "LOG_LEVEL", location: "level" }
+  ];
+  protected static cliArgs: ConfigCliArgs = [];
 
   constructor(services: NexxusLoggerServices) {
     super(services);

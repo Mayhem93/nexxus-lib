@@ -1,5 +1,4 @@
 {
-  "$comment": "logger",
   "type": "object",
   "properties": {
     "level": {

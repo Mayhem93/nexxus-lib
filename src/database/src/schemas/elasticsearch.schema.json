@@ -1,5 +1,4 @@
 {
-  "$comment": "database",
   "type": "object",
   "properties": {
     "host": {

@@ -61,6 +61,13 @@ export abstract class NexxusBaseService<T extends NexxusConfig, Ev extends Event
 
   protected static envVars: ConfigEnvVars;
   protected static cliArgs: ConfigCliArgs;
+  /**
+   * The top-level key under which this service's configuration sits in the merged
+   * root config (e.g. "logger", "database", "redis", "app"). Required for every
+   * concrete service — ConfigManager uses it as the property name when grafting
+   * the service's schema definition into the root JSON Schema.
+   */
+  protected static configRootKey: string;
   protected static schemaPath: string;
   private static schemaContents: string;
 
@@ -91,21 +98,20 @@ export abstract class NexxusBaseService<T extends NexxusConfig, Ev extends Event
       throw new FatalErrorException(`Schema path not set for ${this.name} class.`);
     }
 
+    if (!this.configRootKey) {
+      throw new FatalErrorException(`configRootKey not set for ${this.name} class. ` +
+        'This static must declare the top-level key under which this service\'s config sits in the merged root config.');
+    }
+
     if (!this.schemaContents) {
       this.schemaContents = fs.readFileSync(this.schemaPath, 'utf-8');
     }
 
     const definition: JSONSchema7 = JSON.parse(this.schemaContents);
 
-    if (!definition.$comment) {
-      throw new FatalErrorException(`Schema for ${this.name} is missing $comment field. ` +
-        'This field is required to specify where in the main config this specific configuration ' +
-        'should be placed.');
-    }
-
     return {
       name: this.name,
-      where: definition.$comment as string,
+      where: this.configRootKey,
       definition,
       required: true
     };

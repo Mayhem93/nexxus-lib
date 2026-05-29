@@ -1,5 +1,4 @@
 {
-  "$comment": "redis",
   "type": "object",
   "properties": {
     "host": {

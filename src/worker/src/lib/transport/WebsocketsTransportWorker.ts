@@ -36,14 +36,8 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
 > {
   protected queueName : NexxusQueueName = "websockets-transport";
   protected static loggerLabel: Readonly<string> = "NxxWebsocketsTransportWorker";
-  protected static cliArgs: ConfigCliArgs = {
-    source: this.name,
-    specs: []
-  };
-  protected static envVars: ConfigEnvVars = {
-    source: this.name,
-    specs: []
-  };
+  protected static cliArgs: ConfigCliArgs = [];
+  protected static envVars: ConfigEnvVars = [];
   protected static schemaPath: string = path.join(__dirname, "../../../src/schemas/websockets-transport-worker.schema.json");
 
   private server! : WebSocketServer;

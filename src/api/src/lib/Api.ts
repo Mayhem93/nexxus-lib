@@ -101,19 +101,11 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig> {
   public static redis: NexxusRedis;
   public static instance: NexxusApi;
 
-  protected static cliArgs: ConfigCliArgs = {
-    source: this.name,
-    specs: []
-  };
-  protected static envVars: ConfigEnvVars = {
-    source: this.name,
-    specs: [
-      {
-        name: "AUTH_JWT_SECRET",
-        location: "app.auth.jwtSecret"
-      }
-    ]
-  };
+  protected static cliArgs: ConfigCliArgs = [];
+  protected static envVars: ConfigEnvVars = [
+    { name: "AUTH_JWT_SECRET", location: "auth.jwtSecret" }
+  ];
+  protected static configRootKey: string = "app";
   protected static schemaPath: string = path.join(__dirname, '../../src/schemas/api.schema.json');
 
   private express: Express.Express;

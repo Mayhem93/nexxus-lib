@@ -39,14 +39,8 @@ type NexxusTransportManagerWorkerEvents = NexxusBaseWorkerEvents & {
 export class NexxusTransportManagerWorker extends NexxusBaseWorker<NexxusTransportManagerWorkerConfig, NexxusTransportManagerWorkerEvents, NexxusTransportManagerPayload> {
   protected queueName : NexxusQueueName = "transport-manager";
   protected static loggerLabel: Readonly<string> = "NxxTransportManagerWorker";
-  protected static cliArgs: ConfigCliArgs = {
-    source: this.name,
-    specs: []
-  };
-  protected static envVars: ConfigEnvVars = {
-    source: this.name,
-    specs: []
-  };
+  protected static cliArgs: ConfigCliArgs = [];
+  protected static envVars: ConfigEnvVars = [];
   protected static schemaPath: string = path.join(__dirname, "../../src/schemas/transport-manager-worker.schema.json");
 
   constructor(services: NexxusWorkerServices) {
