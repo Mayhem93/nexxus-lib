@@ -64,11 +64,11 @@ export class NexxusConfigManager {
   private configProviders : Array<INexxusConfigProvider> = [];
   private customProviders : Array<INexxusConfigProvider> = [];
 
-  constructor(confFile? : string) {
+  constructor(configFileName? : string) {
     const schemaPath = path.join(__dirname, "../../src/schemas/root.schema.json");
 
     this.jsonSchema = JSON.parse(fs.readFileSync(schemaPath, 'utf-8'));
-    this.configProviders.push(new NexxusFileConfigProvider(path.join(process.cwd(), confFile ?? NexxusConfigManager.CONF_FILE_NAME)));
+    this.configProviders.push(new NexxusFileConfigProvider(path.join(process.cwd(), configFileName ?? NexxusConfigManager.CONF_FILE_NAME)));
     this.configProviders.push(new NexxusEnvVarsConfigProvider());
     this.configProviders.push(new NexxusCliArgConfigProvider());
   }
@@ -97,7 +97,7 @@ export class NexxusConfigManager {
     }
   }
 
-  public validateServices(svcs : Array<typeof NexxusBaseService>) : void {
+  public async validateServices(svcs : Array<typeof NexxusBaseService>) : Promise<void> {
     for(const NxxSvc of svcs) {
       const schemaDef = NxxSvc.schema();
       const className = NxxSvc.name;
@@ -108,7 +108,7 @@ export class NexxusConfigManager {
       this.addJsonSchemaDef(schemaDef);
     }
 
-    this.validate();
+    await this.validate();
   }
 
   private populateFromCliArgs(): void {

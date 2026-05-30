@@ -42,8 +42,8 @@ export class NexxusRabbitMq extends NexxusMessageQueueAdapter<RabbitMQConfig, Ne
     { name: "MQ_USER",     location: "user" },
     { name: "MQ_PASSWORD", location: "password" }
   ];
-  protected static cliArgs: ConfigCliArgs = [];
 
+  protected static cliArgs: ConfigCliArgs = [];
   protected reconnectDelayMs: number = 5000; //TODO: make this configurable
 
   private connection: amqplib.ChannelModel | null = null;

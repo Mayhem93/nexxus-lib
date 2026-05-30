@@ -66,6 +66,7 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
     { name: "DB_USERNAME", location: "user" },
     { name: "DB_PASSWORD", location: "password" }
   ];
+
   protected static cliArgs: ConfigCliArgs = [];
 
   constructor(services: INexxusBaseServices) {
@@ -141,12 +142,14 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
           index = `${NEXXUS_PREFIX_LC}-application`;
 
           break;
+
         case NexxusUser:
           itemData = (item as NexxusUser).getData();
           index = `${NEXXUS_PREFIX_LC}-app-${itemData.appId}-${itemData.type}`;
 
           break;
         case NexxusAppModel:
+
           itemData = (item as NexxusAppModel).getData();
           index = `${NEXXUS_PREFIX_LC}-app-${itemData.appId}-${itemData.type}`;
 
@@ -344,6 +347,7 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
             scriptLine = `ctx._source.${path} = params.value${idx}`;
 
             break;
+
           case 'append':
             if (patchData.metadata.pathFieldTypes![idx] === 'array') {
               scriptLine = `if (ctx._source.${path} == null) { ctx._source.${path} = []; } ctx._source.${path}.add(params.value${idx})`;
@@ -354,6 +358,7 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
             }
 
             break;
+
           case 'prepend':
             if (patchData.metadata.pathFieldTypes![idx] === 'array') {
               scriptLine = `if (ctx._source.${path} == null) { ctx._source.${path} = []; } ctx._source.${path}.add(0, params.value${idx})`;

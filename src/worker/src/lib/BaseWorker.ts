@@ -21,8 +21,6 @@ import {
 } from '@mayhem93/nexxus-message-queue-lib';
 import { NexxusRedis } from '@mayhem93/nexxus-redis';
 
-import * as Dot from 'dot-prop';
-
 export type NexxusBaseWorkerEvents = Record<string, any[]>;
 
 export interface NexxusWorkerServices extends INexxusBaseServices {
