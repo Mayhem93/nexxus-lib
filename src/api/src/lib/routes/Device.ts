@@ -5,7 +5,7 @@ import {
   NexxusApi
 } from '../Api';
 import { AppExistsMiddleware, AuthMiddleware, RequiredHeadersMiddleware } from '../middlewares';
-import { InvalidParametersException, NotFoundException } from '../Exceptions';
+import { InvalidParametersException } from '../Exceptions';
 
 import { NexxusDevice, NexxusDeviceProps } from '@mayhem93/nexxus-redis';
 import { NexxusJsonPatch, NexxusUser } from '@mayhem93/nexxus-core-lib';
@@ -13,7 +13,6 @@ import { NexxusJsonPatch, NexxusUser } from '@mayhem93/nexxus-core-lib';
 import type { Router, RequestHandler } from 'express';
 
 import { randomUUID } from 'node:crypto';
-import * as path from 'node:path';
 
 type RegisterDeviceRequestBody = Omit<NexxusDeviceProps, 'id' | 'appId' | 'status' | 'lastSeen' | 'subscriptions' | 'transport' | 'type'>;
 type UpdateDeviceRequestBody = Pick<NexxusDeviceProps, 'name'>;

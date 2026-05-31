@@ -102,6 +102,7 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
       case 'model_created':
       case 'model_updated':
       case 'model_deleted':
+
         client.sendMessage(data.event, data);
         break;
 

@@ -26,15 +26,10 @@ export type NexxusTransportManagerModelUpdatedPayload = {
 
 export type NexxusTransportManagerPayload = NexxusModelCreatedPayload | NexxusTransportManagerModelUpdatedPayload | NexxusModelDeletedPayload;
 
-export interface NexxusTransportJsonPatchMetadata {
-  id: string;
-  channels: Array<string>; // Channel key from NexxusRedisSubscription.getKey()
-}
-
 /**
- * Metadata for transport-bound model created/deleted events.
- * Carries the channels that matched the subscription router, so the transport
- * worker can correlate the event with the device's subscriptions if needed.
+ * Metadata for transport-bound model events (create/update/delete alike).
+ * Carries the channels that matched the subscription router for this device,
+ * so the client can correlate the event with its local subscription containers.
  */
 export interface NexxusTransportMetadata {
   channels: Array<string>;
@@ -59,18 +54,17 @@ export type NexxusTransportModelDeletedPayload = {
 };
 
 /**
- * JsonPatch type for transport workers - slim metadata with just channels.
- */
-export type NexxusTransportJsonPatch = Omit<NexxusJsonPatchInternal, 'metadata'> & {
-  metadata: NexxusTransportJsonPatchMetadata;
-};
-
-/**
- * Payload for any transport worker - model updated
+ * Payload for any transport worker - model updated.
+ * All patches in a single event target the same model — its identity is hoisted
+ * into `model`, and the matched channels into top-level `metadata`. Per-patch
+ * metadata is intentionally absent (it was redundant across patches of the same
+ * update event under the previous shape).
  */
 export type NexxusTransportModelUpdatedPayload = {
   event: 'model_updated';
-  data: Array<NexxusTransportJsonPatch>;
+  model: Pick<INexxusAppModel, 'id' | 'type' | 'appId' | 'userId'>;
+  patches: Array<Omit<NexxusJsonPatchInternal, 'metadata'>>;
+  metadata: NexxusTransportMetadata;
 };
 
 /**

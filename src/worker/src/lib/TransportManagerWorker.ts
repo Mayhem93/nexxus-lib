@@ -11,7 +11,6 @@ import {
   NexxusBaseQueuePayload,
   NexxusFilterQuery,
   INexxusAppModel,
-  NexxusTransportJsonPatch
 } from '@mayhem93/nexxus-core-lib';
 import { NexxusQueueMessage } from '@mayhem93/nexxus-message-queue-lib';
 import {
@@ -140,25 +139,30 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<NexxusTranspo
       transportToDeviceChannelsMap.get(transport as NexxusQueueName)!.set(deviceId, Array.from(channelKeys));
     }
 
-    for (const [transport, deviceChannelsMap] of transportToDeviceChannelsMap.entries()) {
-      // For each device, create patches with their specific matching channels
-      for (const [deviceId, channelKeys] of deviceChannelsMap.entries()) {
-        const websocketPatches: Array<NexxusTransportJsonPatch> = data.map(patch => ({
-          op: patch.op,
-          path: patch.path,
-          value: patch.value,
-          metadata: {
-            id: patch.metadata.id,
-            channels: channelKeys // Device-specific matching channels
-          }
-        }));
+    // All patches in a single model_updated event target the same model; identity
+    // and patch ops are constant across devices — compute once, reuse per recipient.
+    const modelIdentity = {
+      id: data[0].metadata.id,
+      type: data[0].metadata.type,
+      appId: data[0].metadata.appId,
+      userId: data[0].metadata.userId,
+    };
+    const patches = data.map(patch => ({
+      op: patch.op,
+      path: patch.path,
+      value: patch.value,
+    }));
 
+    for (const [transport, deviceChannelsMap] of transportToDeviceChannelsMap.entries()) {
+      for (const [deviceId, channelKeys] of deviceChannelsMap.entries()) {
         this.publish(transport as NexxusQueueName, {
           event: 'device_message',
           deviceIds: [ deviceId ],
           data: {
             event: 'model_updated',
-            data: websocketPatches
+            model: modelIdentity,
+            patches,
+            metadata: { channels: channelKeys },
           }
         });
       }

@@ -141,7 +141,7 @@ export class NexxusDevice extends NexxusRedisBaseModel<NexxusDeviceProps> {
         case 'name':
         case 'type':
         case 'status':
-          if (typeof value !== 'string') {
+          if (value !== null && typeof value !== 'string') {
             throw new RedisDeviceInvalidParamsException(`Invalid value for ${field}: expected string, got ${typeof value}`);
           }
 

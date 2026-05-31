@@ -148,6 +148,7 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
           index = `${NEXXUS_PREFIX_LC}-app-${itemData.appId}-${itemData.type}`;
 
           break;
+
         case NexxusAppModel:
 
           itemData = (item as NexxusAppModel).getData();
@@ -168,7 +169,23 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
       );
     }
 
-    await this.client.bulk({ operations: bulkReq.body, refresh: waitForRefresh ? 'wait_for' : false });
+    NexxusElasticsearchDb.logger.debug('Executing Elasticsearch bulk create', { request: bulkReq }, NexxusDatabaseAdapter.loggerLabel);
+
+    const dbResult = await this.client.bulk({ operations: bulkReq.body, refresh: waitForRefresh ? 'wait_for' : false });
+
+    if (dbResult.errors) {
+      const erroredItems = dbResult.items.filter(item => {
+        const action = item.index || item.update || item.delete || item.create;
+
+        return action && action.error;
+      });
+
+      NexxusElasticsearchDb.logger.error(
+        `Failed to create items in Elasticsearch database`,
+        { errors: erroredItems },
+        NexxusDatabaseAdapter.loggerLabel
+      );
+    }
   }
 
   async searchItems(options: NexxusDbSearchOptions<'application'>): Promise<NexxusApplication[]>;
@@ -179,12 +196,13 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
     let index = NEXXUS_PREFIX_LC;
 
     switch (options.type) {
-      case 'application':
+      case 'application': {
         index += `-${options.type}`;
 
         break;
+      }
 
-      case 'user':
+      case 'user': {
         if (!options.appId) {
           throw new Error("App ID is required for searching user models");
         }
@@ -192,7 +210,9 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
         index += `-app-${options.appId}-${options.type}`;
 
         break;
-      default:
+      }
+
+      default: {
         if (!options.appId) {
           throw new Error("App ID is required for searching app-specific models");
         }
@@ -217,6 +237,7 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
             );
           }
         }
+      }
     }
 
     const esSearchRequest: ElasticSearch.estypes.SearchRequest = {

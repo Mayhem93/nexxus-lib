@@ -105,6 +105,7 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig> {
   protected static envVars: ConfigEnvVars = [
     { name: "AUTH_JWT_SECRET", location: "auth.jwtSecret" }
   ];
+
   protected static configRootKey: string = "app";
   protected static schemaPath: string = path.join(__dirname, '../../src/schemas/api.schema.json');
 
@@ -120,12 +121,15 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig> {
     if (!(services.logger instanceof NexxusBaseLogger)) {
       throw new FatalErrorException('Logger service is not an instance of NexxusBaseLogger');
     }
+
     if (!(services.database instanceof NexxusDatabaseAdapter)) {
       throw new FatalErrorException('Database service is not an instance of NexxusDatabaseAdapter');
     }
+
     if (!(services.messageQueue instanceof NexxusMessageQueueAdapter)) {
       throw new FatalErrorException('Message Queue service is not an instance of NexxusMessageQueueAdapter');
     }
+
     if (!(services.redis instanceof NexxusRedis)) {
       throw new FatalErrorException('Redis service is not an instance of NexxusRedis');
     }

@@ -149,6 +149,7 @@ export class NexxusJsonPatch {
     if (!fullPatch || typeof fullPatch !== 'object' || Array.isArray(fullPatch)) {
       throw new InvalidJsonPatchException(`Invalid patch format`);
     }
+
     if (!JSON_OPS.includes(fullPatch.op)) {
       throw new InvalidJsonPatchException(`Unsupported JSON Patch operation: ${fullPatch.op}`);
     }
@@ -270,6 +271,7 @@ export class NexxusJsonPatch {
 
       case 'date':
         const date = new Date(value);
+
         if (isNaN(date.getTime())) {
           throw new InvalidJsonPatchException(`Expected valid date at path: ${path}`);
         }
@@ -414,6 +416,7 @@ export class NexxusJsonPatch {
     if (typeof value !== 'string') {
       throw new InvalidJsonPatchException(`Value at path "${path}" must be a string`);
     }
+
     return true;
   }
 
@@ -424,6 +427,7 @@ export class NexxusJsonPatch {
     if (typeof value !== 'number' || isNaN(value)) {
       throw new InvalidJsonPatchException(`Value at path "${path}" must be a number`);
     }
+
     return true;
   }
 
@@ -473,6 +477,7 @@ export class NexxusJsonPatch {
       }
 
       const nestedPath = path ? `${path}.${key}` : key;
+
       this.validateValueType(value[key], nestedFieldDef, nestedPath);
     }
 
@@ -501,6 +506,7 @@ export class NexxusJsonPatch {
       if (arrayType === 'object') {
         // Leverage validateObject for objects in arrays
         const objDef = fieldDef as any; // Has properties field
+
         this.validateObject(item, objDef, itemPath);
       } else {
         // For primitive types, use the primitive validator
@@ -522,10 +528,13 @@ export class NexxusJsonPatch {
     switch (type) {
       case 'string':
         return this.validateString(value, path);
+
       case 'number':
         return this.validateNumber(value, path);
+
       case 'boolean':
         return this.validateBoolean(value, path);
+
       case 'date':
         return this.validateDate(value, path);
 

@@ -84,6 +84,15 @@ export class NexxusWriterWorker extends NexxusBaseWorker<NexxusWriterWorkerConfi
             }
           ) as Array<Partial<INexxusAppModel>>;
 
+          if (!result[0]) {
+            NexxusWriterWorker.logger.warn(
+              `No item found to update for patch with appId ${patchData.metadata.appId} and id ${patchData.metadata.id}`,
+              NexxusWriterWorker.loggerLabel
+            );
+
+            return ;
+          }
+
           const transformedPatchData = jsonPatch.get();
           const transformedUpdatedAtPatchData = updateUpdatedAtPatch.get();
 
