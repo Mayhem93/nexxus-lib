@@ -260,7 +260,7 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
           return new NexxusUser(res._source as INexxusUser);
 
         default:
-          return new NexxusAppModel(res._source as INexxusAppModel);
+          return NexxusAppModel.fromStorage(res._source as INexxusAppModel);
       }
     });
 
@@ -323,7 +323,7 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
             return new NexxusUser(doc._source as INexxusUser);
 
           default:
-            return new NexxusAppModel(doc._source as INexxusAppModel);
+            return NexxusAppModel.fromStorage(doc._source as INexxusAppModel);
         }
       });
     } catch (e: Error | unknown) {

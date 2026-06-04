@@ -45,8 +45,13 @@ export class NexxusWriterWorker extends NexxusBaseWorker<NexxusWriterWorkerConfi
 
     switch (payload.event) {
       case "model_created": {
+        const app = NexxusWriterWorker.loadedApps.get(payload.data.appId);
 
-        const appModel = new NexxusAppModel(payload.data);
+        if (!app) {
+          throw new Error(`App not found for model_created: appId=${payload.data.appId}`);
+        }
+
+        const appModel = new NexxusAppModel(payload.data, app.getSchema());
 
         await NexxusWriterWorker.database.createItems([ appModel ]);
 
@@ -124,7 +129,13 @@ export class NexxusWriterWorker extends NexxusBaseWorker<NexxusWriterWorkerConfi
       }
 
       case 'model_deleted': {
-        const appModel = new NexxusAppModel(payload.data);
+        const app = NexxusWriterWorker.loadedApps.get(payload.data.appId);
+
+        if (!app) {
+          throw new Error(`App not found for model_deleted: appId=${payload.data.appId}`);
+        }
+
+        const appModel = new NexxusAppModel(payload.data as INexxusAppModel, app.getSchema());
 
         await NexxusWriterWorker.database.deleteItems([ appModel ]);
 

@@ -5,6 +5,7 @@ export enum NexxusExceptions {
   INVALID_CONFIG = "InvalidConfigException",
   INVALID_JSON_PATCH = "InvalidJsonPatchException",
   INVALID_QUERY_FILTER = "InvalidQueryFilterException",
+  INVALID_SCHEMA_DATA = "InvalidSchemaDataException",
   INVALID_USER_MODEL = "InvalidUserModelException"
 };
 
@@ -48,6 +49,12 @@ export class InvalidJsonPatchException extends NexxusException {
 export class InvalidQueryFilterException extends NexxusException {
   constructor(message: string) {
     super(NexxusExceptions.INVALID_QUERY_FILTER, message);
+  }
+}
+
+export class InvalidSchemaDataException extends NexxusException {
+  constructor(message: string) {
+    super(NexxusExceptions.INVALID_SCHEMA_DATA, message);
   }
 }
 

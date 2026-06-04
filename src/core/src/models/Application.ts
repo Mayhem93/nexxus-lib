@@ -74,7 +74,7 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
   }
 
   public getUserDetailSchema(userType: string = 'default'): NexxusUserDetailSchema | null {
-    if (!this.data.userDetailSchema) {
+    if (!this.hasAuthEnabled() || !this.data.userDetailSchema) {
       return null;
     }
 
@@ -97,7 +97,13 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
       throw new Error(`Unknown app model type: ${modelType}`);
     }
 
-    return { ...appModelDef, userId: { type: 'string', required: false } };
+    const appModelSchema = structuredClone(appModelDef);
+
+    if (this.hasAuthEnabled()) {
+      appModelSchema.userId = { type: 'string', required: true, filterable: true };
+    }
+
+    return appModelSchema;
   }
 
   /**

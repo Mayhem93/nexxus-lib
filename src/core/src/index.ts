@@ -8,6 +8,7 @@ export * from "./common/QueuePayloads";
 export * from "./common/JsonPatch";
 export * from "./common/FilterQuery";
 export * from "./common/InferModel";
+export * from "./common/SchemaValidator";
 export * from "./models/BaseModel";
 export * from "./models/BuiltinModel";
 export * from './common/BuiltinSchemas';

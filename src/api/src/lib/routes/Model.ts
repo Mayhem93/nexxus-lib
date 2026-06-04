@@ -103,7 +103,7 @@ export default class ModelRoute extends NexxusApiBaseRoute {
       ...req.body,
       appId: appId,
       userId: req.user?.id
-    });
+    }, appSchema);
 
     await NexxusApi.messageQueue.publishMessage('writer', { event: 'model_created', data: newModel.getData() });
 

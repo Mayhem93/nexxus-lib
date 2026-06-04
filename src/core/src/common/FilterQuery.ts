@@ -162,11 +162,11 @@ export class NexxusFilterQuery {
       case 'lte':
         return typeof actualValue === 'number' && actualValue <= (node.value as number);
 
-      case 'in':
+      case 'in': {
         const values = node.value as NexxusFieldValue[];
 
         return values.some(v => actualValue === v);
-
+      }
       default:
         return false;
     }

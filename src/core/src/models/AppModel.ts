@@ -1,4 +1,7 @@
+import { NexxusApplicationSchema } from "./Application";
 import { NexxusBaseModel, INexxusBaseModel } from "./BaseModel";
+import { NexxusSchemaValidator } from "../common/SchemaValidator";
+import { InvalidSchemaDataException } from "../lib/Exceptions";
 
 export interface INexxusAppModel extends INexxusBaseModel {
   appId: string;
@@ -7,12 +10,53 @@ export interface INexxusAppModel extends INexxusBaseModel {
 }
 
 export class NexxusAppModel extends NexxusBaseModel<INexxusAppModel> {
-  constructor(props: INexxusAppModel) {
-    super(props);
-
-    // Validate required field
+  /**
+   * Construct an AppModel from user-supplied or pre-validated data.
+   *
+   * Pass the application's schema as the second argument to validate + normalize
+   * the input (e.g. date strings → integer timestamps). Pass `null` to skip
+   * validation — only do that when the data is already trusted (e.g. coming
+   * back from storage). The `fromStorage` static factory below is the preferred
+   * way to express that intent.
+   */
+  constructor(props: INexxusAppModel, appSchema: NexxusApplicationSchema | null) {
     if (!props.appId) {
       throw new Error('AppModel requires AppId');
     }
+
+    if (appSchema === null) {
+      // Trusted path — caller asserts the data is already validated
+      // (e.g. it just came back from a database read).
+      super(props);
+
+      return;
+    }
+
+    const modelDef = appSchema[props.type];
+
+    if (!modelDef) {
+      throw new InvalidSchemaDataException(`Unknown app model type "${props.type}" for app "${props.appId}"`);
+    }
+
+    // Validates field types and normalizes values (notably: date strings/numeric
+    // strings become integer timestamps so ES stores consistent types).
+    // Required-field checking is intentionally deferred for now — only fields
+    // present in `props` are validated.
+    const normalized = NexxusSchemaValidator.validateAgainstSchema(
+      props as Record<string, unknown>,
+      modelDef
+    );
+
+    super(normalized as INexxusAppModel);
+  }
+
+  /**
+   * Hydrate an AppModel from already-validated storage. Use when reading back
+   * from the database — the data was validated when it was written, so we don't
+   * re-validate (saves work and avoids false-positives on legacy/edge-case docs
+   * that pre-date a later schema change).
+   */
+  public static fromStorage(props: INexxusAppModel): NexxusAppModel {
+    return new NexxusAppModel(props, null);
   }
 }
