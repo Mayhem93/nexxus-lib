@@ -231,6 +231,18 @@ export class NexxusJsonPatch {
       const currentPath = this.fullPatch.path[i];
       const currentValue = this.fullPatch.value[i];
 
+      // `version` is set exclusively by the database adapter on writes and must
+      // never be patched. We check the top-level segment so neither `version`
+      // (replace) nor `version.<anything>` (defensive) can target it. If more
+      // system-managed fields join later, extract a constant.
+      const topLevelField = currentPath.split('.')[0];
+
+      if (topLevelField === 'version') {
+        throw new InvalidJsonPatchException(
+          `Cannot patch system-managed field "version" at path "${currentPath}" — it is set exclusively by the database adapter`
+        );
+      }
+
       // Find field definition in schema
       const fieldDef = NexxusJsonPatch.traverseSchema(modelSpec, currentPath);
 

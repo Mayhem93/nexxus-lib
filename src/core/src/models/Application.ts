@@ -5,7 +5,7 @@ import {
 import { NexxusBuiltinModel } from "./BuiltinModel";
 import { NexxusFieldDef, NexxusModelDef } from "../common/ModelTypes";
 import { InferModel } from "../common/InferModel";
-import { NEXXUS_BUILTIN_MODEL_SCHEMAS } from "../common/BuiltinSchemas";
+import { NEXXUS_BUILTIN_MODEL_SCHEMAS, NEXXUS_RESERVED_FIELD_NAMES } from "../common/BuiltinSchemas";
 import { NexxusUserDetailSchema } from "./User";
 
 import * as Dot from 'dot-prop';
@@ -33,6 +33,21 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
 
     if (Object.keys(data.schema).length === 0) {
       throw new Error("Application schema cannot be empty");
+    }
+
+    // Reject any app-model schema that declares a field with a Nexxus-reserved
+    // name. These names are managed by the system (id/createdAt/updatedAt by
+    // BaseModel, type/appId/userId by the API/Worker, version by the database
+    // adapter) and cannot be redefined by app developers.
+    for (const [modelName, modelDef] of Object.entries(data.schema)) {
+      for (const fieldName of Object.keys(modelDef)) {
+        if (NEXXUS_RESERVED_FIELD_NAMES.has(fieldName)) {
+          throw new Error(
+            `Application schema: model "${modelName}" declares a field "${fieldName}", ` +
+            `which is a Nexxus-reserved name. Reserved: ${[...NEXXUS_RESERVED_FIELD_NAMES].join(', ')}.`
+          );
+        }
+      }
     }
 
     if (data.description !== undefined && typeof data.description !== 'string') {

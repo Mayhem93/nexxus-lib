@@ -62,7 +62,12 @@ export type NexxusTransportModelDeletedPayload = {
  */
 export type NexxusTransportModelUpdatedPayload = {
   event: 'model_updated';
-  model: Pick<INexxusAppModel, 'id' | 'type' | 'appId' | 'userId'>;
+  /**
+   * Includes `version` — the post-update version stamp assigned by the adapter.
+   * Clients use it for gap detection: apply if `model.version === local.version + 1`,
+   * request a fresh GET if there's a gap, ignore if it's already been applied.
+   */
+  model: Pick<INexxusAppModel, 'id' | 'type' | 'appId' | 'userId' | 'version'>;
   patches: Array<Omit<NexxusJsonPatchInternal, 'metadata'>>;
   metadata: NexxusTransportMetadata;
 };

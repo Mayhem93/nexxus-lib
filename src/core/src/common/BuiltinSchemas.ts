@@ -11,6 +11,26 @@ export const NEXXUS_UNIVERSAL_FIELDS = {
 } as const satisfies NexxusModelDef;
 
 /**
+ * Field names reserved by Nexxus across ALL app models. App developers cannot
+ * declare a field of these names in their application schemas — the
+ * `NexxusApplication` constructor enforces this on schema registration.
+ *
+ * Most of these are caller-settable at model construction time (e.g. `appId`,
+ * `userId`, `type` — set by the API/Worker). `version` is the sole exception:
+ * it's set exclusively by the database adapter and rejected from user input
+ * (see the inline check in `NexxusSchemaValidator.validateAgainstSchema`).
+ */
+export const NEXXUS_RESERVED_FIELD_NAMES: ReadonlySet<string> = new Set([
+  'id',
+  'createdAt',
+  'updatedAt',
+  'appId',
+  'userId',
+  'type',
+  'version'
+]);
+
+/**
  * Schema definitions for built-in (reserved) models. These are the runtime
  * source of truth for built-in model field shapes; the corresponding TS
  * interfaces (INexxusUser, INexxusApplication) are derived from these.

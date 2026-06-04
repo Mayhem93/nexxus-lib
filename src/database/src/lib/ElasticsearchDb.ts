@@ -186,6 +186,16 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
         NexxusDatabaseAdapter.loggerLabel
       );
     }
+
+    // Back-fill the adapter-assigned version onto each successfully-written AppModel.
+    // Built-in models (Application, User) do not carry a version field.
+    collection.forEach((item, i) => {
+      const indexResult = dbResult.items[i]?.index;
+
+      if (item instanceof NexxusAppModel && indexResult?._version !== undefined) {
+        (item.getData() as INexxusAppModel).version = indexResult._version;
+      }
+    });
   }
 
   async searchItems(options: NexxusDbSearchOptions<'application'>): Promise<NexxusApplication[]>;
@@ -260,7 +270,12 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
           return new NexxusUser(res._source as INexxusUser);
 
         default:
-          return NexxusAppModel.fromStorage(res._source as INexxusAppModel);
+          // Inject the ES-side _version into the model data before construction.
+          // Only app models carry a version; built-ins above intentionally don't.
+          return NexxusAppModel.fromStorage({
+            ...(res._source as INexxusAppModel),
+            version: res._version
+          });
       }
     });
 
@@ -301,7 +316,8 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
       const esMgetResponse = await this.client.mget({
         index: index,
         ids: options.ids,
-        _source: true
+        _source: true,
+        realtime: true
       });
 
       return esMgetResponse.docs.map(doc => {
@@ -323,9 +339,13 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
             return new NexxusUser(doc._source as INexxusUser);
 
           default:
-            return NexxusAppModel.fromStorage(doc._source as INexxusAppModel);
+            // Inject the ES-side _version into the model data before construction.
+            return NexxusAppModel.fromStorage({
+              ...(doc._source as INexxusAppModel),
+              version: doc._version
+            });
         }
-      });
+      }).filter(doc => doc !== null);
     } catch (e: Error | unknown) {
       if (e instanceof ElasticSearch.errors.ResponseError && e.statusCode === 404) {
         return [];
@@ -460,7 +480,11 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
       if (item.update && item.update.status >= 200 && item.update.status < 300) {
         collectedPartialModels.push({
           id: item.update._id,
-          ...(item.update.get!._source)
+          ...(item.update.get!._source),
+          // Adapter-assigned post-write version. Meaningful only for app models;
+          // for built-in updates the field is technically populated too but
+          // ignored downstream (built-ins don't participate in version-based sync).
+          version: item.update._version
         } as Partial<AnyNexxusModelData>);
       } else {
         NexxusElasticsearchDb.logger.warn(`Failed to update item ID ${item.update?._id} in Elasticsearch`, { error: item.update?.error }, NexxusDatabaseAdapter.loggerLabel);

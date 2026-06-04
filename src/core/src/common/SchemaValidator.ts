@@ -37,6 +37,15 @@ export class NexxusSchemaValidator {
     const result: Record<string, unknown> = { ...data };
 
     for (const [fieldName, value] of Object.entries(data)) {
+      // `version` is set exclusively by the database adapter on writes;
+      // user input cannot supply it. If more system-managed fields join later,
+      // extract a NEXXUS_SYSTEM_MANAGED_FIELDS constant at that point.
+      if (fieldName === 'version') {
+        throw new InvalidSchemaDataException(
+          `Field "version" is a system-managed Nexxus field and cannot be set by user input`
+        );
+      }
+
       const fieldDef = modelDef[fieldName];
 
       if (!fieldDef) {

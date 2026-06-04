@@ -6,6 +6,15 @@ import { InvalidSchemaDataException } from "../lib/Exceptions";
 export interface INexxusAppModel extends INexxusBaseModel {
   appId: string;
   userId?: string;
+  /**
+   * Monotonically-increasing per-document version counter, assigned by the
+   * database adapter on every write. Used for client-side gap detection and
+   * dedup when applying real-time update events. App models flow through the
+   * async Writer → Transport Manager → client pipeline; built-in models
+   * (Application, User) do not and therefore do not carry a version.
+   * Never set by user input — the validator rejects user-supplied values.
+   */
+  version?: number;
   [key: string]: unknown;
 }
 

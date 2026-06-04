@@ -141,11 +141,14 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<NexxusTranspo
 
     // All patches in a single model_updated event target the same model; identity
     // and patch ops are constant across devices — compute once, reuse per recipient.
+    // The post-update `version` comes from the writer's partial (populated by the
+    // adapter on the bulk update) — every patch in this batch shares it.
     const modelIdentity = {
       id: data[0].metadata.id,
       type: data[0].metadata.type,
       appId: data[0].metadata.appId,
       userId: data[0].metadata.userId,
+      version: data[0].metadata.partialModel.version,
     };
     const patches = data.map(patch => ({
       op: patch.op,
