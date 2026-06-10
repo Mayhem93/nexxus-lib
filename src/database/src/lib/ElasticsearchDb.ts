@@ -25,7 +25,8 @@ import {
   NexxusLogicalOperator,
   ConnectionException,
   NEXXUS_PREFIX_LC,
-  NEXXUS_BUILTIN_MODEL_SCHEMAS
+  NEXXUS_BUILTIN_MODEL_SCHEMAS,
+  isBuiltinModel
 } from "@mayhem93/nexxus-core-lib";
 
 import * as ElasticSearch from '@elastic/elasticsearch';
@@ -203,59 +204,28 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
   async searchItems(options: NexxusDbSearchOptions<string>): Promise<NexxusAppModel[]>;
 
   async searchItems(options: NexxusDbSearchOptions<string>): Promise<Array<AnyNexxusModel>> {
-    let index = NEXXUS_PREFIX_LC;
+    const esSearchRequest = this.buildQuery(options);
 
-    switch (options.type) {
-      case 'application': {
-        index += `-${options.type}`;
+    // forceRefresh is a side effect on ES state, not part of query composition,
+    // so it stays in searchItems. Only meaningful for app models — built-ins
+    // always go through `wait_for` on write.
+    if (!isBuiltinModel(options.type) && options.databaseSpecific?.forceRefresh === true) {
+      const indexName = esSearchRequest.index as string;
+      const lastRefresh = this.lastRefreshTimes.get(indexName);
+      const timeSinceRefresh = lastRefresh ? Date.now() - lastRefresh : Infinity;
 
-        break;
-      }
+      // Only refresh if > 500ms since last refresh
+      if (timeSinceRefresh > 500) {
+        await this.client.indices.refresh({ index: indexName });
 
-      case 'user': {
-        if (!options.appId) {
-          throw new Error("App ID is required for searching user models");
-        }
+        this.lastRefreshTimes.set(indexName, Date.now());
 
-        index += `-app-${options.appId}-${options.type}`;
-
-        break;
-      }
-
-      default: {
-        if (!options.appId) {
-          throw new Error("App ID is required for searching app-specific models");
-        }
-
-        const modelName = options.type;
-
-        index += `-app-${options.appId}-${modelName}`;
-
-        if (options.databaseSpecific?.forceRefresh === true) {
-          const lastRefresh = this.lastRefreshTimes.get(index);
-          const timeSinceRefresh = lastRefresh ? Date.now() - lastRefresh : Infinity;
-
-          // Only refresh if > 500ms since last refresh
-          if (timeSinceRefresh > 500) {
-            await this.client.indices.refresh({ index: index });
-
-            this.lastRefreshTimes.set(index, Date.now());
-
-            NexxusElasticsearchDb.logger.debug(
-              `Forced refresh of index ${index} (last refresh was ${timeSinceRefresh}ms ago)`,
-              NexxusDatabaseAdapter.loggerLabel
-            );
-          }
-        }
+        NexxusElasticsearchDb.logger.debug(
+          `Forced refresh of index ${indexName} (last refresh was ${timeSinceRefresh}ms ago)`,
+          NexxusDatabaseAdapter.loggerLabel
+        );
       }
     }
-
-    const esSearchRequest: ElasticSearch.estypes.SearchRequest = {
-      index: index,
-      from: options.offset || 0,
-      size: options.limit || 100,
-      query: this.buildQuery(options.filter)
-    };
 
     NexxusElasticsearchDb.logger.debug('Executing Elasticsearch search', { request: esSearchRequest }, NexxusDatabaseAdapter.loggerLabel);
 
@@ -549,7 +519,47 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
     await this.client.bulk({ operations: bulkBody });
   }
 
-  protected buildQuery(filter?: NexxusFilterQuery): QueryDslQueryContainer {
+  protected buildQuery(options: NexxusDbSearchOptions<string>): ElasticSearch.estypes.SearchRequest {
+    let index = NEXXUS_PREFIX_LC;
+
+    switch (options.type) {
+      case 'application': {
+        index += `-${options.type}`;
+
+        break;
+      }
+
+      case 'user': {
+        if (!options.appId) {
+          throw new Error("App ID is required for searching user models");
+        }
+
+        index += `-app-${options.appId}-${options.type}`;
+
+        break;
+      }
+
+      default: {
+        if (!options.appId) {
+          throw new Error("App ID is required for searching app-specific models");
+        }
+
+        index += `-app-${options.appId}-${options.type}`;
+      }
+    }
+
+    return {
+      index,
+      from: options.offset ?? 0,
+      size: options.limit ?? 100,
+      query: this.buildFilterQuery(options.filter),
+      sort: options.sort
+        ? { [options.sort.field]: { order: options.sort.order } }
+        : { updatedAt: { order: 'desc' } }
+    };
+  }
+
+  private buildFilterQuery(filter?: NexxusFilterQuery): QueryDslQueryContainer {
     if (filter === undefined) {
       return { match_all: {} };
     }

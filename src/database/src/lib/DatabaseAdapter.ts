@@ -20,6 +20,13 @@ export type NexxusDatabaseAdapterEvents = {
   error: [Error];
 }
 
+export type NexxusDatabaseSortOrder = 'asc' | 'desc';
+
+export interface NexxusDatabaseSortOptions {
+  field: string;
+  order: NexxusDatabaseSortOrder;
+}
+
 export interface NexxusDbSearchOptions<T extends NexxusModelTypeName | string = string> {
   type: T;
   id?: string;
@@ -27,6 +34,7 @@ export interface NexxusDbSearchOptions<T extends NexxusModelTypeName | string = 
   filter?: NexxusFilterQuery;
   limit?: number;
   offset?: number;
+  sort?: NexxusDatabaseSortOptions;
   databaseSpecific?: Record<string, any>;
 }
 
@@ -73,5 +81,5 @@ export abstract class NexxusDatabaseAdapter<T extends NexxusConfig, Ev extends N
   abstract updateItems(collection: Array<NexxusJsonPatch>, options?: NexxusDbUpdateOptions): Promise<Array<Partial<AnyNexxusModelData>> | void>;
   abstract deleteItems(collection: Array<NexxusBaseModel>): Promise<void>;
 
-  protected abstract buildQuery(filter: NexxusFilterQuery): string | object;
+  protected abstract buildQuery(options: NexxusDbSearchOptions<string>): string | object;
 }

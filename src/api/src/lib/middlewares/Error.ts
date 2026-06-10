@@ -6,14 +6,14 @@ import { Request, Response, NextFunction } from 'express';
 
 export default async (err: Error | NexxusApiException, req: Request, res: Response, next: NextFunction) : Promise<void> => {
   if (!(err instanceof NexxusException)) {
-    NexxusApi.logger.error(`${err.message}\n${err.stack}`, 'NxxApi');
-
     err = new ServerErrorException('An unexpected server error occurred.');
   }
 
   if (err instanceof FatalErrorException) {
     err = new ServerErrorException('A fatal server error occurred.');
   }
+
+  NexxusApi.logger.error(`${err.message}\n${err.stack}`, { name: err.name, stack: err.stack }, 'NxxApi');
 
   const statusCode = (err as NexxusApiException).statusCode || 500;
   const errorResponse = {

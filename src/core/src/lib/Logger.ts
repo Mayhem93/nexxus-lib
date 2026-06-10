@@ -1,10 +1,11 @@
 import { ConfigEnvVars, ConfigCliArgs } from './ConfigManager';
 import { NexxusBaseService, INexxusBaseServices } from './BaseService';
 import { NexxusConfig } from './ConfigProvider';
+import { InvalidConfigException } from './Exceptions';
 
 import * as Winston from 'winston';
 
-import * as path from "node:path";
+import * as path from 'node:path';
 
 export type LogAttributes = Record<string, unknown>;
 
@@ -19,11 +20,38 @@ export const enum NexxusLoggerLevels {
   DEBUG = "debug"
 }
 
+export type StdoutTransportConfig = { type: 'stdout' };
+export type FileTransportConfig = {
+  type: 'file';
+  filename: string;
+  maxSize?: number;
+  maxFiles?: number;
+};
+/**
+ * Catch-all for transports loaded dynamically from npm packages. The `type`
+ * field is the package name (e.g. "winston-papertrail"); `export` optionally
+ * names the class export within the package; `options` is the passthrough
+ * config object handed to the transport's constructor.
+ *
+ * The schema's `oneOf` discriminator excludes built-in type strings from this
+ * variant, so the TS-side `type: string` doesn't cause ambiguity at runtime.
+ */
+export type CustomTransportConfig = {
+  type: string;
+  export?: string;
+  options?: Record<string, unknown>;
+};
+export type WinstonNexxusTransportConfig =
+  | StdoutTransportConfig
+  | FileTransportConfig
+  | CustomTransportConfig;
+
 type WinstonNexxusLoggerConfig = {
   level: NexxusLoggerLevels;
   logType: "json" | "text";
   timestamps: boolean;
   colors: boolean;
+  transports?: Array<WinstonNexxusTransportConfig>;
 } & NexxusConfig;
 
 export interface INexxusLogger {
@@ -143,7 +171,12 @@ export class WinstonNexxusLogger extends NexxusBaseLogger<WinstonNexxusLoggerCon
   ];
   protected static cliArgs: ConfigCliArgs = [];
 
-  constructor(services: NexxusLoggerServices) {
+  /**
+   * Private — use `WinstonNexxusLogger.create(...)` instead. Transport instances
+   * must be resolved (async, since custom ones are dynamically imported) before
+   * the Winston logger can be constructed; the factory owns that step.
+   */
+  private constructor(services: NexxusLoggerServices, resolvedTransports: Array<Winston.transport>) {
     super(services);
 
     let format: Winston.Logform.Format;
@@ -214,10 +247,108 @@ export class WinstonNexxusLogger extends NexxusBaseLogger<WinstonNexxusLoggerCon
     this.winston = Winston.createLogger({
       level: this.config.level,
       format,
-      transports: [
-        new Winston.transports.Console()
-      ]
+      transports: resolvedTransports
     });
+  }
+
+  /**
+   * Async factory. Custom transports are loaded via dynamic `import()` so
+   * initialization is unavoidably async. API/Worker bootstrap code should
+   * `await WinstonNexxusLogger.create(...)` in place of `new WinstonNexxusLogger(...)`.
+   */
+  public static async create(services: NexxusLoggerServices): Promise<WinstonNexxusLogger> {
+    const config = services.configManager.getConfig('logger') as WinstonNexxusLoggerConfig;
+    const resolvedTransports = await WinstonNexxusLogger.resolveTransports(config);
+
+    return new WinstonNexxusLogger(services, resolvedTransports);
+  }
+
+  /**
+   * Maps each transport config entry to a constructed Winston transport.
+   * Built-in types are instantiated synchronously; everything else falls
+   * through to `loadCustomTransport`, which dynamically imports the npm
+   * package named by `type`.
+   *
+   * If the config has no transports (undefined or empty array), defaults to
+   * a single Console transport so the logger is never silent.
+   */
+  private static async resolveTransports(config: WinstonNexxusLoggerConfig): Promise<Array<Winston.transport>> {
+    const entries: Array<WinstonNexxusTransportConfig> = config.transports?.length
+      ? config.transports
+      : [{ type: 'stdout' }];
+    const resolved: Array<Winston.transport> = [];
+
+    for (const entry of entries) {
+      switch (entry.type) {
+        case 'stdout':
+          resolved.push(new Winston.transports.Console());
+
+          break;
+
+        case 'file': {
+          const fileEntry = entry as FileTransportConfig;
+
+          resolved.push(new Winston.transports.File({
+            filename: fileEntry.filename,
+            maxsize:  fileEntry.maxSize,
+            maxFiles: fileEntry.maxFiles,
+            zippedArchive: true
+          }));
+
+          break;
+        }
+
+        default:
+          resolved.push(await WinstonNexxusLogger.loadCustomTransport(entry as CustomTransportConfig));
+      }
+    }
+
+    return resolved;
+  }
+
+  /**
+   * Dynamically imports the npm package named by `transport.type` and instantiates
+   * its transport class. The class is resolved in priority order:
+   *   1. `mod[transport.export]` if `transport.export` is set in config
+   *   2. `mod.default` if it's a function/class (ESM default export)
+   *   3. The module itself if it's a function/class (CJS `module.exports = Cls`)
+   *
+   * On any failure (package missing, no resolvable class, constructor throws)
+   * we re-wrap as `InvalidConfigException` so the operator sees an actionable
+   * message rather than a raw module-resolution stack trace.
+   */
+  private static async loadCustomTransport(transport: CustomTransportConfig): Promise<Winston.transport> {
+    let mod: any;
+
+    try {
+      mod = await import(transport.type);
+    } catch (e) {
+      throw new InvalidConfigException(
+        `Transport package "${transport.type}" could not be loaded — make sure it's installed in your deployment. Underlying error: ${(e as Error).message}`
+      );
+    }
+
+    let TransportCtor: any;
+
+    if (transport.export) {
+      TransportCtor = mod[transport.export];
+
+      if (typeof TransportCtor !== 'function') {
+        throw new InvalidConfigException(
+          `Transport package "${transport.type}" has no export named "${transport.export}" (or it isn't a class/function)`
+        );
+      }
+    } else if (typeof mod.default === 'function') {
+      TransportCtor = mod.default;
+    } else if (typeof mod === 'function') {
+      TransportCtor = mod;
+    } else {
+      throw new InvalidConfigException(
+        `Could not find a transport class in package "${transport.type}". Specify "export" in the transport config to name the class.`
+      );
+    }
+
+    return new TransportCtor(transport.options ?? {}) as Winston.transport;
   }
 
   public log(level: NexxusLoggerLevels, message: string, attributes?: LogAttributes, label?: string): void {

@@ -1,23 +1,69 @@
 {
+  "$id": "nexxus-winston-logger",
   "type": "object",
   "properties": {
     "level": {
       "type": "string",
-      "enum": ["debug", "info", "warn", "error", "critical", "alert", "emerg"]
+      "enum": ["debug", "info", "warn", "error", "critical", "alert", "emerg"],
+      "default": "info"
     },
     "logType": {
       "type": "string",
-      "enum": ["text", "json"]
+      "enum": ["text", "json"],
+      "default": "text"
     },
     "timestamps": {
-      "type": "boolean"
+      "type": "boolean",
+      "default": true
     },
     "colors": {
-      "type": "boolean"
+      "type": "boolean",
+      "default": false
+    },
+    "transports": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          { "$ref": "#/definitions/StdoutTransport" },
+          { "$ref": "#/definitions/FileTransport" },
+          { "$ref": "#/definitions/CustomTransport" }
+        ]
+      }
     }
   },
   "required": [
     "level",
     "logType"
-  ]
+  ],
+  "definitions": {
+    "StdoutTransport": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "stdout" }
+      },
+      "required": ["type"],
+      "additionalProperties": false
+    },
+    "FileTransport": {
+      "type": "object",
+      "properties": {
+        "type":     { "const": "file" },
+        "filename": { "type": "string" },
+        "maxSize":  { "type": "number" },
+        "maxFiles": { "type": "number" }
+      },
+      "required": ["type", "filename"],
+      "additionalProperties": false
+    },
+    "CustomTransport": {
+      "type": "object",
+      "properties": {
+        "type":    { "type": "string", "not": { "enum": ["stdout", "file"] } },
+        "export":  { "type": "string" },
+        "options": { "type": "object" }
+      },
+      "required": ["type"],
+      "additionalProperties": false
+    }
+  }
 }
