@@ -1,6 +1,7 @@
 import {
   NexxusDatabaseAdapter,
   NexxusDatabaseAdapterEvents,
+  NexxusDbCountOptions,
   NexxusDbGetOptions,
   NexxusDbSearchOptions,
   NexxusDbUpdateOptions
@@ -37,6 +38,7 @@ type BulkOperationContainer = estypesWithBody.BulkOperationContainer;
 type BulkUpdateAction = estypesWithBody.BulkUpdateAction;
 type QueryDslQueryContainer = estypesWithBody.QueryDslQueryContainer;
 type QueryDslBoolQuery = estypesWithBody.QueryDslBoolQuery;
+type CountRequest = estypesWithBody.CountRequest;
 
 import * as path from "node:path";
 
@@ -517,6 +519,19 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
     }
 
     await this.client.bulk({ operations: bulkBody });
+  }
+
+  async countItems(options: NexxusDbCountOptions): Promise<number> {
+    const esSearchRequest = this.buildQuery(options);
+
+    NexxusElasticsearchDb.logger.debug('Executing Elasticsearch count', { request: esSearchRequest }, NexxusDatabaseAdapter.loggerLabel);
+
+    const countResult = await this.client.count({
+      index: esSearchRequest.index,
+      query: esSearchRequest.query
+    });
+
+    return countResult.count;
   }
 
   protected buildQuery(options: NexxusDbSearchOptions<string>): ElasticSearch.estypes.SearchRequest {

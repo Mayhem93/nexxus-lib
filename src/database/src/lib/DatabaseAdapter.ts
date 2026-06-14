@@ -38,6 +38,8 @@ export interface NexxusDbSearchOptions<T extends NexxusModelTypeName | string = 
   databaseSpecific?: Record<string, any>;
 }
 
+export type NexxusDbCountOptions<T extends NexxusModelTypeName | string = string> = Omit<NexxusDbSearchOptions<T>, 'id' | 'limit' | 'offset' | 'sort'>;
+
 export interface NexxusDbGetOptions<T extends NexxusModelTypeName = string> {
   ids: Array<string>;
   type: T;
@@ -80,6 +82,7 @@ export abstract class NexxusDatabaseAdapter<T extends NexxusConfig, Ev extends N
   abstract searchItems(options: NexxusDbSearchOptions<string>): Promise<NexxusAppModel[]>;
   abstract updateItems(collection: Array<NexxusJsonPatch>, options?: NexxusDbUpdateOptions): Promise<Array<Partial<AnyNexxusModelData>> | void>;
   abstract deleteItems(collection: Array<NexxusBaseModel>): Promise<void>;
+  abstract countItems(options: NexxusDbCountOptions): Promise<number>;
 
   protected abstract buildQuery(options: NexxusDbSearchOptions<string>): string | object;
 }

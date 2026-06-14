@@ -8,7 +8,10 @@ import {
   type INexxusAppModel,
   type NexxusApplicationSchema,
   InvalidJsonPatchException,
-  NexxusJsonPatchInternal
+  NexxusJsonPatchInternal,
+  NexxusFilterQueryType,
+  NexxusFilterQuery,
+  InvalidQueryFilterException
 } from '@mayhem93/nexxus-core-lib';
 
 import type { Router, RequestHandler } from 'express';
@@ -49,6 +52,16 @@ interface DeleteAppModelRequest extends NexxusApiRequest {
   }
 }
 
+type CountModelRequestBody = {
+  model: string;
+  userId?: string;
+  filter?: NexxusFilterQueryType;
+}
+
+interface CountModelRequest extends NexxusApiRequest {
+  body: CountModelRequestBody;
+}
+
 export default class ModelRoute extends NexxusApiBaseRoute {
   constructor(appRouter: Router) {
     super('/model', appRouter);
@@ -62,8 +75,13 @@ export default class ModelRoute extends NexxusApiBaseRoute {
 
     this.router.post('/', this.createModel.bind(this) as RequestHandler);
     this.router.get('/:id', this.getModel.bind(this) as RequestHandler<GetModelRequest['params'], any, any, GetModelRequest['query']>);
-    this.router.put('/:id', this.updateModel.bind(this) as RequestHandler<UpdateAppModelRequest['params'], any, UpdateAppModelRequest['body']>);
+    this.router.put('/:id',
+      this.updateModel.bind(this) as RequestHandler<UpdateAppModelRequest['params'], any, UpdateAppModelRequest['body']>
+    );
     this.router.delete('/:id', this.deleteModel.bind(this) as RequestHandler<DeleteAppModelRequest['params']>);
+    this.router.post('/count',
+      this.countModel.bind(this) as RequestHandler<any, any, CountModelRequestBody>
+    );
   }
 
   private async getModel(req: GetModelRequest, res: NexxusApiResponse): Promise<void> {
@@ -159,5 +177,41 @@ export default class ModelRoute extends NexxusApiBaseRoute {
     }});
 
     res.status(202).send({ message: 'Model deleted successfully!' });
+  }
+
+  private async countModel(req: CountModelRequest, res: NexxusApiResponse): Promise<void> {
+    const appId = req.headers['nxx-app-id'] as string;
+    const appSchema = NexxusApi.getStoredApp(appId)?.getSchema() as NexxusApplicationSchema;
+
+    if (!appSchema[req.body.model]) {
+      throw new ModelNotFoundException(`Model "${req.body.model}" not found in schema for the application "${appId}"`);
+    }
+
+    let databaseFilter: NexxusFilterQuery | undefined;
+
+    //we merge "id" and "userId" queries to a db filter since these two are handled separately in the request
+    if (req.body.filter !== undefined || req.body.userId !== undefined) {
+      const dbFilterInput: NexxusFilterQueryType = {
+        ...structuredClone(req.body.filter || {}),
+        ...(req.body.userId && { userId: req.body.userId })
+      };
+
+      try {
+        databaseFilter = new NexxusFilterQuery(dbFilterInput, NexxusApi.getStoredApp(appId)!.getAppModelSchema(req.body.model));
+      } catch (e) {
+        if (e instanceof InvalidQueryFilterException) {
+          throw new InvalidParametersException(`Invalid filter parameter: ${e.message}`);
+        }
+        throw e;
+      }
+    }
+
+    const count = await NexxusApi.database.countItems({
+      type: req.body.model,
+      appId: appId,
+      filter: databaseFilter
+    });
+
+    res.status(200).send({ data: { count } });
   }
 }

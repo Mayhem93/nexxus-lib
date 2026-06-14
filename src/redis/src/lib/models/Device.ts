@@ -17,7 +17,7 @@ export interface NexxusDeviceProps {
   id: string;
   appId: string;
   name: string;
-  userId?: string | null;
+  userId?: string;
   /**
    * "volatile" - devices are connected to transports that are connection-oriented, their subscriptions only exist while they
    * are connected
@@ -71,7 +71,7 @@ export class NexxusDevice extends NexxusRedisBaseModel<NexxusDeviceProps> {
       id: props.id || crypto.randomUUID(),
       appId: props.appId,
       name: props.name || 'Unnamed Device',
-      userId: props.userId || null,
+      userId: props.userId,
       type: props.type || 'unknown',
       status: props.status,
       transport: props.transport,
@@ -257,7 +257,7 @@ export class NexxusDevice extends NexxusRedisBaseModel<NexxusDeviceProps> {
     const index = await this.hasSubscription(subscription);
 
     if (index === null) {
-      NexxusRedis.logger.debug(`Subscription "${subscription.getKey()}" not found on device with id "${this.val.id}"`);
+      NexxusRedis.logger.debug(`Subscription "${subscription.getKey()}" not found on device with id "${this.val.id}"`, { subscriptionKey: subscription.getKey(), deviceId: this.val.id });
 
       return false;
     }

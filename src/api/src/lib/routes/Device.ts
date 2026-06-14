@@ -65,7 +65,7 @@ export default class DeviceRoute extends NexxusApiBaseRoute {
     const nxxDevice = new NexxusDevice({
       id: randomUUID(),
       appId: req.headers['nxx-app-id'] as string,
-      userId: userId || null,
+      userId: userId,
       name: req.body.name,
       subscriptions: []
     });
