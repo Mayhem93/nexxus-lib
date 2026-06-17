@@ -89,7 +89,7 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
     const client = this.registeredClients.get(deviceId);
 
     if (!client) {
-      NexxusWebsocketsTransportWorker.logger.warn(
+      NexxusWebsocketsTransportWorker.logger.info(
         `No registered client found for device ID: "${deviceId}"`,
         { deviceId },
         NexxusWebsocketsTransportWorker.loggerLabel
@@ -119,7 +119,10 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
     const clientId = crypto.randomUUID();
     const client = new NexxusWsClient(clientId, ws);
 
-    NexxusWebsocketsTransportWorker.logger.info(`New client connected with ID: "${clientId}"`, NexxusWebsocketsTransportWorker.loggerLabel);
+    NexxusWebsocketsTransportWorker.logger.info(`New client connected with ID: "${clientId}"`,
+      { clientId },
+      NexxusWebsocketsTransportWorker.loggerLabel
+    );
 
     this.wsToNexxusClientMap.set(ws, client);
     this.unregisteredClients.add(client);
@@ -132,7 +135,10 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
         this.registeredClients.set(deviceId, client);
         client.sendMessage('register', { success: true });
 
-        NexxusWebsocketsTransportWorker.logger.info(`Client "${clientId}" registered with device ID: "${deviceId}"`, NexxusWebsocketsTransportWorker.loggerLabel);
+        NexxusWebsocketsTransportWorker.logger.info(`Client "${clientId}" registered with device ID: "${deviceId}"`,
+          { deviceId, clientId },
+          NexxusWebsocketsTransportWorker.loggerLabel
+        );
       } catch (e : Error | unknown) {
         if (e instanceof RedisDeviceInvalidParamsException) {
           client.sendError(new NexxusWsInvalidParametersException(`Invalid parameters for device with ID "${deviceId}": ${e.message}`));
@@ -173,6 +179,11 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
 
       NexxusWebsocketsTransportWorker.logger.info(
         `Client "${nxxWsClient.id}" disconnected with device ID: "${deviceId || 'null'}. Code ${code}, Reason: "${reason.toString()}"`,
+        {
+          deviceId: deviceId || null,
+          code,
+          reason: reason.toString()
+        },
         NexxusWebsocketsTransportWorker.loggerLabel
       );
     } catch (e) {

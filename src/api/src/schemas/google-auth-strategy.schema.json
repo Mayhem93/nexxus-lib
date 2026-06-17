@@ -1,0 +1,11 @@
+{
+  "$id": "nexxus-google-auth-strategy",
+  "type": "object",
+  "properties": {
+    "clientID":     { "type": "string" },
+    "clientSecret": { "type": "string" },
+    "callbackURL":  { "type": "string" }
+  },
+  "required": [ "clientID", "clientSecret", "callbackURL" ],
+  "additionalProperties": false
+}

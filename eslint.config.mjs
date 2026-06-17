@@ -55,6 +55,7 @@ export default [
       'no-else-return': WARN,
       'no-unused-expressions': ERROR,
       'no-use-before-define': ERROR,
+      'quotes': [ERROR, 'single', { avoidEscape: true }],
       'require-await': WARN,
       'wrap-iife': [WARN, 'any'],
       'yoda': [WARN, 'never'],
@@ -73,7 +74,7 @@ export default [
         { blankLine: 'always', prev: 'import', next: '*' },
         { blankLine: 'any',    prev: 'import', next: 'import' },
         // Blank line between switch cases (clearer scan-down readability)
-        { blankLine: 'always', prev: 'case', next: 'case' },
+        // { blankLine: 'always', prev: 'case', next: 'case' },
         // Blank line BEFORE control-flow blocks (if/for/while/switch/try)
         { blankLine: 'always', prev: '*', next: ['if', 'for', 'while', 'switch', 'try'] },
       ],

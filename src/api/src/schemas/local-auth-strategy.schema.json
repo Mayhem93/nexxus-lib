@@ -1,0 +1,6 @@
+{
+  "$id": "nexxus-local-auth-strategy",
+  "type": "object",
+  "properties": {},
+  "additionalProperties": false
+}

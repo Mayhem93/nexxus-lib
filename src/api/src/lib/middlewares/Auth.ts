@@ -17,19 +17,32 @@ import type { NextFunction } from 'express';
  * Middleware: Require JWT authentication (for all protected routes)
  */
 export default (req: NexxusApiRequest, res: NexxusApiResponse, next: NextFunction) => {
-  if (!NexxusApi.getStoredApp(req.headers['nxx-app-id'] as string)?.getData().authEnabled) {
+  const appId = req.headers['nxx-app-id'] as string;
+  const app = NexxusApi.getStoredApp(appId);
+
+  if (app?.getData().auth === undefined) {
     return next();
   }
 
   const token = req.headers.authorization?.replace('Bearer ', '');
-  const apiConfig = NexxusApi.instance.getConfig();
 
   if (!token) {
     throw new NoAuthPresentException('No token provided');
   }
 
+  // JWT signing secret is per-application (lives on `app.auth.jwtSecret`).
+  // The NexxusApplication constructor guarantees this is present when
+  // authEnabled is true, so reaching here without it implies a doc that
+  // bypassed validation — surface as an authentication failure rather than
+  // crashing the request.
+  const jwtSecret = app.getData().auth?.jwtSecret;
+
+  if (!jwtSecret) {
+    throw new UserAuthenticationFailedException('Application is misconfigured for authentication');
+  }
+
   try {
-    req.user = jwt.verify(token, apiConfig.auth?.jwtSecret as string) as NexxusApiUser; // Attach user info to request
+    req.user = jwt.verify(token, jwtSecret) as NexxusApiUser; // Attach user info to request
 
     next();
   } catch (e) {

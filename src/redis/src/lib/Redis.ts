@@ -52,7 +52,7 @@ export class NexxusRedis extends NexxusBaseService<NexxusRedisConfig> {
 
   async init(): Promise<void> {
     if (this.config.cluster) {
-      this.client = await Redis.createCluster({
+      this.client = Redis.createCluster({
         rootNodes: [
           {
             url: `redis://${this.config.host}:${this.config.port}`,
@@ -69,7 +69,7 @@ export class NexxusRedis extends NexxusBaseService<NexxusRedisConfig> {
         }
       }) as unknown as Redis.RedisClusterType;
     } else {
-      this.client = await Redis.createClient({
+      this.client = Redis.createClient({
         url: `redis://${this.config.host}:${this.config.port}`,
         username: this.config.user,
         password: this.config.password,

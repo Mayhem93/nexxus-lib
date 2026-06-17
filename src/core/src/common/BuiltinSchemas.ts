@@ -48,8 +48,25 @@ export const NEXXUS_BUILTIN_MODEL_SCHEMAS = {
   application: {
     name:               { type: 'string',  required: true,  filterable: true },
     description:        { type: 'string',  required: false },
-    authEnabled:        { type: 'boolean', required: true },
-    allowMultipleLogin: { type: 'boolean', required: true,  nullable: true },
+    /**
+     * Per-application auth block. When `authEnabled` is true this must be
+     * present and contain a non-empty `strategies` map; when false it should
+     * be absent or have an empty `strategies`. The conditional rule isn't
+     * expressible in the static schema — it's enforced imperatively in the
+     * `NexxusApplication` constructor.
+     *
+     * `strategies` is a free-form map keyed by strategy name (e.g. 'local',
+     * 'google'). The shape of each value is validated by that strategy's
+     * own JSON Schema, loaded by the `NexxusAuthStrategy` base class.
+     */
+    auth: {
+      type: 'object', required: false, nullable: true,
+      properties: {
+        jwtSecret:    { type: 'string', required: true },
+        jwtExpiresIn: { type: 'string', required: false },
+        strategies:   { type: 'object', required: true, properties: {} },
+      },
+    },
   }
 } as const satisfies Record<string, NexxusModelDef>;
 

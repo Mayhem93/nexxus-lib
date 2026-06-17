@@ -29,10 +29,10 @@
   "author": "Răzvan Botea <contact@razvanbotea.me>",
   "license": "MPL-2.0",
   "dependencies": {
-    "@mayhem93/nexxus-core-lib": "0.0.1",
-    "@mayhem93/nexxus-database-lib": "0.0.2",
-    "@mayhem93/nexxus-message-queue-lib": "0.0.1",
-    "@mayhem93/nexxus-redis": "0.0.3",
+    "@mayhem93/nexxus-core-lib": "../core",
+    "@mayhem93/nexxus-database-lib": "../database",
+    "@mayhem93/nexxus-message-queue-lib": "../message_queue",
+    "@mayhem93/nexxus-redis": "../redis",
     "dot-prop": "^10.1.0",
     "ws": "^8.18.3"
   },

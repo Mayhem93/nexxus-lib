@@ -50,12 +50,15 @@ export abstract class NexxusBaseWorker<T extends NexxusConfig, Ev extends Nexxus
     if (!(services.logger instanceof NexxusBaseLogger)) {
       throw new FatalErrorException('Logger service is not an instance of NexxusBaseLogger');
     }
+
     if (!(services.database instanceof NexxusDatabaseAdapter)) {
       throw new FatalErrorException('Database service is not an instance of NexxusDatabaseAdapter');
     }
+
     if (!(services.messageQueue instanceof NexxusMessageQueueAdapter)) {
       throw new FatalErrorException('Message Queue service is not an instance of NexxusMessageQueueAdapter');
     }
+
     if (!(services.redis instanceof NexxusRedis)) {
       throw new FatalErrorException('Redis service is not an instance of NexxusRedis');
     }

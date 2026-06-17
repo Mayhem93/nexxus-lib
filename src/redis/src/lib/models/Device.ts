@@ -101,7 +101,7 @@ export class NexxusDevice extends NexxusRedisBaseModel<NexxusDeviceProps> {
 
     const device = new NexxusDevice({
       ...res,
-      subscriptions: withSubscriptions ? await Promise.all(res.subscriptions.map(async (subKey) => {
+      subscriptions: withSubscriptions ? await Promise.all(res.subscriptions.map(subKey => {
         const sub = NexxusRedisSubscription.fromKey(subKey);
 
         sub.setAppId(res.appId);

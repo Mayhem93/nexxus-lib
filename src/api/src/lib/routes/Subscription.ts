@@ -15,6 +15,7 @@ import {
   ModelNotFoundException,
   DeviceNotConnectedException
 } from '../Exceptions';
+
 import {
   InvalidQueryFilterException,
   NexxusFilterQuery,
@@ -95,12 +96,25 @@ export default class SubscriptionRoute extends NexxusApiBaseRoute {
       throw new InvalidParametersException('Redundant modelId and userId parameters provided');
     }
 
-    if (req.body.limit === undefined) {
-      req.body.limit = 10;
-    } else {
-      if (typeof req.body.limit !== 'number' || req.body.limit <= 0) {
+    if (typeof req.body.getOnly !== 'boolean' && req.body.getOnly !== undefined) {
+      throw new InvalidParametersException('Invalid getOnly parameter');
+    }
+
+    req.body.getOnly = req.body.getOnly || false;
+
+    if (!req.body.getOnly && req.body.limit !== undefined && req.body.offset !== undefined) {
+      throw new InvalidParametersException('Subscription intents should not contain pagination parameters. ' +
+        'Please set "getOnly" to true if you want to use pagination parameters to get a snapshot of the data without subscribing to changes') ;
+    }
+
+    if (req.body.limit !== undefined && (typeof req.body.limit !== 'number' || req.body.limit <= 0)) {
         throw new InvalidParametersException('Invalid limit parameter');
-      }
+    }
+
+    req.body.limit = req.body.limit || app?.getData().defaultLimit;
+
+    if (req.body.limit! > app?.getData().maxLimit!) {
+        throw new InvalidParametersException(`Limit parameter exceeds maximum allowed value (${app?.getData().maxLimit})`);
     }
 
     if (req.body.offset === undefined) {
@@ -110,12 +124,6 @@ export default class SubscriptionRoute extends NexxusApiBaseRoute {
         throw new InvalidParametersException('Invalid offset parameter');
       }
     }
-
-    if (typeof req.body.getOnly !== 'boolean' && req.body.getOnly !== undefined) {
-      throw new InvalidParametersException('Invalid getOnly parameter');
-    }
-
-    req.body.getOnly = req.body.getOnly || false;
 
     let subscriptionFilter: NexxusFilterQuery | undefined;
 

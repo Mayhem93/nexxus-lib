@@ -290,8 +290,8 @@ export class WinstonNexxusLogger extends NexxusBaseLogger<WinstonNexxusLoggerCon
 
           resolved.push(new Winston.transports.File({
             filename: fileEntry.filename,
-            maxsize:  fileEntry.maxSize,
-            maxFiles: fileEntry.maxFiles,
+            maxsize:  fileEntry.maxSize || 10485760, // 10MB default
+            maxFiles: fileEntry.maxFiles || 5,        // 5 files default
             zippedArchive: true
           }));
 

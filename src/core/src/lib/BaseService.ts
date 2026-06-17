@@ -4,13 +4,13 @@ import type {
   AddJsonSchemaDefFuncArg,
   NexxusConfigManager
 } from './ConfigManager';
-import type { NexxusBaseLogger } from "./Logger";
-import { FatalErrorException } from "./Exceptions";
+import type { NexxusBaseLogger } from './Logger';
+import { FatalErrorException } from './Exceptions';
 import { NexxusConfig } from './ConfigProvider';
 
 import { JSONSchema7 } from 'json-schema';
 
-import * as fs from "node:fs";
+import * as fs from 'node:fs';
 import { EventEmitter } from 'node:events';
 
 export type EventMap = Record<string | symbol, any[]>;
@@ -37,16 +37,19 @@ class TypedEventEmitter<E> {
 
   on<K extends keyof E>(event: K, listener: (...payload: E[K] extends any[] ? E[K] : never) => void): this {
     this.emitter.on(event as string | symbol, listener);
+
     return this;
   }
 
   once<K extends keyof E>(event: K, listener: (...payload: E[K] extends any[] ? E[K] : never) => void): this {
     this.emitter.once(event as string | symbol, listener);
+
     return this;
   }
 
   off<K extends keyof E>(event: K, listener: (...payload: E[K] extends any[] ? E[K] : never) => void): this {
     this.emitter.off(event as string | symbol, listener);
+
     return this;
   }
 

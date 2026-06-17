@@ -36,7 +36,7 @@
   },
   "dependencies": {
     "@elastic/elasticsearch": "^8.19.1",
-    "@mayhem93/nexxus-core-lib": "0.0.1",
+    "@mayhem93/nexxus-core-lib": "../core",
     "@types/argparse": "^2.0.17",
     "@types/json-schema": "^7.0.15",
     "ajv": "^8.17.1",

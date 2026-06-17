@@ -5,15 +5,15 @@ import { UserAuthenticationFailedException } from '../Exceptions';
 import passport from 'passport';
 import { Strategy as PassportLocalStrategy } from 'passport-local';
 import type { NextFunction, Request, Response } from 'express';
+import * as path from 'node:path';
 
 export default class NexxusLocalAuthStrategy extends NexxusAuthStrategy {
   readonly name = 'local';
-  readonly requiresCallback = false;
+  static readonly requiresCallback = false;
+  protected static schemaPath: string = path.join(__dirname, '../../../src/schemas/local-auth-strategy.schema.json');
 
   initializePassport(): void {
-    super.initializePassport();
-
-    passport.use('local', new PassportLocalStrategy(
+    passport.use(this.passportName, new PassportLocalStrategy(
       {
         usernameField: 'username',
         passwordField: 'password',
@@ -22,17 +22,10 @@ export default class NexxusLocalAuthStrategy extends NexxusAuthStrategy {
       async (req, username, password, done) => {
         try {
           const appId = req.headers['nxx-app-id'] as string;
-          const app = NexxusApi.getStoredApp(appId);
           const user = await this.findUserByUsername(appId, username);
 
           if (!user) {
             return done(null, false, new UserAuthenticationFailedException('Invalid credentials'));
-          }
-
-          if (!user.getData().authProviders.includes('local') && app?.getData().allowMultipleLogin === false) {
-            return done(null, false, new UserAuthenticationFailedException(
-              'User not registered for local authentication and multiple login is disabled'
-            ));
           }
 
           const passwordHash = user.getData().password;
@@ -51,7 +44,7 @@ export default class NexxusLocalAuthStrategy extends NexxusAuthStrategy {
   }
 
   async handleAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
-    passport.authenticate('local', { session: false }, (err: any, user?: NexxusApiUser, info?: any) => {
+    passport.authenticate(this.passportName, { session: false }, (err: any, user?: NexxusApiUser, info?: any) => {
       if (err) {
         return next(err);
       }

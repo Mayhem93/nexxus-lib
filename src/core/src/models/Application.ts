@@ -18,6 +18,21 @@ export interface NexxusUserTypeConfig {
   private?: boolean; // if true users can only be created through the nexxus hub API; defaults to false if not specified
 }
 
+/**
+ * Per-application auth configuration. Lives on the Application document so
+ * that each tenant carries its own JWT secret and per-strategy settings.
+ *
+ * `strategies` is a map keyed by strategy name (must be a subset of the
+ * deployment's `api.auth.availableStrategies`). Each value's shape is
+ * whatever the strategy's own JSON Schema defines — validated by the
+ * corresponding `NexxusAuthStrategy` subclass at instantiation time.
+ */
+export interface NexxusApplicationAuthConfig {
+  jwtSecret: string;
+  jwtExpiresIn?: string;
+  strategies: Record<string, unknown>;
+}
+
 export type INexxusApplication =
   & INexxusBaseModel<'application'>
   & InferModel<typeof NEXXUS_BUILTIN_MODEL_SCHEMAS.application>
@@ -25,6 +40,11 @@ export type INexxusApplication =
     schema: NexxusApplicationSchema;
     userTypes?: { [userType: string]: NexxusUserTypeConfig };
     userDetailSchema?: { [userType: string]: NexxusUserDetailSchema };
+    auth?: NexxusApplicationAuthConfig;
+    //defaults to 10 inside the class constructor
+    defaultLimit?: number
+    //defaults to 100 inside the class constructor. TODO: make this configurable in the Consumer config
+    maxLimit?: number
   };
 
 export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
@@ -58,27 +78,53 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
       throw new Error("Application 'name' is required and must be a string");
     }
 
-    if (data.authEnabled === undefined || typeof data.authEnabled !== 'boolean') {
-      throw new Error("Application 'authEnabled' is required and must be a boolean");
+    if (data.defaultLimit !== undefined && (typeof data.defaultLimit !== 'number' || data.defaultLimit <= 10)) {
+      throw new Error("Application 'defaultLimit' must be a greater than 10 if provided");
     }
 
-    if (data.authEnabled) {
+    data.defaultLimit = data.defaultLimit ?? 10;
+
+    if (data.maxLimit !== undefined && (typeof data.maxLimit !== 'number' || data.maxLimit <= 0 || data.maxLimit < data.defaultLimit!)) {
+      throw new Error("Application 'maxLimit' must be a positive number if provided and must be greater than or equal to 'defaultLimit'");
+    }
+
+    data.maxLimit = data.maxLimit ?? 100;
+
+    if (data.auth) {
       if (!data.userDetailSchema || typeof data.userDetailSchema !== 'object') {
         throw new Error("Application 'userSchema' must be provided when 'authEnabled' is enabled");
-      }
-
-      if (typeof data.allowMultipleLogin !== 'boolean' && data.allowMultipleLogin !== undefined && data.allowMultipleLogin !== null) {
-        throw new Error("Application 'allowMultipleLogin' must be a boolean when 'authEnabled' is enabled");
       }
 
       if (data.userTypes !== undefined && typeof data.userTypes !== 'object') {
         throw new Error("Application 'userTypes' must be an object when 'authEnabled' is enabled");
       }
 
-      this.data.allowMultipleLogin = data.allowMultipleLogin ?? true;
+      // Per-app auth block. Per-strategy config shapes are NOT validated here —
+      // each strategy's own JSON Schema handles that when the strategy is
+      // instantiated by the API at init time. Here we only enforce that the
+      // block itself is coherent: a usable JWT secret and at least one
+      // declared strategy.
+      if (!data.auth || typeof data.auth !== 'object') {
+        throw new Error("Application 'auth' must be provided when 'authEnabled' is enabled");
+      }
+
+      if (typeof data.auth.jwtSecret !== 'string' || data.auth.jwtSecret.length === 0) {
+        throw new Error("Application 'auth.jwtSecret' is required and must be a non-empty string when 'authEnabled' is enabled");
+      }
+
+      if (data.auth.jwtExpiresIn !== undefined && typeof data.auth.jwtExpiresIn !== 'string') {
+        throw new Error("Application 'auth.jwtExpiresIn' must be a string if provided");
+      }
+
+      if (
+        !data.auth.strategies
+        || typeof data.auth.strategies !== 'object'
+        || Object.keys(data.auth.strategies).length === 0
+      ) {
+        throw new Error("Application 'auth.strategies' must be a non-empty object when 'authEnabled' is enabled");
+      }
+
       this.data.userTypes = data.userTypes ? { ...data.userTypes, ...{ default: {} } } : { default: {} };
-    } else {
-      this.data.allowMultipleLogin = null;
     }
 
     //TODO: actually use json schema validation for schema structure
@@ -97,7 +143,7 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
   }
 
   public hasAuthEnabled(): boolean {
-    return this.data.authEnabled;
+    return !!this.data.auth;
   }
 
   /**

@@ -52,25 +52,41 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<NexxusTranspo
     const payload = msg.payload;
 
     switch (payload.event) {
-      case "model_created":
+      case 'model_created': {
         await this.handleModelCreated(payload.data);
 
+        NexxusTransportManagerWorker.logger.debug('Processing model created',
+          { id: payload.data.id, appId: payload.data.appId, type: payload.data.type },
+          NexxusTransportManagerWorker.loggerLabel
+        );
+
         break;
-      case "model_updated":
+      }
+
+      case 'model_updated': {
         await this.handleModelUpdated(payload.data);
 
-        NexxusTransportManagerWorker.logger.debug('Processing model update', { data: payload.data }, NexxusTransportManagerWorker.loggerLabel);
+        NexxusTransportManagerWorker.logger.debug('Processing model update',
+          { id: payload.data[0].metadata.id, appId: payload.data[0].metadata.appId, type: payload.data[0].metadata.type },
+          NexxusTransportManagerWorker.loggerLabel
+        );
 
         break;
+      }
 
-      case "model_deleted":
+      case 'model_deleted': {
         await this.handleModelDeleted(payload.data);
 
-        NexxusTransportManagerWorker.logger.debug('Processing model delete', { data: payload.data }, NexxusTransportManagerWorker.loggerLabel);
+        NexxusTransportManagerWorker.logger.debug('Processing model delete',
+          { id: payload.data.id, appId: payload.data.appId, type: payload.data.type }, NexxusTransportManagerWorker.loggerLabel
+        );
 
         break;
+      }
       default:
-        NexxusTransportManagerWorker.logger.warn(`Unknown event type: ${(payload as NexxusBaseQueuePayload).event}`, NexxusTransportManagerWorker.loggerLabel);
+        NexxusTransportManagerWorker.logger.warn(`Unknown event type: ${(payload as NexxusBaseQueuePayload).event}`,
+          { type: (payload as NexxusBaseQueuePayload).event }, NexxusTransportManagerWorker.loggerLabel
+        );
     }
   }
 
@@ -237,7 +253,7 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<NexxusTranspo
       ? (Array.isArray(change) ? change : [change])
       : [];
 
-    // Step 1: Generate all base channels (without filters)
+    // Generate all base channels (without filters)
     const baseChannels = NexxusRedisSubscription.generateSubscriptionPatterns(channel);
 
     for (const channelPattern of baseChannels) {
@@ -254,16 +270,23 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<NexxusTranspo
         deviceToChannelsMap.get(deviceId)!.add(unfilteredChannelKey);
       }
 
-      NexxusTransportManagerWorker.logger.debug(
-        `Found ${unfilteredDevices.size} devices for unfiltered channel: ${unfilteredChannelKey}`,
-        NexxusTransportManagerWorker.loggerLabel
-      );
+      if (unfilteredDevices.size > 0) {
+        NexxusTransportManagerWorker.logger.debug(
+          `Found ${unfilteredDevices.size} devices for unfiltered channel: ${unfilteredChannelKey}`,
+          {
+            channel: channelPattern,
+            size: unfilteredDevices.size,
+            changesCount: changes.length
+          },
+          NexxusTransportManagerWorker.loggerLabel
+        );
+      }
 
       // If no changes (e.g., model deleted), skip filtered subscriptions
       if (changes) {
         const filters = await NexxusRedisSubscription.getAllFilters(channelPattern);
 
-        // Step 3: For each filter, test if ANY change matches
+        // For each filter, test if ANY change matches
         for (const [filterId, filterQuery] of Object.entries(filters)) {
           const filter = new NexxusFilterQuery(filterQuery, app.getAppModelSchema(channelPattern.model));
           let matchesFilter = false;
@@ -291,10 +314,17 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<NexxusTranspo
               deviceToChannelsMap.get(deviceId)!.add(filteredChannelKey);
             }
 
-            NexxusTransportManagerWorker.logger.debug(
-              `Found ${filteredDevices.size} devices for filtered channel: ${filteredChannelKey}`,
-              NexxusTransportManagerWorker.loggerLabel
-            );
+            if (filteredDevices.size > 0) {
+              NexxusTransportManagerWorker.logger.debug(
+                `Found ${filteredDevices.size} devices for filtered channel: ${filteredChannelKey}`,
+                {
+                  channel: channelPattern,
+                  size: filteredDevices.size,
+                  changesCount: changes.length
+                },
+                NexxusTransportManagerWorker.loggerLabel
+              );
+            }
           }
         }
       }
@@ -302,6 +332,10 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<NexxusTranspo
 
     NexxusTransportManagerWorker.logger.debug(
       `Total ${deviceToChannelsMap.size} unique devices to notify for update`,
+      {
+        channel,
+        size: deviceToChannelsMap.size
+      },
       NexxusTransportManagerWorker.loggerLabel
     );
 
