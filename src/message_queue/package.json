@@ -36,7 +36,7 @@
     "typescript": "^6.0.0"
   },
   "dependencies": {
-    "@mayhem93/nexxus-core-lib": "../core",
+    "@mayhem93/nexxus-core-lib": "0.0.1",
     "amqplib": "^0.10.9",
     "tslib": "2.8.1"
   },
