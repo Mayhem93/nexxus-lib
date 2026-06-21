@@ -86,10 +86,11 @@ export class NexxusFilterQuery {
     if (node.operator === '$and') {
       // All conditions must match
       return node.conditions.every(childNode => this.testNode(childNode, object));
-    } else { // '$or'
-      // At least one condition must match
-      return node.conditions.some(childNode => this.testNode(childNode, object));
     }
+    // '$or'
+    // At least one condition must match
+
+    return node.conditions.some(childNode => this.testNode(childNode, object));
   }
 
   private validateAndParse(): void {

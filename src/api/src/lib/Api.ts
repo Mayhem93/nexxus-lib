@@ -43,6 +43,10 @@ import {
   NexxusGoogleAuthStrategy,
   NexxusAuthProviders
 } from './auth';
+import {
+  NotFoundException,
+  InvalidParametersException
+} from './Exceptions';
 
 /**
  * Constructable type for `NexxusAuthStrategy` subclasses. Used to type the
@@ -367,9 +371,6 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig> {
    * style strategies) per registered strategy CLASS. One URL path per strategy
    * type — tenant scoping happens in the handler via header lookup.
    *
-   * `requiresCallback` is read off the prototype since it's a subclass readonly
-   * instance field. We can't use a real instance because the URL is class-wide.
-   *
    * Handler dispatch:
    *   1. POST /auth/<name>          — `nxx-app-id` header → cache lookup →
    *                                   404 if absent → delegate to handleAuth
@@ -377,9 +378,11 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig> {
    *                                   (convention: "<appId>|<userType>") →
    *                                   cache lookup → 404 if absent → handleCallback
    *
-   * A `getAppAuthStrategy(...)` returning `undefined` triggers a 404 with an
-   * informative JSON body. Multi-tenant convention: don't leak whether the app
-   * exists or whether the strategy is supported deployment-wide.
+   * Failure modes are thrown as `NexxusApiException`s (`NotFoundException`,
+   * `InvalidParametersException`) and flow through the standard `ErrorMiddleware`
+   * — same JSON shape and logging as every other route. Multi-tenant convention:
+   * don't leak whether the app exists or whether the strategy is supported
+   * deployment-wide, so an unconfigured (app, strategy) pair is a 404.
    */
   private registerAuthRoutes(): void {
     for (const [name, Ctor] of this.authStrategyClasses) {
@@ -393,9 +396,7 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig> {
           const strategy = this.getAppAuthStrategy(appId, name);
 
           if (!strategy) {
-            return res.status(404).json({
-              error: `Auth strategy "${name}" is not available for this application`
-            });
+            return next(new NotFoundException(`Auth strategy "${name}" is not available for this application`));
           }
 
           return strategy.handleAuth(req, res, next);
@@ -411,16 +412,14 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig> {
           const state = req.query.state as string | undefined;
 
           if (!state) {
-            return res.status(400).json({ error: 'Missing state parameter' });
+            return next(new InvalidParametersException('Missing state parameter'));
           }
 
           const [appId] = state.split('|');
           const strategy = this.getAppAuthStrategy(appId, name);
 
           if (!strategy) {
-            return res.status(404).json({
-              error: `Auth strategy "${name}" is not available for this application`
-            });
+            return next(new NotFoundException(`Auth strategy "${name}" is not available for this application`));
           }
 
           return strategy.handleCallback(req, res, next);

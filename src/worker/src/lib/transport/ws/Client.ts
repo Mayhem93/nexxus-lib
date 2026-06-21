@@ -132,10 +132,15 @@ export class NexxusWsClient extends EventEmitter<ClientEventMap> {
   }
 
   public sendMessage<E extends keyof NexxusWsServerMessage>(event: E, data: NexxusWsServerMessage[E]) {
-    // const message: NexxusWsServerEvent<E> = data;
-
     this.socket.send(JSON.stringify({ event, data }));
-    NexxusWebsocketsTransportWorker.logger.debug(`Sent ${event} message to client ${this.id}`, { data }, 'NexxusWsClient');
+
+    NexxusWebsocketsTransportWorker.logger.info(`Sent ${event} message to client ${this.id}`,
+      {
+        clientId: this.id,
+        deviceId: this.deviceId,
+        event
+      },
+    'NexxusWsClient');
   }
 
   private async registerDevice(msg: NexxusWsClientEvent<'register'>) {

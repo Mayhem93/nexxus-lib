@@ -55,6 +55,12 @@ export class NexxusWriterWorker extends NexxusBaseWorker<NexxusWriterWorkerConfi
 
         await NexxusWriterWorker.database.createItems([ appModel ]);
 
+        NexxusWriterWorker.logger.info(`Model created with ID: "${payload.data.id}" for appId: "${payload.data.appId}"`, {
+          appId: payload.data.appId,
+          modelId: payload.data.id,
+          modelType: payload.data.type
+        }, NexxusWriterWorker.loggerLabel);
+
         this.publish('transport-manager', {
           event: 'model_created',
           data: appModel.getData(),
@@ -120,6 +126,12 @@ export class NexxusWriterWorker extends NexxusBaseWorker<NexxusWriterWorkerConfi
           });
         }
 
+        NexxusWriterWorker.logger.info(`Model updated with ID: "${payload.data[0].metadata.id}" for appId: "${payload.data[0].metadata.appId}"`, {
+          appId: payload.data[0].metadata.appId,
+          modelId: payload.data[0].metadata.id,
+          modelType: payload.data[0].metadata.type
+        }, NexxusWriterWorker.loggerLabel);
+
         this.publish('transport-manager', {
           event: 'model_updated',
           data: validatedPatches,
@@ -138,6 +150,12 @@ export class NexxusWriterWorker extends NexxusBaseWorker<NexxusWriterWorkerConfi
         const appModel = new NexxusAppModel(payload.data as INexxusAppModel, app.getSchema());
 
         await NexxusWriterWorker.database.deleteItems([ appModel ]);
+
+        NexxusWriterWorker.logger.info(`Model deleted with ID: "${payload.data.id}" for appId: "${payload.data.appId}"`, {
+          appId: payload.data.appId,
+          modelId: payload.data.id,
+          modelType: payload.data.type
+        }, NexxusWriterWorker.loggerLabel);
 
         this.publish('transport-manager', {
           event: 'model_deleted',

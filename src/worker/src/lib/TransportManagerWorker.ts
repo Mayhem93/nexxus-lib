@@ -124,8 +124,15 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<NexxusTranspo
         });
       }
 
-      NexxusTransportManagerWorker.logger.debug(
+      NexxusTransportManagerWorker.logger.info(
         `Notifying ${deviceChannelsMap.size} devices about new model with ID: "${data.id}" via transport: "${transport}"`,
+        {
+          appId: data.appId,
+          modelId: data.id,
+          modelType: data.type,
+          transport,
+          deviceCount: deviceChannelsMap.size
+        },
         NexxusTransportManagerWorker.loggerLabel
       );
     }
@@ -186,8 +193,15 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<NexxusTranspo
         });
       }
 
-      NexxusTransportManagerWorker.logger.debug(
+      NexxusTransportManagerWorker.logger.info(
         `Notified ${deviceChannelsMap.size} devices about update to model ID: "${data[0].metadata.id}" via transport: "${transport}"`,
+        {
+          appId: data[0].metadata.appId,
+          modelId: data[0].metadata.id,
+          modelType: data[0].metadata.type,
+          transport,
+          deviceCount: deviceChannelsMap.size
+        },
         NexxusTransportManagerWorker.loggerLabel
       );
     }
@@ -227,8 +241,15 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<NexxusTranspo
         });
       }
 
-      NexxusTransportManagerWorker.logger.debug(
+      NexxusTransportManagerWorker.logger.info(
         `Notifying ${deviceChannelsMap.size} devices about deleted model with ID: "${data.id}" via transport: "${transport}"`,
+        {
+          appId: data.appId,
+          modelId: data.id,
+          modelType: data.type,
+          transport,
+          deviceCount: deviceChannelsMap.size
+        },
         NexxusTransportManagerWorker.loggerLabel
       );
     }
@@ -253,10 +274,28 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<NexxusTranspo
       ? (Array.isArray(change) ? change : [change])
       : [];
 
+    // Fetch the scope registry ONCE per event. This tells us which
+    // (modelId/userId) combinations have any subscriber at all — patterns
+    // not present here are skipped entirely instead of doing a speculative
+    // Redis lookup that would (a) almost always miss and (b) bloat Redis's
+    // client-tracking table with forever-stale entries.
+    const activeScopes = await NexxusRedisSubscription.getActiveScopes(channel.appId, channel.model);
+
+    if (activeScopes.size === 0) {
+      // Nobody subscribed to this (appId, model) at any scope. Done.
+      return deviceToChannelsMap;
+    }
+
     // Generate all base channels (without filters)
     const baseChannels = NexxusRedisSubscription.generateSubscriptionPatterns(channel);
 
     for (const channelPattern of baseChannels) {
+      // Skip patterns whose scope has no subscribers — the work done below
+      // for this pattern would all be empty answers.
+      if (!activeScopes.has(NexxusRedisSubscription.buildScopeDescriptor(channelPattern))) {
+        continue;
+      }
+
       // Get devices from unfiltered subscription
       const unfilteredSub = new NexxusRedisSubscription(channelPattern);
       const unfilteredChannelKey = unfilteredSub.getKey();
@@ -330,7 +369,7 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<NexxusTranspo
       }
     }
 
-    NexxusTransportManagerWorker.logger.debug(
+    NexxusTransportManagerWorker.logger.info(
       `Total ${deviceToChannelsMap.size} unique devices to notify for update`,
       {
         channel,
