@@ -28,41 +28,47 @@ export type AddJsonSchemaDefFuncArg = {
 
 type EnvVarsSpec = {
   name: string;
+  /** Dot-notation path relative to the service's configRootKey (e.g. "host", "auth.jwtSecret"). */
   location: string;
 };
 
-export type ConfigEnvVars = {
-  source: string;
-  specs: Array<EnvVarsSpec>;
-};
+export type ConfigEnvVars = Array<EnvVarsSpec>;
 
 type CliArgsSpec = {
   name: string;
+  /** Dot-notation path relative to the service's configRootKey. */
   location: string;
   type: CliArgType;
 }
 
-export type ConfigCliArgs = {
-  source: string;
-  specs: Array<CliArgsSpec>;
+export type ConfigCliArgs = Array<CliArgsSpec>;
+
+/**
+ * Internal storage shape — wraps each service's env/CLI specs with the class name
+ * (for collision diagnostics) and configRootKey (for resolving relative locations).
+ */
+type RegisteredSpecs<S> = {
+  className: string;
+  configRootKey: string;
+  specs: S;
 };
 
 export class NexxusConfigManager {
   private static CONF_FILE_NAME : Readonly<string> = "nexxus.conf.json";
 
   private jsonSchema: JSONSchema7;
-  private envVarsSpecs: Array<ConfigEnvVars> = [];
-  private cliArgsSpecs: Array<ConfigCliArgs> = [];
+  private envVarsSpecs: Array<RegisteredSpecs<ConfigEnvVars>> = [];
+  private cliArgsSpecs: Array<RegisteredSpecs<ConfigCliArgs>> = [];
   private data: NexxusConfig = {};
 
   private configProviders : Array<INexxusConfigProvider> = [];
   private customProviders : Array<INexxusConfigProvider> = [];
 
-  constructor(confFile? : string) {
+  constructor(configFileName? : string) {
     const schemaPath = path.join(__dirname, "../../src/schemas/root.schema.json");
 
     this.jsonSchema = JSON.parse(fs.readFileSync(schemaPath, 'utf-8'));
-    this.configProviders.push(new NexxusFileConfigProvider(path.join(process.cwd(), confFile ?? NexxusConfigManager.CONF_FILE_NAME)));
+    this.configProviders.push(new NexxusFileConfigProvider(path.join(process.cwd(), configFileName ?? NexxusConfigManager.CONF_FILE_NAME)));
     this.configProviders.push(new NexxusEnvVarsConfigProvider());
     this.configProviders.push(new NexxusCliArgConfigProvider());
   }
@@ -91,22 +97,18 @@ export class NexxusConfigManager {
     }
   }
 
-  public validateServices(svcs : Array<typeof NexxusBaseService>) : void {
+  public async validateServices(svcs : Array<typeof NexxusBaseService>) : Promise<void> {
     for(const NxxSvc of svcs) {
-      this.addCliArgsToSpec(NxxSvc.cliArgConfig());
-      this.addEnvVarsToSpec(NxxSvc.envVarConfig());
-      this.addJsonSchemaDef(NxxSvc.schema());
+      const schemaDef = NxxSvc.schema();
+      const className = NxxSvc.name;
+      const configRootKey = schemaDef.where;
+
+      this.cliArgsSpecs.push({ className, configRootKey, specs: NxxSvc.cliArgConfig() });
+      this.envVarsSpecs.push({ className, configRootKey, specs: NxxSvc.envVarConfig() });
+      this.addJsonSchemaDef(schemaDef);
     }
 
-    this.validate();
-  }
-
-  private addCliArgsToSpec(cliArgSpec: ConfigCliArgs): void {
-    this.cliArgsSpecs.push(cliArgSpec);
-  }
-
-  private addEnvVarsToSpec(envVarSpec: ConfigEnvVars): void {
-    this.envVarsSpecs.push(envVarSpec);
+    await this.validate();
   }
 
   private populateFromCliArgs(): void {
@@ -121,10 +123,10 @@ export class NexxusConfigManager {
       spec.specs.forEach((arg) => {
         if (collectedNames.has(arg.name)) {
           throw new InvalidConfigException(`Duplicate CLI argument name: "${arg.name}".
-            Defined first by source: "${collectedNames.get(arg.name)}" and now by source: "${spec.source}"`);
+            Defined first by class "${collectedNames.get(arg.name)}" and now by class "${spec.className}"`);
         }
 
-        collectedNames.set(arg.name, spec.source);
+        collectedNames.set(arg.name, spec.className);
 
         cliArgProvider.addArgument(arg.name, arg.type);
       });
@@ -135,7 +137,7 @@ export class NexxusConfigManager {
     this.cliArgsSpecs.forEach(spec => {
       spec.specs.forEach(arg => {
         if (parsed[arg.name] !== undefined && parsed[arg.name] !== null) {
-          Dot.setProperty(this.data, arg.location, parsed[arg.name]);
+          Dot.setProperty(this.data, `${spec.configRootKey}.${arg.location}`, parsed[arg.name]);
         }
       });
     });
@@ -154,17 +156,17 @@ export class NexxusConfigManager {
     this.envVarsSpecs.forEach(spec => {
       spec.specs.forEach(envVar => {
         if (collectedNames.has(envVar.name)) {
-          throw new InvalidConfigException(`Duplicate Env var: "${prefix}_${envVar.name}".
-            Defined first by source: "${collectedNames.get(envVar.name)}" and now by source: "${spec.source}"`);
+          throw new InvalidConfigException(`Duplicate Env var: "${prefix}${envVar.name}".
+            Defined first by class "${collectedNames.get(envVar.name)}" and now by class "${spec.className}"`);
         }
 
         const value = envResult?.[`${prefix}${envVar.name}`];
 
         if (value !== undefined) {
-          Dot.setProperty(this.data, envVar.location, value);
+          Dot.setProperty(this.data, `${spec.configRootKey}.${envVar.location}`, value);
         }
 
-        collectedNames.set(envVar.name, spec.source);
+        collectedNames.set(envVar.name, spec.className);
       });
     });
   }
@@ -192,7 +194,7 @@ export class NexxusConfigManager {
     this.populateFromCliArgs();
     this.populateFromEnvVars();
 
-    const ajv = new Ajv();
+    const ajv = new Ajv({ useDefaults: true });
     const validator = ajv.compile(this.jsonSchema);
     const result : boolean = validator(this.data);
 

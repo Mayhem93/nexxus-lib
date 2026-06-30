@@ -1,13 +1,13 @@
 {
   "$id": "nexxus-api",
-  "$comment": "app",
   "type": "object",
   "properties": {
     "name": {
       "type": "string"
     },
     "port": {
-      "type": "number"
+      "type": "number",
+      "default": 5000
     },
     "ssl": {
       "type": "object",
@@ -24,51 +24,17 @@
     "auth": {
       "type": "object",
       "properties": {
-        "jwtSecret": {
-          "type": "string"
-        },
-        "jwtExpiresIn": {
-          "type": "string"
-        },
-        "strategies": {
-          "type": "object",
-          "properties": {
-            "local": {
-              "$ref": "#/definitions/LocalAuthStrategyConf"
-            },
-            "google": {
-              "$ref": "#/definitions/GoogleAuthStrategyConf"
-            }
-          },
-          "minProperties": 1
+        "availableStrategies": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 0,
+          "uniqueItems": true
         }
       },
-      "required": [ "jwtSecret", "strategies" ]
-    }
-  },
-  "definitions": {
-    "LocalAuthStrategyConf": {
-      "type": "object",
-      "properties": {}
-    },
-    "GoogleAuthStrategyConf": {
-      "type": "object",
-      "properties": {
-        "clientID": {
-          "type": "string"
-        },
-        "clientSecret": {
-          "type": "string"
-        },
-        "callbackURL": {
-          "type": "string"
-        }
-      },
-      "required": [ "clientID", "clientSecret", "callbackURL" ]
+      "required": [ "availableStrategies" ]
     }
   },
   "required": [
-    "name",
-    "port"
+    "name"
   ]
 }

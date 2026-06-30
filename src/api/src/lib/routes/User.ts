@@ -21,6 +21,7 @@ import {
   InvalidJsonPatchException,
   NexxusJsonPatch,
   NexxusJsonPatchInternal,
+  NexxusUser,
 } from '@mayhem93/nexxus-core-lib';
 
 import type { Router, RequestHandler } from 'express';
@@ -71,7 +72,7 @@ export default class UserRoute extends NexxusApiBaseRoute {
   private async me(req: NexxusApiRequest, res: NexxusApiResponse): Promise<void> {
     const { iat, exp, aud, iss, ...userData } = req.user!;
 
-    NexxusApi.logger.debug(`Fetching current user data: ${JSON.stringify(req.user!)}`, 'UserRoute');
+    NexxusApi.logger.debug('Fetching current user data', { user: req.user! }, 'UserRoute');
 
     res.status(200).json(userData);
   }
@@ -80,18 +81,19 @@ export default class UserRoute extends NexxusApiBaseRoute {
     const appId = req.headers['nxx-app-id'] as string;
     const { username, password, ...additionalFields } = req.body;
 
-    // Check if local strategy is available
-    if (!NexxusApi.instance.hasAuthStrategy('local')) {
-      throw new InvalidAuthMethodException('Local authentication not supported');
-    }
-
     // Validate required fields
     if (!username || !password || typeof username !== 'string' || typeof password !== 'string') {
       throw new InvalidParametersException('Username and password are required');
     }
 
-    // Get the local strategy instance
-    const localStrategy = NexxusApi.instance.getAuthStrategy('local');
+    // Look up THIS application's local strategy instance. The deployment-wide
+    // `hasAuthStrategy('local')` check is no longer sufficient — the strategy
+    // class might be registered but absent from this app's `auth.strategies`.
+    const localStrategy = NexxusApi.instance.getAppAuthStrategy(appId, 'local');
+
+    if (!localStrategy) {
+      throw new InvalidAuthMethodException('Local authentication is not available for this application');
+    }
     const existingUser = await localStrategy.findUserByUsername(appId, username);
 
     if (existingUser) {
@@ -140,10 +142,6 @@ export default class UserRoute extends NexxusApiBaseRoute {
     let authProvidersPatch: NexxusJsonPatch | undefined;
 
     if (passwordUpdateIndex !== -1) {
-      if (app?.getData().allowMultipleLogin === false && !req.user!.authProviders.includes('local')) {
-        throw new InvalidParametersException('Password update not allowed when multiple login is disabled');
-      }
-
       req.body.patch.value[passwordUpdateIndex] = NexxusAuthStrategy.hashPassword(req.body.patch.value[passwordUpdateIndex]);
 
       if (!req.user!.authProviders.includes('local')) {
@@ -184,13 +182,15 @@ export default class UserRoute extends NexxusApiBaseRoute {
     patches.push(updatedAtPatch);
 
     try {
+      const userSchema = NexxusUser.getModelSchema(app?.getUserDetailSchema(user.userType));
+
       if (authProvidersPatch) {
-        authProvidersPatch.validate({ modelType: 'user', userDetailsSchema: app?.getUserDetailSchema(user.userType)! });
+        authProvidersPatch.validate(userSchema);
         patches.push(authProvidersPatch);
       }
 
-      jsonPatch.validate({ modelType: 'user', userDetailsSchema: app?.getUserDetailSchema(user.userType)! });
-      updatedAtPatch.validate({ modelType: 'user', userDetailsSchema: app?.getUserDetailSchema(user.userType)! });
+      jsonPatch.validate(userSchema);
+      updatedAtPatch.validate(userSchema);
 
       await NexxusApi.database.updateItems(patches);
 

@@ -8,7 +8,11 @@ export default (req: NexxusApiRequest, res: Response, next: NextFunction) => {
   res.on('finish', () => {
     const duration = Date.now() - startTime;
 
-    NexxusApi.logger.info(`${req.method} ${req.originalUrl} - ${res.statusCode} - ${duration}ms`, 'NxxApi');
+    NexxusApi.logger.info(
+      `${req.method} ${req.originalUrl} - ${res.statusCode} - ${duration}ms`,
+      { method: req.method, url: req.originalUrl, statusCode: res.statusCode, duration },
+      'NxxApi'
+    );
   });
 
   next();

@@ -8,11 +8,9 @@ import { NexxusWebsocketsTransportWorker } from "../WebsocketsTransportWorker";
 
 import { NexxusDevice, RedisKeyNotFoundException } from "@mayhem93/nexxus-redis";
 import {
-  NexxusModelDeletedData,
-  NexxusWebSocketJsonPatch,
-  NexxusWebSocketModelCreatedPayload,
-  NexxusWebSocketModelDeletedPayload,
-  NexxusWebSocketModelUpdatedPayload
+  NexxusTransportModelCreatedPayload,
+  NexxusTransportModelDeletedPayload,
+  NexxusTransportModelUpdatedPayload
 } from "@mayhem93/nexxus-core-lib";
 
 import { WebSocket, Data as WebSocketData } from "ws";
@@ -42,9 +40,9 @@ export type NexxusWsServerMessage = {
     success: boolean;
     message?: string;
   };
-  model_created: NexxusWebSocketModelCreatedPayload
-  model_updated: NexxusWebSocketModelUpdatedPayload
-  model_deleted: NexxusWebSocketModelDeletedPayload;
+  model_created: NexxusTransportModelCreatedPayload;
+  model_updated: NexxusTransportModelUpdatedPayload;
+  model_deleted: NexxusTransportModelDeletedPayload;
   error: {
     message: string;
     code?: string;
@@ -106,6 +104,7 @@ export class NexxusWsClient extends EventEmitter<ClientEventMap> {
       switch (message.event) {
         case 'register':
           await this.registerDevice(message);
+
           break;
         default:
           NexxusWebsocketsTransportWorker.logger.warn(`Unknown client event: ${message.event}`, 'NexxusWsClient');
@@ -115,7 +114,7 @@ export class NexxusWsClient extends EventEmitter<ClientEventMap> {
         e = new NexxusWsInternalServerException('An unexpected error occurred while processing the message.');
       }
 
-      NexxusWebsocketsTransportWorker.logger.error(`Error processing message from client "${this.id}": ${e.message}`, 'NexxusWsClient');
+      NexxusWebsocketsTransportWorker.logger.error(`Error processing message from client "${this.id}"`, { error: e }, 'NexxusWsClient');
       this.sendError(e);
     }
   }
@@ -133,10 +132,15 @@ export class NexxusWsClient extends EventEmitter<ClientEventMap> {
   }
 
   public sendMessage<E extends keyof NexxusWsServerMessage>(event: E, data: NexxusWsServerMessage[E]) {
-    // const message: NexxusWsServerEvent<E> = data;
+    this.socket.send(JSON.stringify({ event, data }));
 
-    this.socket.send(JSON.stringify(data));
-    NexxusWebsocketsTransportWorker.logger.debug(`Sent ${event} message to client ${this.id}: "${JSON.stringify(data)}"`, 'NexxusWsClient');
+    NexxusWebsocketsTransportWorker.logger.info(`Sent ${event} message to client ${this.id}`,
+      {
+        clientId: this.id,
+        deviceId: this.deviceId,
+        event
+      },
+    'NexxusWsClient');
   }
 
   private async registerDevice(msg: NexxusWsClientEvent<'register'>) {

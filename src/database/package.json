@@ -1,6 +1,6 @@
 {
   "name": "@mayhem93/nexxus-database-lib",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Database adapters for Nexxus",
   "main": "dist-cjs/index.js",
   "module": "dist-esm/index.js",
@@ -17,7 +17,7 @@
     "dist-*/**",
     "src/schemas/**/*.json"
   ],
-  "homepage": "https://github.com/Mayhem93/nexxus-server/tree/main/src/database",
+  "homepage": "https://github.com/Mayhem93/nexxus-lib/tree/main/src/database",
   "keywords": [
     "realtime",
     "sync",
@@ -32,11 +32,11 @@
     "@tsconfig/node24": "^24.0.1",
     "@types/node": "^24.9.1",
     "concurrently": "^9.2.1",
-    "typescript": "5.9.3"
+    "typescript": "^6.0.0"
   },
   "dependencies": {
     "@elastic/elasticsearch": "^8.19.1",
-    "@mayhem93/nexxus-core-lib": "0.0.1",
+    "@mayhem93/nexxus-core-lib": "0.0.2",
     "@types/argparse": "^2.0.17",
     "@types/json-schema": "^7.0.15",
     "ajv": "^8.17.1",
@@ -48,7 +48,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Mayhem93/nexxus-server.git",
+    "url": "git+https://github.com/Mayhem93/nexxus-lib.git",
     "directory": "src/database"
   }
 }

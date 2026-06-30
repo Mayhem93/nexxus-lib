@@ -7,11 +7,12 @@ import {
 } from '../Api';
 import { UserAuthenticationFailedException } from '../Exceptions';
 
-import { NexxusJsonPatch } from '@mayhem93/nexxus-core-lib';
+import { NexxusJsonPatch, NexxusUser } from '@mayhem93/nexxus-core-lib';
 
 import type { NextFunction, Request, Response } from 'express';
 import passport from 'passport';
 import { Strategy as GoogleStrategy } from 'passport-google-oauth20';
+import * as path from 'node:path';
 
 export interface NexxusGoogleAuthConfig extends NexxusBaseAuthStrategyConfig {
   clientID: string;
@@ -21,12 +22,11 @@ export interface NexxusGoogleAuthConfig extends NexxusBaseAuthStrategyConfig {
 
 export default class NexxusGoogleAuthStrategy extends NexxusAuthStrategy<NexxusGoogleAuthConfig> {
   readonly name = 'google';
-  readonly requiresCallback = true;
+  static readonly requiresCallback = true;
+  protected static schemaPath: string = path.join(__dirname, '../../../src/schemas/google-auth-strategy.schema.json');
 
   initializePassport(): void {
-    super.initializePassport();
-
-    passport.use('google', new GoogleStrategy(
+    passport.use(this.passportName, new GoogleStrategy(
       {
         clientID: this.config.clientID,
         clientSecret: this.config.clientSecret,
@@ -62,13 +62,7 @@ export default class NexxusGoogleAuthStrategy extends NexxusAuthStrategy<NexxusG
               return done(null, NexxusAuthStrategy.convertToApiUser(user));
             }
 
-            if (app?.getData().allowMultipleLogin === false) {
-              return done(new UserAuthenticationFailedException(
-                'User not registered for google authentication and multiple login is disabled'
-              ));
-            }
-
-            NexxusApi.logger.debug(`status: ${status}; user: ${JSON.stringify(user.getData())}`, 'GoogleAuthStrategy');
+            NexxusApi.logger.debug(`Google auth status: ${status}`, { user: user.getData() }, 'GoogleAuthStrategy');
 
             // update user with additional auth provider
             const patch = new NexxusJsonPatch({
@@ -93,8 +87,10 @@ export default class NexxusGoogleAuthStrategy extends NexxusAuthStrategy<NexxusG
               }
             });
 
-            patch.validate({ modelType: 'user', userDetailsSchema: app?.getUserDetailSchema(userType)! });
-            updatedAtPatch.validate({ modelType: 'user', userDetailsSchema: app?.getUserDetailSchema(userType)! });
+            const userSchema = NexxusUser.getModelSchema(app?.getUserDetailSchema(userType));
+
+            patch.validate(userSchema);
+            updatedAtPatch.validate(userSchema);
 
             await NexxusApi.database.updateItems([patch, updatedAtPatch]);
           }
@@ -117,7 +113,7 @@ export default class NexxusGoogleAuthStrategy extends NexxusAuthStrategy<NexxusG
     }
 
     // Initiate Google OAuth flow (redirects browser to Google)
-    passport.authenticate('google', {
+    passport.authenticate(this.passportName, {
       session: false,
       scope: ['profile', 'email'],
       state: `${appId}|${userType}` // Pass appId and userType via state
@@ -126,7 +122,7 @@ export default class NexxusGoogleAuthStrategy extends NexxusAuthStrategy<NexxusG
 
   async handleCallback(req: Request, res: Response, next: NextFunction): Promise<void> {
     // Handle Google's callback (browser was redirected here by Google)
-    passport.authenticate('google', { session: false }, (err: any, user: NexxusApiUser, info: any) => {
+    passport.authenticate(this.passportName, { session: false }, (err: any, user: NexxusApiUser, info: any) => {
       if (err) {
         return next(err);
       }

@@ -5,17 +5,16 @@ import {
   NexxusApi
 } from '../Api';
 import { AppExistsMiddleware, AuthMiddleware, RequiredHeadersMiddleware } from '../middlewares';
-import { InvalidParametersException, NotFoundException } from '../Exceptions';
+import { InvalidParametersException } from '../Exceptions';
 
 import { NexxusDevice, NexxusDeviceProps } from '@mayhem93/nexxus-redis';
-import { NexxusJsonPatch } from '@mayhem93/nexxus-core-lib';
+import { NexxusJsonPatch, NexxusUser } from '@mayhem93/nexxus-core-lib';
 
 import type { Router, RequestHandler } from 'express';
 
 import { randomUUID } from 'node:crypto';
-import * as path from 'node:path';
 
-type RegisterDeviceRequestBody = Omit<NexxusDeviceProps, 'id' | 'appId' | 'status' | 'lastSeen' | 'subscriptions' | 'connectedTo' | 'type'>;
+type RegisterDeviceRequestBody = Omit<NexxusDeviceProps, 'id' | 'appId' | 'status' | 'lastSeen' | 'subscriptions' | 'transport' | 'type'>;
 type UpdateDeviceRequestBody = Pick<NexxusDeviceProps, 'name'>;
 
 interface RegisterDeviceRequest extends NexxusApiRequest {
@@ -66,10 +65,8 @@ export default class DeviceRoute extends NexxusApiBaseRoute {
     const nxxDevice = new NexxusDevice({
       id: randomUUID(),
       appId: req.headers['nxx-app-id'] as string,
-      userId: userId || null,
+      userId: userId,
       name: req.body.name,
-      status: 'offline',
-      lastSeen: (new Date(0)).toDateString(),
       subscriptions: []
     });
 
@@ -98,8 +95,10 @@ export default class DeviceRoute extends NexxusApiBaseRoute {
         }
       });
 
-      updateUserDevicesPatch.validate({ modelType: 'user', userDetailsSchema: app?.getUserDetailSchema()! });
-      updatedAtPatch.validate({ modelType: 'user', userDetailsSchema: app?.getUserDetailSchema()! });
+      const userSchema = NexxusUser.getModelSchema(app.getUserDetailSchema());
+
+      updateUserDevicesPatch.validate(userSchema);
+      updatedAtPatch.validate(userSchema);
 
       await NexxusApi.database.updateItems([updateUserDevicesPatch, updatedAtPatch]);
     }

@@ -1,6 +1,7 @@
 import {
   NexxusDatabaseAdapter,
   NexxusDatabaseAdapterEvents,
+  NexxusDbCountOptions,
   NexxusDbGetOptions,
   NexxusDbSearchOptions,
   NexxusDbUpdateOptions
@@ -13,29 +14,31 @@ import {
   INexxusBaseServices,
   type INexxusBaseModel,
   type AnyNexxusModel,
-  type AnyNexxusModelType,
+  type AnyNexxusModelData,
   NexxusApplication,
-  NexxusApplicationModelType,
+  INexxusApplication,
   NexxusAppModel,
-  NexxusAppModelType,
-  NexxusApplicationUser,
-  NexxusUserModelType,
+  INexxusAppModel,
+  NexxusUser,
+  INexxusUser,
   NexxusJsonPatch,
   NexxusFilterQuery,
   NexxusLogicalOperator,
   ConnectionException,
   NEXXUS_PREFIX_LC,
-  NEXXUS_BUILTIN_MODEL_SCHEMAS
+  NEXXUS_BUILTIN_MODEL_SCHEMAS,
+  isBuiltinModel
 } from "@mayhem93/nexxus-core-lib";
 
 import * as ElasticSearch from '@elastic/elasticsearch';
-import type {
-  BulkOperationBase,
-  BulkOperationContainer,
-  BulkUpdateAction,
-  QueryDslQueryContainer,
-  QueryDslBoolQuery
-} from "@elastic/elasticsearch/lib/api/typesWithBodyKey";
+import type { estypesWithBody } from '@elastic/elasticsearch';
+
+type BulkOperationBase = estypesWithBody.BulkOperationBase;
+type BulkOperationContainer = estypesWithBody.BulkOperationContainer;
+type BulkUpdateAction = estypesWithBody.BulkUpdateAction;
+type QueryDslQueryContainer = estypesWithBody.QueryDslQueryContainer;
+type QueryDslBoolQuery = estypesWithBody.QueryDslBoolQuery;
+type CountRequest = estypesWithBody.CountRequest;
 
 import * as path from "node:path";
 
@@ -60,31 +63,14 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
   private lastRefreshTimes: Map<string, number> = new Map();
 
   protected static schemaPath: string = path.join(__dirname, "../../src/schemas/elasticsearch.schema.json");
-  protected static envVars: ConfigEnvVars = {
-    source: this.name,
-    specs: [
-      {
-        name: "DB_HOST",
-        location: "database.host"
-      },
-      {
-        name: "DB_PORT",
-        location: "database.port"
-      },
-      {
-        name: "DB_USERNAME",
-        location: "database.user"
-      },
-      {
-        name: "DB_PASSWORD",
-        location: "database.password"
-      }
-    ]
-  };
-  protected static cliArgs: ConfigCliArgs = {
-    source: this.name,
-    specs: []
-  };
+  protected static envVars: ConfigEnvVars = [
+    { name: "DB_HOST",     location: "host" },
+    { name: "DB_PORT",     location: "port" },
+    { name: "DB_USERNAME", location: "user" },
+    { name: "DB_PASSWORD", location: "password" }
+  ];
+
+  protected static cliArgs: ConfigCliArgs = [];
 
   constructor(services: INexxusBaseServices) {
     super(services);
@@ -150,7 +136,7 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
     let waitForRefresh = true;
 
     for (const item of collection) {
-      let itemData : AnyNexxusModelType;
+      let itemData : AnyNexxusModelData;
       let index;
 
       switch (item.constructor) {
@@ -159,12 +145,15 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
           index = `${NEXXUS_PREFIX_LC}-application`;
 
           break;
-        case NexxusApplicationUser:
-          itemData = (item as NexxusApplicationUser).getData();
+
+        case NexxusUser:
+          itemData = (item as NexxusUser).getData();
           index = `${NEXXUS_PREFIX_LC}-app-${itemData.appId}-${itemData.type}`;
 
           break;
+
         case NexxusAppModel:
+
           itemData = (item as NexxusAppModel).getData();
           index = `${NEXXUS_PREFIX_LC}-app-${itemData.appId}-${itemData.type}`;
 
@@ -183,78 +172,82 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
       );
     }
 
-    await this.client.bulk({ operations: bulkReq.body, refresh: waitForRefresh ? 'wait_for' : false });
+    NexxusElasticsearchDb.logger.debug('Executing Elasticsearch bulk create', { request: bulkReq }, NexxusDatabaseAdapter.loggerLabel);
+
+    const dbResult = await this.client.bulk({ operations: bulkReq.body, refresh: waitForRefresh ? 'wait_for' : false });
+
+    if (dbResult.errors) {
+      const erroredItems = dbResult.items.filter(item => {
+        const action = item.index || item.update || item.delete || item.create;
+
+        return action && action.error;
+      });
+
+      NexxusElasticsearchDb.logger.error(
+        `Failed to create items in Elasticsearch database`,
+        { errors: erroredItems },
+        NexxusDatabaseAdapter.loggerLabel
+      );
+    }
+
+    // Back-fill the adapter-assigned version onto each successfully-written AppModel.
+    // Built-in models (Application, User) do not carry a version field.
+    collection.forEach((item, i) => {
+      const indexResult = dbResult.items[i]?.index;
+
+      if (item instanceof NexxusAppModel && indexResult?._version !== undefined) {
+        (item.getData() as INexxusAppModel).version = indexResult._version;
+      }
+    });
   }
 
   async searchItems(options: NexxusDbSearchOptions<'application'>): Promise<NexxusApplication[]>;
-  async searchItems(options: NexxusDbSearchOptions<'user'>): Promise<NexxusApplicationUser[]>;
+  async searchItems(options: NexxusDbSearchOptions<'user'>): Promise<NexxusUser[]>;
   async searchItems(options: NexxusDbSearchOptions<string>): Promise<NexxusAppModel[]>;
 
   async searchItems(options: NexxusDbSearchOptions<string>): Promise<Array<AnyNexxusModel>> {
-    let index = NEXXUS_PREFIX_LC;
+    const esSearchRequest = this.buildQuery(options);
 
-    switch (options.type) {
-      case 'application':
-        index += `-${options.type}`;
+    // forceRefresh is a side effect on ES state, not part of query composition,
+    // so it stays in searchItems. Only meaningful for app models — built-ins
+    // always go through `wait_for` on write.
+    if (!isBuiltinModel(options.type) && options.databaseSpecific?.forceRefresh === true) {
+      const indexName = esSearchRequest.index as string;
+      const lastRefresh = this.lastRefreshTimes.get(indexName);
+      const timeSinceRefresh = lastRefresh ? Date.now() - lastRefresh : Infinity;
 
-        break;
+      // Only refresh if > 500ms since last refresh
+      if (timeSinceRefresh > 500) {
+        await this.client.indices.refresh({ index: indexName });
 
-      case 'user':
-        if (!options.appId) {
-          throw new Error("App ID is required for searching user models");
-        }
+        this.lastRefreshTimes.set(indexName, Date.now());
 
-        index += `-app-${options.appId}-${options.type}`;
-
-        break;
-      default:
-        if (!options.appId) {
-          throw new Error("App ID is required for searching app-specific models");
-        }
-
-        const modelName = options.type;
-
-        index += `-app-${options.appId}-${modelName}`;
-
-        if (options.databaseSpecific?.forceRefresh === true) {
-          const lastRefresh = this.lastRefreshTimes.get(index);
-          const timeSinceRefresh = lastRefresh ? Date.now() - lastRefresh : Infinity;
-
-          // Only refresh if > 500ms since last refresh
-          if (timeSinceRefresh > 500) {
-            await this.client.indices.refresh({ index: index });
-
-            this.lastRefreshTimes.set(index, Date.now());
-
-            NexxusElasticsearchDb.logger.debug(
-              `Forced refresh of index ${index} (last refresh was ${timeSinceRefresh}ms ago)`,
-              NexxusDatabaseAdapter.loggerLabel
-            );
-          }
-        }
+        NexxusElasticsearchDb.logger.debug(
+          `Forced refresh of index ${indexName} (last refresh was ${timeSinceRefresh}ms ago)`,
+          NexxusDatabaseAdapter.loggerLabel
+        );
+      }
     }
 
-    const esSearchRequest: ElasticSearch.estypes.SearchRequest = {
-      index: index,
-      from: options.offset || 0,
-      size: options.limit || 100,
-      query: this.buildQuery(options.filter)
-    };
-
-    NexxusElasticsearchDb.logger.debug(`Executing Elasticsearch search with request: ${JSON.stringify(esSearchRequest)}`, NexxusDatabaseAdapter.loggerLabel);
+    NexxusElasticsearchDb.logger.debug('Executing Elasticsearch search', { request: esSearchRequest }, NexxusDatabaseAdapter.loggerLabel);
 
     const searchResults = await this.client.search(esSearchRequest);
 
     const models: Array<AnyNexxusModel> = searchResults.hits.hits.map(res => {
       switch (options.type) {
         case 'application':
-          return new NexxusApplication(res._source as NexxusApplicationModelType);
+          return new NexxusApplication(res._source as INexxusApplication);
 
         case 'user':
-          return new NexxusApplicationUser(res._source as NexxusUserModelType);
+          return new NexxusUser(res._source as INexxusUser);
 
         default:
-          return new NexxusAppModel(res._source as NexxusAppModelType);
+          // Inject the ES-side _version into the model data before construction.
+          // Only app models carry a version; built-ins above intentionally don't.
+          return NexxusAppModel.fromStorage({
+            ...(res._source as INexxusAppModel),
+            version: res._version
+          });
       }
     });
 
@@ -262,7 +255,7 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
   }
 
   async getItems(options: NexxusDbGetOptions<'application'>): Promise<Array<NexxusApplication | null>>;
-  async getItems(options: NexxusDbGetOptions<'user'>): Promise<Array<NexxusApplicationUser | null>>;
+  async getItems(options: NexxusDbGetOptions<'user'>): Promise<Array<NexxusUser | null>>;
   async getItems(options: NexxusDbGetOptions<string>): Promise<Array<NexxusAppModel | null>>;
 
   async getItems(options: NexxusDbGetOptions<string>): Promise<Array<NexxusBaseModel | null>> {
@@ -295,12 +288,13 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
       const esMgetResponse = await this.client.mget({
         index: index,
         ids: options.ids,
-        _source: true
+        _source: true,
+        realtime: true
       });
 
       return esMgetResponse.docs.map(doc => {
         if ('error' in doc) {
-          NexxusElasticsearchDb.logger.warn(`Error retrieving document ID ${doc._id} from Elasticsearch: ${JSON.stringify(doc.error)}`, NexxusDatabaseAdapter.loggerLabel);
+          NexxusElasticsearchDb.logger.warn(`Error retrieving document ID ${doc._id} from Elasticsearch`, { error: doc.error }, NexxusDatabaseAdapter.loggerLabel);
 
           return null;
         }
@@ -311,15 +305,19 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
 
         switch(options.type) {
           case 'application':
-            return new NexxusApplication(doc._source as NexxusApplicationModelType);
+            return new NexxusApplication(doc._source as INexxusApplication);
 
           case 'user':
-            return new NexxusApplicationUser(doc._source as NexxusUserModelType);
+            return new NexxusUser(doc._source as INexxusUser);
 
           default:
-            return new NexxusAppModel(doc._source as NexxusAppModelType);
+            // Inject the ES-side _version into the model data before construction.
+            return NexxusAppModel.fromStorage({
+              ...(doc._source as INexxusAppModel),
+              version: doc._version
+            });
         }
-      });
+      }).filter(doc => doc !== null);
     } catch (e: Error | unknown) {
       if (e instanceof ElasticSearch.errors.ResponseError && e.statusCode === 404) {
         return [];
@@ -329,7 +327,7 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
     }
   }
 
-  async updateItems(collection: Array<NexxusJsonPatch>, options?: NexxusDbUpdateOptions): Promise<Array<Partial<AnyNexxusModelType>>> {
+  async updateItems(collection: Array<NexxusJsonPatch>, options?: NexxusDbUpdateOptions): Promise<Array<Partial<AnyNexxusModelData>>> {
     const bulkBody: Array<BulkOperationContainer | BulkUpdateAction> = [];
     const collectedModelFields = new Set<string>();
     let waitForRefresh = true;
@@ -338,65 +336,89 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
       waitForRefresh = false;
     }
 
+    // Group all patches targeting the same doc into a single bulk update with one
+    // merged painless script. ES bumps `_version` exactly once per `update` action,
+    // so emitting separate actions for (e.g.) the field patch and the implicit
+    // `updatedAt` patch would double-bump and create phantom gaps on the client.
+    type DocBucket = {
+      index: string;
+      id: string;
+      scriptLines: Array<string>;
+      scriptParams: Record<string, any>;
+      paramCount: number;
+    };
+    const docBuckets: Map<string, DocBucket> = new Map();
+
     for (const patch of collection) {
       const patchData = patch.get();
-      const scriptParams : Record<string, any> = {};
       let index = `${NEXXUS_PREFIX_LC}-`;
 
       if (patchData.metadata.type === 'application') {
         index += `${patchData.metadata.type}`;
       } else {
         if (!patchData.metadata.appId) {
-          throw new Error("App ID is required for updating for user or app-specific models");
+          throw new Error("App ID is required for updating user or app-specific models");
         }
 
         index += `app-${patchData.metadata.appId}-${patchData.metadata.type}`;
       }
 
-      // Build a single script for all paths in this patch
-      let scriptLines : Array<string | null> = patchData.path.map((path, idx) => {
+      const docKey = `${index}|${patchData.metadata.id}`;
+      let bucket = docBuckets.get(docKey);
+
+      if (!bucket) {
+        bucket = { index, id: patchData.metadata.id, scriptLines: [], scriptParams: {}, paramCount: 0 };
+        docBuckets.set(docKey, bucket);
+      }
+
+      for (let idx = 0; idx < patchData.path.length; idx++) {
+        const path = patchData.path[idx];
+        const fieldType = patchData.metadata.pathFieldTypes![idx];
+        const paramName = `value${bucket.paramCount}`;
         let scriptLine: string | undefined;
 
         switch (patchData.op) {
           case 'replace':
-            scriptLine = `ctx._source.${path} = params.value${idx}`;
+            scriptLine = `ctx._source.${path} = params.${paramName}`;
 
             break;
+
           case 'append':
-            if (patchData.metadata.pathFieldTypes![idx] === 'array') {
-              scriptLine = `if (ctx._source.${path} == null) { ctx._source.${path} = []; } ctx._source.${path}.add(params.value${idx})`;
-            } else if (patchData.metadata.pathFieldTypes![idx] === 'string') {
-              scriptLine = `if (ctx._source.${path} == null) { ctx._source.${path} = ''; } ctx._source.${path} += params.value${idx}`;
+            if (fieldType === 'array') {
+              scriptLine = `if (ctx._source.${path} == null) { ctx._source.${path} = []; } ctx._source.${path}.add(params.${paramName})`;
+            } else if (fieldType === 'string') {
+              scriptLine = `if (ctx._source.${path} == null) { ctx._source.${path} = ''; } ctx._source.${path} += params.${paramName}`;
             } else {
-              NexxusElasticsearchDb.logger.warn(`Append operation not supported for field type: ${patchData.metadata.pathFieldTypes![idx]}`, NexxusDatabaseAdapter.loggerLabel);
+              NexxusElasticsearchDb.logger.warn(`Append operation not supported for field type: ${fieldType}`, NexxusDatabaseAdapter.loggerLabel);
             }
 
             break;
+
           case 'prepend':
-            if (patchData.metadata.pathFieldTypes![idx] === 'array') {
-              scriptLine = `if (ctx._source.${path} == null) { ctx._source.${path} = []; } ctx._source.${path}.add(0, params.value${idx})`;
-            } else if (patchData.metadata.pathFieldTypes![idx] === 'string') {
-              scriptLine = `if (ctx._source.${path} == null) { ctx._source.${path} = ''; } ctx._source.${path} = params.value${idx} + ctx._source.${path}`;
+            if (fieldType === 'array') {
+              scriptLine = `if (ctx._source.${path} == null) { ctx._source.${path} = []; } ctx._source.${path}.add(0, params.${paramName})`;
+            } else if (fieldType === 'string') {
+              scriptLine = `if (ctx._source.${path} == null) { ctx._source.${path} = ''; } ctx._source.${path} = params.${paramName} + ctx._source.${path}`;
             } else {
-              NexxusElasticsearchDb.logger.warn(`Prepend operation not supported for field type: ${patchData.metadata.pathFieldTypes![idx]}`, NexxusDatabaseAdapter.loggerLabel);
+              NexxusElasticsearchDb.logger.warn(`Prepend operation not supported for field type: ${fieldType}`, NexxusDatabaseAdapter.loggerLabel);
             }
 
             break;
 
           case 'incr':
-            if (patchData.metadata.pathFieldTypes![idx] === 'number' || patchData.metadata.pathFieldTypes![idx] === 'date') {
-              scriptLine = `if (ctx._source.${path} == null) { ctx._source.${path} = ${patchData.value[idx]}; } ctx._source.${path} += params.value${idx}`;
+            if (fieldType === 'number' || fieldType === 'date') {
+              scriptLine = `if (ctx._source.${path} == null) { ctx._source.${path} = ${patchData.value[idx]}; } ctx._source.${path} += params.${paramName}`;
             } else {
-              NexxusElasticsearchDb.logger.warn(`Incr operation not supported for field type: ${patchData.metadata.pathFieldTypes![idx]}`, NexxusDatabaseAdapter.loggerLabel);
+              NexxusElasticsearchDb.logger.warn(`Incr operation not supported for field type: ${fieldType}`, NexxusDatabaseAdapter.loggerLabel);
             }
 
             break;
 
           case 'decr':
-            if (patchData.metadata.pathFieldTypes![idx] === 'number' || patchData.metadata.pathFieldTypes![idx] === 'date') {
-              scriptLine = `if (ctx._source.${path} == null) { ctx._source.${path} = ${patchData.value[idx]}; } ctx._source.${path} -= params.value${idx}`;
+            if (fieldType === 'number' || fieldType === 'date') {
+              scriptLine = `if (ctx._source.${path} == null) { ctx._source.${path} = ${patchData.value[idx]}; } ctx._source.${path} -= params.${paramName}`;
             } else {
-              NexxusElasticsearchDb.logger.warn(`Decr operation not supported for field type: ${patchData.metadata.pathFieldTypes![idx]}`, NexxusDatabaseAdapter.loggerLabel);
+              NexxusElasticsearchDb.logger.warn(`Decr operation not supported for field type: ${fieldType}`, NexxusDatabaseAdapter.loggerLabel);
             }
 
             break;
@@ -407,31 +429,34 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
         }
 
         if (scriptLine === undefined) {
-          return null;
+          continue;
         }
 
-        scriptParams[`value${idx}`] = patchData.value[idx];
+        bucket.scriptLines.push(scriptLine);
+        bucket.scriptParams[paramName] = patchData.value[idx];
+        bucket.paramCount++;
         collectedModelFields.add(path);
-
-        return scriptLine;
-      });
-
-      scriptLines = scriptLines.filter(line => line !== null);
-
-      if (scriptLines.length > 0) {
-        bulkBody.push(
-          { update: { _index: index, _id: patchData.metadata.id } },
-          {
-            script: {
-              source: scriptLines.join(';\n'),
-              lang: 'painless',
-              params: scriptParams
-            }
-          }
-        );
-      } else {
-        NexxusElasticsearchDb.logger.warn(`No valid script lines generated for JSON Patch on ID ${patchData.metadata.id}`, NexxusDatabaseAdapter.loggerLabel);
       }
+    }
+
+    // One update action per doc — single merged script, single `_version` bump.
+    for (const bucket of docBuckets.values()) {
+      if (bucket.scriptLines.length === 0) {
+        NexxusElasticsearchDb.logger.warn(`No valid script lines generated for ID ${bucket.id}`, NexxusDatabaseAdapter.loggerLabel);
+
+        continue;
+      }
+
+      bulkBody.push(
+        { update: { _index: bucket.index, _id: bucket.id, retry_on_conflict: 3 } },
+        {
+          script: {
+            source: bucket.scriptLines.join(';\n'),
+            lang: 'painless',
+            params: bucket.scriptParams
+          }
+        }
+      );
     }
 
     if (bulkBody.length === 0) {
@@ -440,22 +465,30 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
       return [];
     }
 
-    NexxusElasticsearchDb.logger.debug(`Executing bulk update in Elasticsearch with ${JSON.stringify(bulkBody)}`, NexxusDatabaseAdapter.loggerLabel);
+    NexxusElasticsearchDb.logger.debug('Executing bulk update in Elasticsearch', { bulkBody }, NexxusDatabaseAdapter.loggerLabel);
 
     const returnFields = options?.returnFields ? collectedModelFields.union(options.returnFields) : collectedModelFields;
-    const result = await this.client.bulk({ operations: bulkBody, _source: Array.from(returnFields), refresh: waitForRefresh ? 'wait_for' : false });
-    const collectedPartialModels: Array<Partial<AnyNexxusModelType>> = [];
+    const result = await this.client.bulk({
+      operations: bulkBody,
+      _source: Array.from(returnFields),
+      refresh: waitForRefresh ? 'wait_for' : false
+    });
+    const collectedPartialModels: Array<Partial<AnyNexxusModelData>> = [];
 
-    NexxusElasticsearchDb.logger.debug(`Bulk update result: ${JSON.stringify(result)}`, NexxusDatabaseAdapter.loggerLabel);
+    NexxusElasticsearchDb.logger.debug('Bulk update result', { result }, NexxusDatabaseAdapter.loggerLabel);
 
     result.items.forEach(item => {
       if (item.update && item.update.status >= 200 && item.update.status < 300) {
         collectedPartialModels.push({
           id: item.update._id,
-          ...(item.update.get!._source)
-        } as Partial<AnyNexxusModelType>);
+          ...(item.update.get!._source),
+          // Adapter-assigned post-write version. Meaningful only for app models;
+          // for built-in updates the field is technically populated too but
+          // ignored downstream (built-ins don't participate in version-based sync).
+          version: item.update._version
+        } as Partial<AnyNexxusModelData>);
       } else {
-        NexxusElasticsearchDb.logger.warn(`Failed to update item ID ${item.update?._id} in Elasticsearch: ${JSON.stringify(item.update?.error)}`, NexxusDatabaseAdapter.loggerLabel);
+        NexxusElasticsearchDb.logger.warn(`Failed to update item ID ${item.update?._id} in Elasticsearch`, { error: item.update?.error }, NexxusDatabaseAdapter.loggerLabel);
       }
     });
 
@@ -472,6 +505,9 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
       if (item instanceof NexxusApplication) {
         itemData = item.getData();
         index = `${NEXXUS_PREFIX_LC}-applications`;
+      } else if (item instanceof NexxusUser) {
+        itemData = item.getData();
+        index = `${NEXXUS_PREFIX_LC}-${itemData.appId}-user`;
       } else {
         itemData = (item as NexxusAppModel).getData();
         index = `${NEXXUS_PREFIX_LC}-app-${itemData.appId}-${itemData.type}`;
@@ -485,7 +521,60 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
     await this.client.bulk({ operations: bulkBody });
   }
 
-  protected buildQuery(filter?: NexxusFilterQuery): QueryDslQueryContainer {
+  async countItems(options: NexxusDbCountOptions): Promise<number> {
+    const esSearchRequest = this.buildQuery(options);
+
+    NexxusElasticsearchDb.logger.debug('Executing Elasticsearch count', { request: esSearchRequest }, NexxusDatabaseAdapter.loggerLabel);
+
+    const countResult = await this.client.count({
+      index: esSearchRequest.index,
+      query: esSearchRequest.query
+    });
+
+    return countResult.count;
+  }
+
+  protected buildQuery(options: NexxusDbSearchOptions<string>): ElasticSearch.estypes.SearchRequest {
+    let index = NEXXUS_PREFIX_LC;
+
+    switch (options.type) {
+      case 'application': {
+        index += `-${options.type}`;
+
+        break;
+      }
+
+      case 'user': {
+        if (!options.appId) {
+          throw new Error("App ID is required for searching user models");
+        }
+
+        index += `-app-${options.appId}-${options.type}`;
+
+        break;
+      }
+
+      default: {
+        if (!options.appId) {
+          throw new Error("App ID is required for searching app-specific models");
+        }
+
+        index += `-app-${options.appId}-${options.type}`;
+      }
+    }
+
+    return {
+      index,
+      from: options.offset ?? 0,
+      size: options.limit ?? 100,
+      query: this.buildFilterQuery(options.filter),
+      sort: options.sort
+        ? { [options.sort.field]: { order: options.sort.order } }
+        : { updatedAt: { order: 'desc' } }
+    };
+  }
+
+  private buildFilterQuery(filter?: NexxusFilterQuery): QueryDslQueryContainer {
     if (filter === undefined) {
       return { match_all: {} };
     }
@@ -560,7 +649,7 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
       }
     }
 
-    NexxusDatabaseAdapter.logger.debug(`Built Elasticsearch query: ${JSON.stringify(root)}`, NexxusDatabaseAdapter.loggerLabel);
+    NexxusDatabaseAdapter.logger.debug('Built Elasticsearch query', { query: root }, NexxusDatabaseAdapter.loggerLabel);
 
     return root;
   }

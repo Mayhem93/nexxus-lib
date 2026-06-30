@@ -6,12 +6,11 @@ import {
   NexxusTransportManagerPayload,
   NexxusModelCreatedPayload,
   NexxusTransportManagerModelUpdatedPayload,
-  NexxusTransportManagetJsonPatch,
+  NexxusTransportManagerJsonPatch,
   NexxusModelDeletedPayload,
   NexxusBaseQueuePayload,
   NexxusFilterQuery,
-  NexxusAppModelType,
-  NexxusWebSocketJsonPatch
+  INexxusAppModel,
 } from '@mayhem93/nexxus-core-lib';
 import { NexxusQueueMessage } from '@mayhem93/nexxus-message-queue-lib';
 import {
@@ -39,14 +38,8 @@ type NexxusTransportManagerWorkerEvents = NexxusBaseWorkerEvents & {
 export class NexxusTransportManagerWorker extends NexxusBaseWorker<NexxusTransportManagerWorkerConfig, NexxusTransportManagerWorkerEvents, NexxusTransportManagerPayload> {
   protected queueName : NexxusQueueName = "transport-manager";
   protected static loggerLabel: Readonly<string> = "NxxTransportManagerWorker";
-  protected static cliArgs: ConfigCliArgs = {
-    source: this.name,
-    specs: []
-  };
-  protected static envVars: ConfigEnvVars = {
-    source: this.name,
-    specs: []
-  };
+  protected static cliArgs: ConfigCliArgs = [];
+  protected static envVars: ConfigEnvVars = [];
   protected static schemaPath: string = path.join(__dirname, "../../src/schemas/transport-manager-worker.schema.json");
 
   constructor(services: NexxusWorkerServices) {
@@ -54,30 +47,46 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<NexxusTranspo
   }
 
   protected async processMessage(msg: NexxusQueueMessage<NexxusTransportManagerPayload>): Promise<void> {
-    NexxusTransportManagerWorker.logger.debug(`Processing message: ${JSON.stringify(msg.payload)}`, NexxusTransportManagerWorker.loggerLabel);
+    NexxusTransportManagerWorker.logger.debug('Processing message', { payload: msg.payload }, NexxusTransportManagerWorker.loggerLabel);
 
     const payload = msg.payload;
 
     switch (payload.event) {
-      case "model_created":
+      case 'model_created': {
         await this.handleModelCreated(payload.data);
 
+        NexxusTransportManagerWorker.logger.debug('Processing model created',
+          { id: payload.data.id, appId: payload.data.appId, type: payload.data.type },
+          NexxusTransportManagerWorker.loggerLabel
+        );
+
         break;
-      case "model_updated":
+      }
+
+      case 'model_updated': {
         await this.handleModelUpdated(payload.data);
 
-        NexxusTransportManagerWorker.logger.debug(`Processing model update with data: ${JSON.stringify(payload.data)}`, NexxusTransportManagerWorker.loggerLabel);
+        NexxusTransportManagerWorker.logger.debug('Processing model update',
+          { id: payload.data[0].metadata.id, appId: payload.data[0].metadata.appId, type: payload.data[0].metadata.type },
+          NexxusTransportManagerWorker.loggerLabel
+        );
 
         break;
+      }
 
-      case "model_deleted":
+      case 'model_deleted': {
         await this.handleModelDeleted(payload.data);
 
-        NexxusTransportManagerWorker.logger.debug(`Processing model delete with data: ${JSON.stringify(payload.data)}`, NexxusTransportManagerWorker.loggerLabel);
+        NexxusTransportManagerWorker.logger.debug('Processing model delete',
+          { id: payload.data.id, appId: payload.data.appId, type: payload.data.type }, NexxusTransportManagerWorker.loggerLabel
+        );
 
         break;
+      }
       default:
-        NexxusTransportManagerWorker.logger.warn(`Unknown event type: ${(payload as NexxusBaseQueuePayload).event}`, NexxusTransportManagerWorker.loggerLabel);
+        NexxusTransportManagerWorker.logger.warn(`Unknown event type: ${(payload as NexxusBaseQueuePayload).event}`,
+          { type: (payload as NexxusBaseQueuePayload).event }, NexxusTransportManagerWorker.loggerLabel
+        );
     }
   }
 
@@ -115,8 +124,15 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<NexxusTranspo
         });
       }
 
-      NexxusTransportManagerWorker.logger.debug(
+      NexxusTransportManagerWorker.logger.info(
         `Notifying ${deviceChannelsMap.size} devices about new model with ID: "${data.id}" via transport: "${transport}"`,
+        {
+          appId: data.appId,
+          modelId: data.id,
+          modelType: data.type,
+          transport,
+          deviceCount: deviceChannelsMap.size
+        },
         NexxusTransportManagerWorker.loggerLabel
       );
     }
@@ -146,31 +162,46 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<NexxusTranspo
       transportToDeviceChannelsMap.get(transport as NexxusQueueName)!.set(deviceId, Array.from(channelKeys));
     }
 
-    for (const [transport, deviceChannelsMap] of transportToDeviceChannelsMap.entries()) {
-      // For each device, create patches with their specific matching channels
-      for (const [deviceId, channelKeys] of deviceChannelsMap.entries()) {
-        const websocketPatches: Array<NexxusWebSocketJsonPatch> = data.map(patch => ({
-          op: patch.op,
-          path: patch.path,
-          value: patch.value,
-          metadata: {
-            id: patch.metadata.id,
-            channels: channelKeys // Device-specific matching channels
-          }
-        }));
+    // All patches in a single model_updated event target the same model; identity
+    // and patch ops are constant across devices — compute once, reuse per recipient.
+    // The post-update `version` comes from the writer's partial (populated by the
+    // adapter on the bulk update) — every patch in this batch shares it.
+    const modelIdentity = {
+      id: data[0].metadata.id,
+      type: data[0].metadata.type,
+      appId: data[0].metadata.appId,
+      userId: data[0].metadata.userId,
+      version: data[0].metadata.partialModel.version,
+    };
+    const patches = data.map(patch => ({
+      op: patch.op,
+      path: patch.path,
+      value: patch.value,
+    }));
 
+    for (const [transport, deviceChannelsMap] of transportToDeviceChannelsMap.entries()) {
+      for (const [deviceId, channelKeys] of deviceChannelsMap.entries()) {
         this.publish(transport as NexxusQueueName, {
           event: 'device_message',
           deviceIds: [ deviceId ],
           data: {
             event: 'model_updated',
-            data: websocketPatches
+            model: modelIdentity,
+            patches,
+            metadata: { channels: channelKeys },
           }
         });
       }
 
-      NexxusTransportManagerWorker.logger.debug(
+      NexxusTransportManagerWorker.logger.info(
         `Notified ${deviceChannelsMap.size} devices about update to model ID: "${data[0].metadata.id}" via transport: "${transport}"`,
+        {
+          appId: data[0].metadata.appId,
+          modelId: data[0].metadata.id,
+          modelType: data[0].metadata.type,
+          transport,
+          deviceCount: deviceChannelsMap.size
+        },
         NexxusTransportManagerWorker.loggerLabel
       );
     }
@@ -210,8 +241,15 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<NexxusTranspo
         });
       }
 
-      NexxusTransportManagerWorker.logger.debug(
+      NexxusTransportManagerWorker.logger.info(
         `Notifying ${deviceChannelsMap.size} devices about deleted model with ID: "${data.id}" via transport: "${transport}"`,
+        {
+          appId: data.appId,
+          modelId: data.id,
+          modelType: data.type,
+          transport,
+          deviceCount: deviceChannelsMap.size
+        },
         NexxusTransportManagerWorker.loggerLabel
       );
     }
@@ -220,11 +258,11 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<NexxusTranspo
   private async getDevicesFromGeneratedChannels<T>(channel: NexxusBaseSubscriptionChannel, change?: T | T[]): Promise<Map<NexxusDeviceTransportString, Set<string>>> {
     const deviceToChannelsMap = new Map<NexxusDeviceTransportString, Set<string>>();
 
-    const appSchema = NexxusTransportManagerWorker.loadedApps.get(channel.appId)?.getData().schema;
+    const app = NexxusTransportManagerWorker.loadedApps.get(channel.appId);
 
-    if (!appSchema) {
+    if (!app) {
       NexxusTransportManagerWorker.logger.warn(
-        `Application schema not found for appId: "${channel.appId}" when getting devices for channel: ${JSON.stringify(channel)}`,
+        `Application not found for appId: "${channel.appId}" when getting devices for channel: ${JSON.stringify(channel)}`,
         NexxusTransportManagerWorker.loggerLabel
       );
 
@@ -236,10 +274,28 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<NexxusTranspo
       ? (Array.isArray(change) ? change : [change])
       : [];
 
-    // Step 1: Generate all base channels (without filters)
+    // Fetch the scope registry ONCE per event. This tells us which
+    // (modelId/userId) combinations have any subscriber at all — patterns
+    // not present here are skipped entirely instead of doing a speculative
+    // Redis lookup that would (a) almost always miss and (b) bloat Redis's
+    // client-tracking table with forever-stale entries.
+    const activeScopes = await NexxusRedisSubscription.getActiveScopes(channel.appId, channel.model);
+
+    if (activeScopes.size === 0) {
+      // Nobody subscribed to this (appId, model) at any scope. Done.
+      return deviceToChannelsMap;
+    }
+
+    // Generate all base channels (without filters)
     const baseChannels = NexxusRedisSubscription.generateSubscriptionPatterns(channel);
 
     for (const channelPattern of baseChannels) {
+      // Skip patterns whose scope has no subscribers — the work done below
+      // for this pattern would all be empty answers.
+      if (!activeScopes.has(NexxusRedisSubscription.buildScopeDescriptor(channelPattern))) {
+        continue;
+      }
+
       // Get devices from unfiltered subscription
       const unfilteredSub = new NexxusRedisSubscription(channelPattern);
       const unfilteredChannelKey = unfilteredSub.getKey();
@@ -253,26 +309,33 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<NexxusTranspo
         deviceToChannelsMap.get(deviceId)!.add(unfilteredChannelKey);
       }
 
-      NexxusTransportManagerWorker.logger.debug(
-        `Found ${unfilteredDevices.size} devices for unfiltered channel: ${unfilteredChannelKey}`,
-        NexxusTransportManagerWorker.loggerLabel
-      );
+      if (unfilteredDevices.size > 0) {
+        NexxusTransportManagerWorker.logger.debug(
+          `Found ${unfilteredDevices.size} devices for unfiltered channel: ${unfilteredChannelKey}`,
+          {
+            channel: channelPattern,
+            size: unfilteredDevices.size,
+            changesCount: changes.length
+          },
+          NexxusTransportManagerWorker.loggerLabel
+        );
+      }
 
       // If no changes (e.g., model deleted), skip filtered subscriptions
       if (changes) {
         const filters = await NexxusRedisSubscription.getAllFilters(channelPattern);
 
-        // Step 3: For each filter, test if ANY change matches
+        // For each filter, test if ANY change matches
         for (const [filterId, filterQuery] of Object.entries(filters)) {
-          const filter = new NexxusFilterQuery(filterQuery, { appModelDef: appSchema[channelPattern.model] });
+          const filter = new NexxusFilterQuery(filterQuery, app.getAppModelSchema(channelPattern.model));
           let matchesFilter = false;
 
           if (Array.isArray(changes)) {
-            matchesFilter = (changes as Array<NexxusTransportManagetJsonPatch>).some(singleChange => {
+            matchesFilter = (changes as Array<NexxusTransportManagerJsonPatch>).some(singleChange => {
               return filter.test(singleChange.metadata.partialModel);
             });
           } else {
-            matchesFilter = filter.test(changes as Partial<NexxusAppModelType>);
+            matchesFilter = filter.test(changes as Partial<INexxusAppModel>);
           }
 
           // Test if ANY change matches
@@ -290,17 +353,28 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<NexxusTranspo
               deviceToChannelsMap.get(deviceId)!.add(filteredChannelKey);
             }
 
-            NexxusTransportManagerWorker.logger.debug(
-              `Found ${filteredDevices.size} devices for filtered channel: ${filteredChannelKey}`,
-              NexxusTransportManagerWorker.loggerLabel
-            );
+            if (filteredDevices.size > 0) {
+              NexxusTransportManagerWorker.logger.debug(
+                `Found ${filteredDevices.size} devices for filtered channel: ${filteredChannelKey}`,
+                {
+                  channel: channelPattern,
+                  size: filteredDevices.size,
+                  changesCount: changes.length
+                },
+                NexxusTransportManagerWorker.loggerLabel
+              );
+            }
           }
         }
       }
     }
 
-    NexxusTransportManagerWorker.logger.debug(
+    NexxusTransportManagerWorker.logger.info(
       `Total ${deviceToChannelsMap.size} unique devices to notify for update`,
+      {
+        channel,
+        size: deviceToChannelsMap.size
+      },
       NexxusTransportManagerWorker.loggerLabel
     );
 

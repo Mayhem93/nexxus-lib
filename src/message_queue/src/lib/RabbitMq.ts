@@ -36,32 +36,14 @@ interface NexxusRabbitMqEvents extends NexxusMessageQueueAdapterEvents {}
 export class NexxusRabbitMq extends NexxusMessageQueueAdapter<RabbitMQConfig, NexxusRabbitMqEvents> {
   protected static loggerLabel: Readonly<string> = "NxxRabbitMq";
   protected static schemaPath: string = path.join(__dirname, "../../src/schemas/rabbitmq.schema.json");
-  protected static envVars: ConfigEnvVars = {
-    source: this.name,
-    specs: [
-      {
-        name: "MQ_HOST",
-        location: "message_queue.host"
-      },
-      {
-        name: "MQ_PORT",
-        location: "message_queue.port"
-      },
-      {
-        name: "MQ_USER",
-        location: "message_queue.user"
-      },
-      {
-        name: "MQ_PASSWORD",
-        location: "message_queue.password"
-      }
-    ]
-  };
-  protected static cliArgs: ConfigCliArgs = {
-    source: this.name,
-    specs: []
-  };
+  protected static envVars: ConfigEnvVars = [
+    { name: "MQ_HOST",     location: "host" },
+    { name: "MQ_PORT",     location: "port" },
+    { name: "MQ_USER",     location: "user" },
+    { name: "MQ_PASSWORD", location: "password" }
+  ];
 
+  protected static cliArgs: ConfigCliArgs = [];
   protected reconnectDelayMs: number = 5000; //TODO: make this configurable
 
   private connection: amqplib.ChannelModel | null = null;

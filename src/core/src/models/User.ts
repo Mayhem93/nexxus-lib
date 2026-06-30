@@ -1,27 +1,38 @@
 import {
-  NexxusBaseModel,
   INexxusBaseModel,
   MODEL_REGISTRY
 } from "./BaseModel";
-import { NexxusFieldDef } from "../common/ModelTypes";
+import { NexxusBuiltinModel } from "./BuiltinModel";
+import { NexxusFieldDef, NexxusModelDef } from "../common/ModelTypes";
+import { InferModel } from "../common/InferModel";
+import { NEXXUS_BUILTIN_MODEL_SCHEMAS } from "../common/BuiltinSchemas";
 import { InvalidUserModelException } from "../lib/Exceptions";
-
-export type NexxusUserModelType = INexxusBaseModel<'user'> & {
-  appId: string;
-  userType: string;
-  username: string;
-  password: string | null;
-  authProviders: Array<string>; // auth provider when the user was created; does not change
-  devices: Array<string>; // list of device IDs associated with the user
-  details?: Record<string, any>; // application specific user details
-};
 
 export interface NexxusUserDetailSchema {
   [field: string]: NexxusFieldDef;
 }
 
-export class NexxusApplicationUser extends NexxusBaseModel<NexxusUserModelType> {
-  constructor(data: NexxusUserModelType) {
+export type INexxusUser =
+  & INexxusBaseModel<'user'>
+  & InferModel<typeof NEXXUS_BUILTIN_MODEL_SCHEMAS.user>
+  & { details?: Record<string, any> };
+
+export class NexxusUser extends NexxusBuiltinModel<INexxusUser> {
+  /**
+   * Runtime field schema for User records. Optionally overlays a per-userType
+   * detail schema (resolved from the owning application) into `details.properties`.
+   */
+  public static getModelSchema(userDetails?: NexxusUserDetailSchema | null): NexxusModelDef {
+    const base: NexxusModelDef = { ...NEXXUS_BUILTIN_MODEL_SCHEMAS.user };
+
+    if (userDetails) {
+      base.details = { type: 'object', required: false, properties: userDetails };
+    }
+
+    return base;
+  }
+
+  constructor(data: INexxusUser) {
     super({ ...data, type: MODEL_REGISTRY.user });
 
     if (this.data.appId === undefined || typeof this.data.appId !== 'string') {

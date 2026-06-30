@@ -7,8 +7,8 @@ import {
   NexxusAppModel,
   NexxusJsonPatch,
   NexxusBaseQueuePayload,
-  NexxusTransportManagetJsonPatch,
-  NexxusAppModelType
+  NexxusTransportManagerJsonPatch,
+  INexxusAppModel
 } from '@mayhem93/nexxus-core-lib';
 import { NexxusQueueMessage } from '@mayhem93/nexxus-message-queue-lib';
 import {
@@ -30,14 +30,8 @@ type NexxusWriterWorkerEvents = NexxusBaseWorkerEvents & {
 export class NexxusWriterWorker extends NexxusBaseWorker<NexxusWriterWorkerConfig, NexxusWriterWorkerEvents, NexxusWriterPayload> {
   protected queueName : NexxusQueueName = 'writer';
   protected static loggerLabel: Readonly<string> = 'NxxWriterWorker';
-  protected static cliArgs: ConfigCliArgs = {
-    source: this.name,
-    specs: []
-  };
-  protected static envVars: ConfigEnvVars = {
-    source: this.name,
-    specs: []
-  };
+  protected static cliArgs: ConfigCliArgs = [];
+  protected static envVars: ConfigEnvVars = [];
   protected static schemaPath: string = path.join(__dirname, '../../src/schemas/writer-worker.schema.json');
 
   constructor(services: NexxusWorkerServices) {
@@ -45,16 +39,27 @@ export class NexxusWriterWorker extends NexxusBaseWorker<NexxusWriterWorkerConfi
   }
 
   protected async processMessage(msg: NexxusQueueMessage<NexxusWriterPayload>): Promise<void> {
-    NexxusWriterWorker.logger.debug(`Processing message: ${JSON.stringify(msg.payload)}`, NexxusWriterWorker.loggerLabel);
+    NexxusWriterWorker.logger.debug('Processing message', { payload: msg.payload }, NexxusWriterWorker.loggerLabel);
 
     const payload = msg.payload;
 
     switch (payload.event) {
       case "model_created": {
+        const app = NexxusWriterWorker.loadedApps.get(payload.data.appId);
 
-        const appModel = new NexxusAppModel(payload.data);
+        if (!app) {
+          throw new Error(`App not found for model_created: appId=${payload.data.appId}`);
+        }
+
+        const appModel = new NexxusAppModel(payload.data, app.getSchema());
 
         await NexxusWriterWorker.database.createItems([ appModel ]);
+
+        NexxusWriterWorker.logger.info(`Model created with ID: "${payload.data.id}" for appId: "${payload.data.appId}"`, {
+          appId: payload.data.appId,
+          modelId: payload.data.id,
+          modelType: payload.data.type
+        }, NexxusWriterWorker.loggerLabel);
 
         this.publish('transport-manager', {
           event: 'model_created',
@@ -65,14 +70,14 @@ export class NexxusWriterWorker extends NexxusBaseWorker<NexxusWriterWorkerConfi
       }
 
       case 'model_updated': {
-        const validatedPatches: Array<NexxusTransportManagetJsonPatch> = [];
+        const validatedPatches: Array<NexxusTransportManagerJsonPatch> = [];
 
         for (const patchData of payload.data) {
           const app = NexxusWriterWorker.loadedApps.get(patchData.metadata.appId);
-          const appSchema = app!.getSchema();
+          const modelSchema = app!.getAppModelSchema(patchData.metadata.type);
           const jsonPatch = new NexxusJsonPatch(patchData);
 
-          jsonPatch.validate({ appSchema });
+          jsonPatch.validate(modelSchema);
 
           const updateUpdatedAtPatch = new NexxusJsonPatch({
             op: 'replace',
@@ -81,14 +86,23 @@ export class NexxusWriterWorker extends NexxusBaseWorker<NexxusWriterWorkerConfi
             metadata: jsonPatch.get().metadata
           });
 
-          updateUpdatedAtPatch.validate({ appSchema });
+          updateUpdatedAtPatch.validate(modelSchema);
 
           const result = await NexxusWriterWorker.database.updateItems(
             [jsonPatch, updateUpdatedAtPatch],
             {
               returnFields: app?.getModelFilterableFields(patchData.metadata.type)
             }
-          ) as Array<Partial<NexxusAppModelType>>;
+          ) as Array<Partial<INexxusAppModel>>;
+
+          if (!result[0]) {
+            NexxusWriterWorker.logger.warn(
+              `No item found to update for patch with appId ${patchData.metadata.appId} and id ${patchData.metadata.id}`,
+              NexxusWriterWorker.loggerLabel
+            );
+
+            return ;
+          }
 
           const transformedPatchData = jsonPatch.get();
           const transformedUpdatedAtPatchData = updateUpdatedAtPatch.get();
@@ -112,6 +126,12 @@ export class NexxusWriterWorker extends NexxusBaseWorker<NexxusWriterWorkerConfi
           });
         }
 
+        NexxusWriterWorker.logger.info(`Model updated with ID: "${payload.data[0].metadata.id}" for appId: "${payload.data[0].metadata.appId}"`, {
+          appId: payload.data[0].metadata.appId,
+          modelId: payload.data[0].metadata.id,
+          modelType: payload.data[0].metadata.type
+        }, NexxusWriterWorker.loggerLabel);
+
         this.publish('transport-manager', {
           event: 'model_updated',
           data: validatedPatches,
@@ -121,9 +141,21 @@ export class NexxusWriterWorker extends NexxusBaseWorker<NexxusWriterWorkerConfi
       }
 
       case 'model_deleted': {
-        const appModel = new NexxusAppModel(payload.data);
+        const app = NexxusWriterWorker.loadedApps.get(payload.data.appId);
+
+        if (!app) {
+          throw new Error(`App not found for model_deleted: appId=${payload.data.appId}`);
+        }
+
+        const appModel = new NexxusAppModel(payload.data as INexxusAppModel, app.getSchema());
 
         await NexxusWriterWorker.database.deleteItems([ appModel ]);
+
+        NexxusWriterWorker.logger.info(`Model deleted with ID: "${payload.data.id}" for appId: "${payload.data.appId}"`, {
+          appId: payload.data.appId,
+          modelId: payload.data.id,
+          modelType: payload.data.type
+        }, NexxusWriterWorker.loggerLabel);
 
         this.publish('transport-manager', {
           event: 'model_deleted',

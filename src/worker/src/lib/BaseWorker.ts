@@ -21,8 +21,6 @@ import {
 } from '@mayhem93/nexxus-message-queue-lib';
 import { NexxusRedis } from '@mayhem93/nexxus-redis';
 
-import * as Dot from 'dot-prop';
-
 export type NexxusBaseWorkerEvents = Record<string, any[]>;
 
 export interface NexxusWorkerServices extends INexxusBaseServices {
@@ -36,6 +34,8 @@ export abstract class NexxusBaseWorker<T extends NexxusConfig, Ev extends Nexxus
 
   public static logger: NexxusBaseLogger<any>;
 
+  protected static configRootKey: string = "app";
+  protected initialized: boolean = false;
   protected static loggerLabel: Readonly<string> = "NxxWorker";
   protected static readonly loadedApps: Map<string, NexxusApplication> = new Map();
   protected abstract queueName: NexxusQueueName;
@@ -50,12 +50,15 @@ export abstract class NexxusBaseWorker<T extends NexxusConfig, Ev extends Nexxus
     if (!(services.logger instanceof NexxusBaseLogger)) {
       throw new FatalErrorException('Logger service is not an instance of NexxusBaseLogger');
     }
+
     if (!(services.database instanceof NexxusDatabaseAdapter)) {
       throw new FatalErrorException('Database service is not an instance of NexxusDatabaseAdapter');
     }
+
     if (!(services.messageQueue instanceof NexxusMessageQueueAdapter)) {
       throw new FatalErrorException('Message Queue service is not an instance of NexxusMessageQueueAdapter');
     }
+
     if (!(services.redis instanceof NexxusRedis)) {
       throw new FatalErrorException('Redis service is not an instance of NexxusRedis');
     }
@@ -69,6 +72,7 @@ export abstract class NexxusBaseWorker<T extends NexxusConfig, Ev extends Nexxus
   public async init() : Promise<void> {
     await NexxusBaseWorker.loadApps();
     await NexxusBaseWorker.messageQueue.consumeMessages(this.queueName, this.processMessage.bind(this) as any);
+    this.initialized = true;
   }
 
   protected async publish<Q extends NexxusQueueName>(

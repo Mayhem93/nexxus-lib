@@ -73,6 +73,7 @@ export class NexxusRedisSubscription {
 
     // Parse remaining parts
     let i = 2;
+
     while (i < parts.length) {
       const part = parts[i];
 
@@ -95,18 +96,33 @@ export class NexxusRedisSubscription {
 
   public async addDevice(deviceId: string, transport: string): Promise<void> {
     const partition = this.getDevicePartition(deviceId);
-    const key = this.buildPartitionKey(partition);
+    const partitionKey = this.buildPartitionKey(partition);
     const partitionIndexKey = this.buildPartitionIndexKey();
 
     const redis = NexxusRedis.instance.getClient();
 
-    // Add device to partition
-    await redis.sAdd(key, `${deviceId}|${transport}`);
+    // SADD returns the number of NEW members added. If it returns 0 the
+    // device was already subscribed to this exact channel — bail so we
+    // don't double-count the scope HINCRBY below.
+    const added = await redis.sAdd(partitionKey, `${deviceId}|${transport}`);
 
-    // Track that this partition exists
+    if (added === 0) {
+      return;
+    }
+
+    // Track that this partition exists.
     await redis.sAdd(partitionIndexKey, partition);
 
-    // If filtered subscription, store filter definition
+    // Bump the scope counter. TM reads this to know which (modelId/userId)
+    // combinations have ANY subscriber at all — patterns nobody subscribed
+    // to are skipped entirely, avoiding the per-pattern Redis lookups that
+    // were producing forever-stale tracking-table entries.
+    const scopeRegistryKey = NexxusRedisSubscription.buildScopeRegistryKey(this.channel.appId, this.channel.model);
+    const scopeDescriptor = NexxusRedisSubscription.buildScopeDescriptor(this.channel);
+
+    await redis.hIncrBy(scopeRegistryKey, scopeDescriptor, 1);
+
+    // If filtered subscription, store filter definition.
     if (this.filterId && this.channel.filter) {
       const filterKey = this.buildFilterRegistryKey();
 
@@ -117,16 +133,40 @@ export class NexxusRedisSubscription {
   public async removeDevice(deviceId: string, transport: string): Promise<boolean> {
     const redis = NexxusRedis.instance.getClient();
     const partition = this.getDevicePartition(deviceId);
-    const key = this.buildPartitionKey(partition);
-    const removed = await redis.sRem(key, `${deviceId}|${transport}`);
+    const partitionKey = this.buildPartitionKey(partition);
+    const removed = await redis.sRem(partitionKey, `${deviceId}|${transport}`);
 
-    await redis.sRem(this.buildPartitionIndexKey(), partition);
-
-    if (this.filterId) {
-      await redis.hDel(this.buildFilterRegistryKey(), this.filterId);
+    if (removed === 0) {
+      return false;
     }
 
-    return removed > 0;
+    // Partition cleanup is conditional: 16 partitions hash-bucket devices, so
+    // multiple devices share a partition. Only drop the partition from the
+    // index when THIS partition is now empty; only drop per-subscription
+    // registries (filter HASH) when the subscription is fully empty.
+    if (await redis.sCard(partitionKey) === 0) {
+      const partitionIndexKey = this.buildPartitionIndexKey();
+
+      await redis.sRem(partitionIndexKey, partition);
+
+      if (await redis.sCard(partitionIndexKey) === 0 && this.filterId) {
+        await redis.hDel(this.buildFilterRegistryKey(), this.filterId);
+      }
+    }
+
+    // Scope counter tracks "how many devices subscribe at this scope
+    // across all partitions and filters", so it always decrements when
+    // a device successfully unsubscribes. HINCRBY returns the new value;
+    // HDEL the field when it hits zero so HKEYS doesn't return stale scopes.
+    const scopeRegistryKey = NexxusRedisSubscription.buildScopeRegistryKey(this.channel.appId, this.channel.model);
+    const scopeDescriptor = NexxusRedisSubscription.buildScopeDescriptor(this.channel);
+    const newCount = await redis.hIncrBy(scopeRegistryKey, scopeDescriptor, -1);
+
+    if (newCount <= 0) {
+      await redis.hDel(scopeRegistryKey, scopeDescriptor);
+    }
+
+    return true;
   }
 
   public async getAllDevices(): Promise<Set<NexxusDeviceTransportString>> {
@@ -213,6 +253,53 @@ export class NexxusRedisSubscription {
         JSON.parse(filterJson) as NexxusFilterQueryType
       ])
     );
+  }
+
+  /**
+   * Returns the set of scope descriptors that currently have at least one
+   * subscriber for `(appId, model)`. The Transport Manager consults this
+   * before iterating `generateSubscriptionPatterns` output — patterns whose
+   * descriptor isn't in the returned set are skipped entirely, avoiding
+   * pointless Redis lookups (and their tracking-table cost) for scopes
+   * nobody subscribes at.
+   */
+  public static async getActiveScopes(appId: string, model: string): Promise<Set<string>> {
+    const redis = NexxusRedis.instance.getClient();
+    const key = this.buildScopeRegistryKey(appId, model);
+    const fields = await redis.hKeys(key);
+
+    return new Set(fields);
+  }
+
+  /**
+   * Canonical descriptor for a subscription's scope dimensions, used as the
+   * HASH field name in the scope registry. Order is deterministic so two
+   * subscriptions with the same scope produce the same descriptor.
+   *
+   *   { appId, model }                                 → '*'
+   *   { appId, model, modelId: 'X' }                   → 'id:X'
+   *   { appId, model, userId: 'U' }                    → 'user:U'
+   *   { appId, model, modelId: 'X', userId: 'U' }      → 'id:X|user:U'
+   *
+   * Filter ID is intentionally NOT part of the descriptor — filters are
+   * tracked by the parallel filter registry.
+   */
+  public static buildScopeDescriptor(channel: NexxusBaseSubscriptionChannel): string {
+    const parts: string[] = [];
+
+    if (channel.modelId) {
+      parts.push(`id:${channel.modelId}`);
+    }
+
+    if (channel.userId) {
+      parts.push(`user:${channel.userId}`);
+    }
+
+    return parts.length === 0 ? '*' : parts.join('|');
+  }
+
+  private static buildScopeRegistryKey(appId: string, model: string): string {
+    return `${NEXXUS_PREFIX_LC}:subscription-scopes:${appId}:${model}`;
   }
 
   private buildPartitionKey(partition: string): string {

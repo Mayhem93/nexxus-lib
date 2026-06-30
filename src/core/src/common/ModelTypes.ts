@@ -4,6 +4,7 @@ export type NexxusModelFieldType = NexxusModelPrimitiveType | 'array' | 'object'
 interface BaseFieldDef {
   type: NexxusModelFieldType;
   required?: boolean;
+  nullable?: boolean;
 }
 
 export interface PrimitiveFieldDef extends BaseFieldDef {
