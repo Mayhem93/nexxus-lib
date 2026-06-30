@@ -448,7 +448,7 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
       }
 
       bulkBody.push(
-        { update: { _index: bucket.index, _id: bucket.id } },
+        { update: { _index: bucket.index, _id: bucket.id, retry_on_conflict: 3 } },
         {
           script: {
             source: bucket.scriptLines.join(';\n'),

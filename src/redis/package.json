@@ -1,6 +1,6 @@
 {
   "name": "@mayhem93/nexxus-redis",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "Redis component of Nexxus which handles subscriptions and devices",
   "main": "dist-cjs/index.js",
   "module": "dist-esm/index.js",
@@ -35,7 +35,7 @@
     "typescript": "^6.0.0"
   },
   "dependencies": {
-    "@mayhem93/nexxus-core-lib": "0.0.1",
+    "@mayhem93/nexxus-core-lib": "0.0.2",
     "redis": "^5.9.0",
     "tslib": "2.8.1"
   },

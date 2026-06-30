@@ -53,7 +53,7 @@ interface DeleteAppModelRequest extends NexxusApiRequest {
 }
 
 type CountModelRequestBody = {
-  model: string;
+  type: string;
   userId?: string;
   filter?: NexxusFilterQueryType;
 }
@@ -183,8 +183,8 @@ export default class ModelRoute extends NexxusApiBaseRoute {
     const appId = req.headers['nxx-app-id'] as string;
     const appSchema = NexxusApi.getStoredApp(appId)?.getSchema() as NexxusApplicationSchema;
 
-    if (!appSchema[req.body.model]) {
-      throw new ModelNotFoundException(`Model "${req.body.model}" not found in schema for the application "${appId}"`);
+    if (!appSchema[req.body.type]) {
+      throw new ModelNotFoundException(`Model "${req.body.type}" not found in schema for the application "${appId}"`);
     }
 
     let databaseFilter: NexxusFilterQuery | undefined;
@@ -197,7 +197,7 @@ export default class ModelRoute extends NexxusApiBaseRoute {
       };
 
       try {
-        databaseFilter = new NexxusFilterQuery(dbFilterInput, NexxusApi.getStoredApp(appId)!.getAppModelSchema(req.body.model));
+        databaseFilter = new NexxusFilterQuery(dbFilterInput, NexxusApi.getStoredApp(appId)!.getAppModelSchema(req.body.type));
       } catch (e) {
         if (e instanceof InvalidQueryFilterException) {
           throw new InvalidParametersException(`Invalid filter parameter: ${e.message}`);
@@ -207,7 +207,7 @@ export default class ModelRoute extends NexxusApiBaseRoute {
     }
 
     const count = await NexxusApi.database.countItems({
-      type: req.body.model,
+      type: req.body.type,
       appId: appId,
       filter: databaseFilter
     });
