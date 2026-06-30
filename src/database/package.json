@@ -17,7 +17,7 @@
     "dist-*/**",
     "src/schemas/**/*.json"
   ],
-  "homepage": "https://github.com/Mayhem93/nexxus-server/tree/main/src/database",
+  "homepage": "https://github.com/Mayhem93/nexxus-lib/tree/main/src/database",
   "keywords": [
     "realtime",
     "sync",
@@ -48,7 +48,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Mayhem93/nexxus-server.git",
+    "url": "git+https://github.com/Mayhem93/nexxus-lib.git",
     "directory": "src/database"
   }
 }

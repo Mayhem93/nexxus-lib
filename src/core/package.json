@@ -17,7 +17,7 @@
     "dist-*/**",
     "src/schemas/**/*.json"
   ],
-  "homepage": "https://github.com/Mayhem93/nexxus-server/tree/main/src/core",
+  "homepage": "https://github.com/Mayhem93/nexxus-lib/tree/main/src/core",
   "keywords": ["realtime", "sync", "synchronization", "notifications", "backend", "baas"],
   "author": "Răzvan Botea <contact@razvanbotea.me>",
   "license": "MPL-2.0",
@@ -40,7 +40,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/Mayhem93/nexxus-server.git",
+    "url": "https://github.com/Mayhem93/nexxus-lib.git",
     "directory": "src/core"
   }
 }

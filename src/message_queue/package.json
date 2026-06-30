@@ -17,7 +17,7 @@
     "dist-*/**",
     "src/schemas/**/*.json"
   ],
-  "homepage": "https://github.com/Mayhem93/nexxus-server/tree/main/src/message_queue",
+  "homepage": "https://github.com/Mayhem93/nexxus-lib/tree/main/src/message_queue",
   "keywords": [
     "realtime",
     "sync",
@@ -42,7 +42,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Mayhem93/nexxus-server.git",
+    "url": "git+https://github.com/Mayhem93/nexxus-lib.git",
     "directory": "src/message_queue"
   }
 }
