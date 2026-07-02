@@ -1,6 +1,5 @@
 .github
 node_modules
-package-lock.json
 dist-*
 *.tsbuildinfo
 CLAUDE.md
