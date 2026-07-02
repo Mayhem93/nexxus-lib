@@ -3,9 +3,21 @@
   "properties": {
     "port": {
       "type": "number"
+    },
+    "logger": {
+      "type": "string"
+    },
+    "database": {
+      "type": "string"
+    },
+    "message_queue": {
+      "type": "string"
     }
   },
   "required": [
-    "port"
+    "port",
+    "logger",
+    "database",
+    "message_queue"
   ]
 }
