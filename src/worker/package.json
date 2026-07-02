@@ -1,6 +1,6 @@
 {
   "name": "@mayhem93/nexxus-worker-lib",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "Library for Nexxus workers that process data",
   "main": "dist-cjs/index.js",
   "module": "dist-esm/index.js",
@@ -29,10 +29,10 @@
   "author": "Răzvan Botea <contact@razvanbotea.me>",
   "license": "MPL-2.0",
   "dependencies": {
-    "@mayhem93/nexxus-core-lib": "0.0.3",
-    "@mayhem93/nexxus-database-lib": "0.0.3",
-    "@mayhem93/nexxus-message-queue-lib": "0.0.2",
-    "@mayhem93/nexxus-redis": "0.0.4",
+    "@mayhem93/nexxus-core-lib": "0.0.4",
+    "@mayhem93/nexxus-database-lib": "0.0.4",
+    "@mayhem93/nexxus-message-queue-lib": "0.0.3",
+    "@mayhem93/nexxus-redis": "0.0.5",
     "dot-prop": "^10.1.0",
     "ws": "^8.18.3"
   },
