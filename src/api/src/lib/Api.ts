@@ -6,18 +6,26 @@ import {
   NexxusBaseLogger,
   NexxusConfig,
   NexxusApplication,
+  NexxusConfigManager,
+  NexxusConstructableServiceClass,
+  NexxusFactoryServiceClass,
   MODEL_REGISTRY,
   FatalErrorException,
   InvalidConfigException,
-  INexxusUser
+  INexxusUser,
+  WinstonNexxusLogger,
+  resolveConstructableServiceClass,
+  resolveFactoryServiceClass
 } from '@mayhem93/nexxus-core-lib';
 import {
   NexxusDatabaseAdapter,
   NexxusDatabaseAdapterEvents,
+  NexxusElasticsearchDb
 } from '@mayhem93/nexxus-database-lib';
 import {
   NexxusMessageQueueAdapter,
   NexxusMessageQueueAdapterEvents,
+  NexxusRabbitMq
 } from '@mayhem93/nexxus-message-queue-lib';
 import {
   NexxusRedis
@@ -100,9 +108,26 @@ export type NexxusApiUser = Pick<INexxusUser, | 'username' | 'userType' | 'authP
 
 export interface NexxusApiResponse extends Express.Response {}
 
-type NexxusApiConfig = {
+export type NexxusApiConfig = {
   name: string;
   port: number;
+  /**
+   * Class name of the logger service. Built-in `WinstonNexxusLogger` is
+   * resolved transparently; any other value is treated as an npm package
+   * that default-exports a `NexxusBaseService` subclass with an async
+   * `.create()` factory.
+   */
+  logger: string;
+  /**
+   * Class name of the database adapter. Built-in `NexxusElasticsearchDb` is
+   * resolved transparently; any other value is treated as an npm package.
+   */
+  database: string;
+  /**
+   * Class name of the message-queue adapter. Built-in `NexxusRabbitMq` is
+   * resolved transparently; any other value is treated as an npm package.
+   */
+  message_queue: string;
   ssl?: {
     sslKeyPath: string;
     sslCertPath: string;
@@ -135,6 +160,59 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig> {
 
   protected static configRootKey: string = "app";
   protected static schemaPath: string = path.join(__dirname, '../../src/schemas/api.schema.json');
+
+  /**
+   * Adapter classes this deployment ships as static dependencies. Config
+   * values matching a key here are resolved directly to the class; other
+   * values are treated as npm package names and dynamic-imported by the
+   * shared resolver in core-lib.
+   *
+   * Two maps so the constructable-vs-factory split is enforced at the type
+   * level — logger goes through the factory resolver, DB/MQ through the
+   * constructable one.
+   */
+  private static readonly builtinFactoryServices: Record<string, NexxusFactoryServiceClass> = {
+    [WinstonNexxusLogger.name]: WinstonNexxusLogger,
+  };
+
+  private static readonly builtinConstructableServices: Record<string, NexxusConstructableServiceClass> = {
+    [NexxusElasticsearchDb.name]: NexxusElasticsearchDb,
+    [NexxusRabbitMq.name]:        NexxusRabbitMq,
+  };
+
+  /**
+   * Resolves + registers a factory-style service (currently just the logger).
+   * Config value is looked up in `builtinFactoryServices` first; a miss falls
+   * through to dynamic import against the app's install tree. Registration is
+   * batched — the next `configManager.validateServices()` call picks up the
+   * resolved class's schema.
+   */
+  public static async resolveFactoryService(
+    configManager: NexxusConfigManager,
+    configuredName: string
+  ): Promise<NexxusFactoryServiceClass> {
+    const cls = await resolveFactoryServiceClass(configuredName, NexxusApi.builtinFactoryServices);
+
+    configManager.registerService(cls);
+
+    return cls;
+  }
+
+  /**
+   * Resolves + registers a constructable service (database, message queue).
+   * Same lookup-then-import shape as `resolveFactoryService`, minus the
+   * `create()` requirement.
+   */
+  public static async resolveConstructableService(
+    configManager: NexxusConfigManager,
+    configuredName: string
+  ): Promise<NexxusConstructableServiceClass> {
+    const cls = await resolveConstructableServiceClass(configuredName, NexxusApi.builtinConstructableServices);
+
+    configManager.registerService(cls);
+
+    return cls;
+  }
 
   private express: Express.Express;
   private server : HttpServer | https.Server | null = null;
