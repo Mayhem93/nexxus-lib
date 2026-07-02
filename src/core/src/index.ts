@@ -3,6 +3,7 @@ export * from "./lib/ConfigProvider";
 export * from "./lib/ConfigManager";
 export * from "./lib/BaseService";
 export * from "./lib/Logger";
+export * from "./lib/ServiceResolver";
 
 export * from "./common/QueuePayloads";
 export * from "./common/JsonPatch";

@@ -20,6 +20,52 @@ export interface INexxusBaseServices {
   logger: NexxusBaseLogger<NexxusConfig>;
 }
 
+/**
+ * Static-only shape of a Nexxus service class. Anything ConfigManager needs to
+ * register a service's config lives here — `name` (for diagnostics), plus the
+ * three static-config accessors. Constructor visibility is intentionally
+ * absent, so classes that expose an async factory instead of a public
+ * constructor (e.g. `WinstonNexxusLogger.create(...)`) still satisfy the type.
+ *
+ * All `NexxusBaseService` subclasses satisfy this structurally. Downstream code
+ * writing custom services should type against this interface when passing
+ * classes to `ConfigManager.validateServices(...)`.
+ */
+export interface NexxusServiceClass {
+  readonly name: string;
+  schema(): AddJsonSchemaDefFuncArg;
+  envVarConfig(): ConfigEnvVars;
+  cliArgConfig(): ConfigCliArgs;
+}
+
+/**
+ * `NexxusServiceClass` + a public constructor. This is the default shape for
+ * pluggable adapters — DB, MQ, most anything without async init. Consumers
+ * `new Cls(services)` directly at the bootstrap site.
+ *
+ * If your adapter needs to await something before it's ready (dynamic
+ * imports, remote fetches, warm-up connections), use
+ * `NexxusFactoryServiceClass` instead — that's what `WinstonNexxusLogger`
+ * does for dynamic transports.
+ */
+export interface NexxusConstructableServiceClass extends NexxusServiceClass {
+  new (services: INexxusBaseServices): NexxusBaseService<any, any>;
+}
+
+/**
+ * `NexxusServiceClass` + a static async factory. For adapters whose
+ * initialization has to await something — dynamic imports, remote handshakes,
+ * schema fetches. The class typically hides its constructor (private) so
+ * consumers must go through `Cls.create(services)`.
+ *
+ * Currently used only for `WinstonNexxusLogger`. Most adapters are fine as
+ * `NexxusConstructableServiceClass`; only reach for this when async init is
+ * actually needed.
+ */
+export interface NexxusFactoryServiceClass extends NexxusServiceClass {
+  create(services: INexxusBaseServices): Promise<NexxusBaseService<any, any>>;
+}
+
 function frozen(target: any, propertyKey: string) {
   Object.defineProperty(target, propertyKey, {
     value: Object.freeze(target[propertyKey]),

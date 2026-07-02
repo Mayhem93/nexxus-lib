@@ -28,7 +28,13 @@ export class NexxusFileConfigProvider extends NexxusConfigProvider {
     try {
       fs.accessSync(this.filePath);
     } catch (e) {
-      throw new FatalErrorException(`Cannot access config file "${this.filePath}": ${e.message}`);
+      if (e.code === 'ENOENT') {
+        throw new FatalErrorException(`Cannot access config file "${this.filePath}": ${e.message}`, FatalErrorException.SUBCODES.CONFIG_FILE_NOT_FOUND);
+      } else if (e.code === 'EACCES') {
+        throw new FatalErrorException(`Cannot access config file "${this.filePath}": ${e.message}`, FatalErrorException.SUBCODES.CONFIG_FILE_UNREADABLE);
+      } else {
+        throw new FatalErrorException(`Failed reading config file "${this.filePath}": ${e.message}`);
+      }
     }
 
     return JSON.parse(fs.readFileSync(this.filePath, 'utf-8')) as NexxusConfig;
@@ -54,6 +60,7 @@ export class NexxusEnvVarsConfigProvider extends NexxusConfigProvider {
 export class NexxusCliArgConfigProvider extends NexxusConfigProvider {
   private argParser: ArgumentParser;
   private originalExit: (status: number, message: string) => void;
+  private addedArgs: Set<string> = new Set();
 
   constructor() {
     super();
@@ -67,8 +74,18 @@ export class NexxusCliArgConfigProvider extends NexxusConfigProvider {
     }
   }
 
+  /**
+   * Idempotent per argument name — safe to call multiple times across repeat
+   * `ConfigManager.validateServices()` invocations. Argparse would otherwise
+   * throw on a second `add_argument` with the same name.
+   */
   public addArgument(name: string, type: CliArgType): void {
+    if (this.addedArgs.has(name)) {
+      return;
+    }
+
     this.argParser.add_argument(`--${name}`, { type: type, dest: name, required: false });
+    this.addedArgs.add(name);
   }
 
   public getConfig(): NexxusConfig {

@@ -1,5 +1,5 @@
 import { FatalErrorException, InvalidConfigException } from "./Exceptions";
-import { NexxusBaseService } from './BaseService';
+import { NexxusServiceClass } from './BaseService';
 import {
   CliArgType,
   NexxusConfig,
@@ -54,7 +54,8 @@ type RegisteredSpecs<S> = {
 };
 
 export class NexxusConfigManager {
-  private static CONF_FILE_NAME : Readonly<string> = "nexxus.conf.json";
+  private static CONF_FILE_NAME : Readonly<string> = 'nexxus.conf.json';
+  private static DEFAULT_CONF_PATH : Readonly<string> = '/etc/nexxus';
 
   private jsonSchema: JSONSchema7;
   private envVarsSpecs: Array<RegisteredSpecs<ConfigEnvVars>> = [];
@@ -64,11 +65,37 @@ export class NexxusConfigManager {
   private configProviders : Array<INexxusConfigProvider> = [];
   private customProviders : Array<INexxusConfigProvider> = [];
 
-  constructor(configFileName? : string) {
+  /**
+   * Names (class.name) of services already registered. Guards against
+   * double-registration when the same class is passed to `registerService`
+   * or `validateServices` more than once — schema, env, and CLI specs each
+   * carry a uniqueness invariant that would otherwise throw on a second pass.
+   */
+  private registeredServices: Set<string> = new Set();
+
+  /**
+   * True until the file + custom providers have been loaded into `this.data`
+   * (i.e., first successful validate()). Subsequent validate() calls skip
+   * re-reading the config file — the file is treated as immutable for the
+   * lifetime of this ConfigManager.
+   */
+  private dataInitialized: boolean = false;
+
+  /**
+   * True when at least one service has been registered since the last
+   * successful validate(). Lets `validateServices()` no-op cleanly when
+   * called after everything's already been validated.
+   */
+  private hasNewRegistrations: boolean = false;
+
+  constructor(configFilePath? : string) {
     const schemaPath = path.join(__dirname, "../../src/schemas/root.schema.json");
+    const resolvedConfPath = path.resolve(configFilePath || process.env.NXX_CONF_PATH || path.join(
+      NexxusConfigManager.DEFAULT_CONF_PATH, NexxusConfigManager.CONF_FILE_NAME
+    ));
 
     this.jsonSchema = JSON.parse(fs.readFileSync(schemaPath, 'utf-8'));
-    this.configProviders.push(new NexxusFileConfigProvider(path.join(process.cwd(), configFileName ?? NexxusConfigManager.CONF_FILE_NAME)));
+    this.configProviders.push(new NexxusFileConfigProvider(resolvedConfPath));
     this.configProviders.push(new NexxusEnvVarsConfigProvider());
     this.configProviders.push(new NexxusCliArgConfigProvider());
   }
@@ -97,18 +124,56 @@ export class NexxusConfigManager {
     }
   }
 
-  public async validateServices(svcs : Array<typeof NexxusBaseService>) : Promise<void> {
-    for(const NxxSvc of svcs) {
-      const schemaDef = NxxSvc.schema();
-      const className = NxxSvc.name;
-      const configRootKey = schemaDef.where;
+  /**
+   * Register a service's config schema, env-var spec, and CLI-arg spec so
+   * they're included in the next `validateServices()` pass. Idempotent per
+   * class name — repeat calls with the same class are silent no-ops.
+   *
+   * Intended usage: call once per service class ahead of time (in any order),
+   * then call `validateServices()` once to actually run validation. For the
+   * shorthand where you know all services up front, `validateServices([...])`
+   * still accepts an array and registers each entry before validating.
+   */
+  public registerService(svc: NexxusServiceClass): void {
+    if (this.registeredServices.has(svc.name)) {
+      return;
+    }
 
-      this.cliArgsSpecs.push({ className, configRootKey, specs: NxxSvc.cliArgConfig() });
-      this.envVarsSpecs.push({ className, configRootKey, specs: NxxSvc.envVarConfig() });
-      this.addJsonSchemaDef(schemaDef);
+    const schemaDef = svc.schema();
+    const className = svc.name;
+    const configRootKey = schemaDef.where;
+
+    this.cliArgsSpecs.push({ className, configRootKey, specs: svc.cliArgConfig() });
+    this.envVarsSpecs.push({ className, configRootKey, specs: svc.envVarConfig() });
+    this.addJsonSchemaDef(schemaDef);
+    this.registeredServices.add(className);
+    this.hasNewRegistrations = true;
+  }
+
+  /**
+   * Runs config validation against every registered service's schema. Safe
+   * to call multiple times — the config file is read only on the first call,
+   * and repeat calls with no new registrations short-circuit as a no-op.
+   *
+   * The optional `svcs` array is a shorthand: each entry is passed through
+   * `registerService()` before validation runs. Existing callers passing all
+   * services up front (`validateServices([A, B, C])`) continue to work.
+   * Later calls can register additional services (e.g. dynamically-resolved
+   * logger/db/mq implementations) and re-validate.
+   */
+  public async validateServices(svcs?: Array<NexxusServiceClass>): Promise<void> {
+    if (svcs) {
+      for (const svc of svcs) {
+        this.registerService(svc);
+      }
+    }
+
+    if (!this.hasNewRegistrations) {
+      return;
     }
 
     await this.validate();
+    this.hasNewRegistrations = false;
   }
 
   private populateFromCliArgs(): void {
@@ -186,11 +251,33 @@ export class NexxusConfigManager {
   }
 
   private async validate() : Promise<void> {
-    const fileConfigProvider = this.configProviders[0] as NexxusFileConfigProvider;
+    // File + custom providers only run on the first call. The config file is
+    // treated as immutable for this ConfigManager's lifetime — later calls
+    // just re-validate the accumulated schema against the cached data (plus
+    // any late CLI/env values, which are cheap and idempotent to re-apply).
+    if (!this.dataInitialized) {
+      const fileConfigProvider = this.configProviders[0] as NexxusFileConfigProvider;
 
-    this.data = fileConfigProvider.getConfig();
+      try {
+        this.data = fileConfigProvider.getConfig();
+      } catch (e) {
+        if (e instanceof FatalErrorException) {
+          if (e.subcode === FatalErrorException.SUBCODES.CONFIG_FILE_NOT_FOUND) {
+            // If the config file doesn't exist, we treat it as an empty config
+            // and let other providers populate the config.
+            // if the config is not valid it will throw eventually when validate is called and the schema is checked.
+            // TODO: log a warning that the config file was not found
+            this.data = {};
+          } else {
+            throw e;
+          }
+        }
+      }
 
-    await this.populateFromCustomProviders();
+      await this.populateFromCustomProviders();
+      this.dataInitialized = true;
+    }
+
     this.populateFromCliArgs();
     this.populateFromEnvVars();
 
