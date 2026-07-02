@@ -27,8 +27,14 @@ import {
 
 import * as path from "node:path";
 
-type NexxusTransportManagerWorkerConfig = NexxusConfig & {
+export type NexxusTransportManagerWorkerConfig = NexxusConfig & {
   name: string;
+  /** Class name of the logger service (see `NexxusApiConfig.logger`). */
+  logger: string;
+  /** Class name of the database adapter (see `NexxusApiConfig.database`). */
+  database: string;
+  /** Class name of the message-queue adapter (see `NexxusApiConfig.message_queue`). */
+  message_queue: string;
 }
 
 type NexxusTransportManagerWorkerEvents = NexxusBaseWorkerEvents & {

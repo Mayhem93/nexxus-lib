@@ -6,18 +6,26 @@ import {
   NexxusQueuePayload,
   NexxusBaseQueuePayload,
   NexxusBaseLogger,
+  NexxusConfigManager,
+  NexxusConstructableServiceClass,
+  NexxusFactoryServiceClass,
   FatalErrorException,
   NexxusApplication,
-  MODEL_REGISTRY
+  MODEL_REGISTRY,
+  WinstonNexxusLogger,
+  resolveConstructableServiceClass,
+  resolveFactoryServiceClass
 } from '@mayhem93/nexxus-core-lib';
 import {
   NexxusDatabaseAdapter,
-  NexxusDatabaseAdapterEvents
+  NexxusDatabaseAdapterEvents,
+  NexxusElasticsearchDb
 } from '@mayhem93/nexxus-database-lib';
 import {
   NexxusMessageQueueAdapter,
   NexxusMessageQueueAdapterEvents,
-  NexxusQueueMessage
+  NexxusQueueMessage,
+  NexxusRabbitMq
 } from '@mayhem93/nexxus-message-queue-lib';
 import { NexxusRedis } from '@mayhem93/nexxus-redis';
 
@@ -43,6 +51,58 @@ export abstract class NexxusBaseWorker<T extends NexxusConfig, Ev extends Nexxus
   public static database: NexxusDatabaseAdapter<NexxusConfig, NexxusDatabaseAdapterEvents>;
   public static messageQueue: NexxusMessageQueueAdapter<NexxusConfig, NexxusMessageQueueAdapterEvents>;
   public static redis: NexxusRedis;
+
+  /**
+   * Adapter classes this deployment ships as static dependencies. Config
+   * values matching a key here are resolved directly to the class; other
+   * values are treated as npm package names and dynamic-imported by the
+   * shared resolver in core-lib.
+   *
+   * Mirrors the same map on `NexxusApi` — API and worker processes both
+   * declare `logger`/`database`/`message_queue` in their config's `app`
+   * section and use the same builtin surface.
+   */
+  private static readonly builtinFactoryServices: Record<string, NexxusFactoryServiceClass> = {
+    [WinstonNexxusLogger.name]: WinstonNexxusLogger,
+  };
+  private static readonly builtinConstructableServices: Record<string, NexxusConstructableServiceClass> = {
+    [NexxusElasticsearchDb.name]: NexxusElasticsearchDb,
+    [NexxusRabbitMq.name]:        NexxusRabbitMq,
+  };
+
+  /**
+   * Resolves + registers a factory-style service (currently just the logger).
+   * Config value is looked up in `builtinFactoryServices` first; a miss falls
+   * through to dynamic import against the app's install tree. Registration is
+   * batched — the next `configManager.validateServices()` call picks up the
+   * resolved class's schema.
+   */
+  public static async resolveFactoryService(
+    configManager: NexxusConfigManager,
+    configuredName: string
+  ): Promise<NexxusFactoryServiceClass> {
+    const cls = await resolveFactoryServiceClass(configuredName, NexxusBaseWorker.builtinFactoryServices);
+
+    configManager.registerService(cls);
+
+    return cls;
+  }
+
+  /**
+   * Resolves + registers a constructable service (database, message queue).
+   * Same lookup-then-import shape as `resolveFactoryService`, minus the
+   * `create()` requirement.
+   */
+  public static async resolveConstructableService(
+    configManager: NexxusConfigManager,
+    configuredName: string
+  ): Promise<NexxusConstructableServiceClass> {
+    const cls = await resolveConstructableServiceClass(configuredName, NexxusBaseWorker.builtinConstructableServices);
+
+    configManager.registerService(cls);
+
+    return cls;
+  }
 
   constructor(services: NexxusWorkerServices) {
     super(services.configManager.getConfig('app') as T);

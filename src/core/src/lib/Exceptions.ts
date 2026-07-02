@@ -10,15 +10,27 @@ export enum NexxusExceptions {
 };
 
 export class NexxusException extends Error {
-  constructor(type: string, message: string) {
+  public readonly subcode?: string;
+
+  constructor(type: string, message: string, subcode?: string) {
     super(message);
     this.name = type;
+    this.subcode = subcode;
   }
 }
 
+enum FatalErrorSubcodes {
+  CONFIG_FILE_NOT_FOUND = "CONFIG_FILE_NOT_FOUND",
+  CONFIG_FILE_INVALID_JSON = "CONFIG_FILE_INVALID_JSON",
+  CONFIG_FILE_INVALID_SCHEMA = "CONFIG_FILE_INVALID_SCHEMA",
+  CONFIG_FILE_UNREADABLE = "CONFIG_FILE_UNREADABLE"
+};
+
 export class FatalErrorException extends NexxusException {
-  constructor(message: string) {
-    super(NexxusExceptions.FATAL_ERROR, message);
+  public static SUBCODES : Readonly<typeof FatalErrorSubcodes> = FatalErrorSubcodes;
+
+  constructor(message: string, subcode?: FatalErrorSubcodes) {
+    super(NexxusExceptions.FATAL_ERROR, message, subcode);
   }
 }
 

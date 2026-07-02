@@ -21,9 +21,15 @@ import * as path from "node:path";
 
 import { WebSocketServer, type WebSocket } from "ws";
 
-type NexxusWebsocketsTransportWorkerConfig = NexxusVolatileTransportWorkerConfig & {
+export type NexxusWebsocketsTransportWorkerConfig = NexxusVolatileTransportWorkerConfig & {
   name: string;
   port: number;
+  /** Class name of the logger service (see `NexxusApiConfig.logger`). */
+  logger: string;
+  /** Class name of the database adapter (see `NexxusApiConfig.database`). */
+  database: string;
+  /** Class name of the message-queue adapter (see `NexxusApiConfig.message_queue`). */
+  message_queue: string;
 }
 
 type NexxusWebsocketsTransportWorkerEvents = NexxusBaseWorkerEvents & {
