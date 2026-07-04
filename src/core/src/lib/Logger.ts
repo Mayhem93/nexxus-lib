@@ -247,7 +247,8 @@ export class WinstonNexxusLogger extends NexxusBaseLogger<WinstonNexxusLoggerCon
     this.winston = Winston.createLogger({
       level: this.config.level,
       format,
-      transports: resolvedTransports
+      transports: resolvedTransports,
+      levels: Winston.config.syslog.levels
     });
   }
 

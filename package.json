@@ -34,5 +34,13 @@
   "repository": {
     "type": "git",
     "url": "git@github.com:Mayhem93/nexxus-lib.git"
-  }
+  },
+  "workspaces": [
+    "src/core",
+    "src/database",
+    "src/message_queue",
+    "src/redis",
+    "src/api",
+    "src/worker"
+  ]
 }
