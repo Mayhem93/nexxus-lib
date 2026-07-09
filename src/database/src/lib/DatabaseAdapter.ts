@@ -50,8 +50,14 @@ export interface NexxusDbUpdateOptions {
   returnFields?: Set<string>;
 }
 
-export abstract class NexxusDatabaseAdapter<T extends NexxusConfig, Ev extends NexxusDatabaseAdapterEvents>
-  extends NexxusBaseService<T, Ev extends NexxusDatabaseAdapterEvents ? Ev : NexxusDatabaseAdapterEvents> {
+export type NexxusDatabaseAdapterStats = {};
+
+export abstract class NexxusDatabaseAdapter<
+  T extends NexxusConfig,
+  Ev extends NexxusDatabaseAdapterEvents,
+  TStats extends NexxusDatabaseAdapterStats = {}
+>
+  extends NexxusBaseService<T, Ev extends NexxusDatabaseAdapterEvents ? Ev : NexxusDatabaseAdapterEvents, TStats> {
 
   protected static configRootKey: string = "database";
   public static logger: NexxusBaseLogger<any>;
