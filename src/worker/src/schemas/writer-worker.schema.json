@@ -9,11 +9,28 @@
     },
     "message_queue": {
       "type": "string"
+    },
+    "management": {
+      "type": "object",
+      "properties": {
+        "port":  { "type": "number" },
+        "token": { "type": "string" }
+      },
+      "required": [ "port", "token" ]
+    },
+    "hub": {
+      "type": "object",
+      "properties": {
+        "endpoint": { "type": "string" },
+        "token":    { "type": "string" }
+      },
+      "required": [ "endpoint", "token" ]
     }
   },
   "required": [
     "logger",
     "database",
-    "message_queue"
+    "message_queue",
+    "management"
   ]
 }

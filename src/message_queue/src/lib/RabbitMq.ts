@@ -6,16 +6,17 @@ import {
   NexxusQueueName,
   NexxusQueuePayload,
   FatalErrorException,
-} from "@mayhem93/nexxus-core-lib";
+} from '@mayhem93/nexxus-core-lib';
 import {
   NexxusMessageQueueAdapter,
   NexxusMessageQueueAdapterEvents,
+  NexxusMessageQueueAdapterStats,
   NexxusQueueMessage
-} from "./MessageQueueAdapter";
+} from './MessageQueueAdapter';
 
-import * as amqplib from "amqplib";
+import * as amqplib from 'amqplib';
 
-import * as path from "node:path";
+import * as path from 'node:path';
 
 type RabbitMQConfig = {
   host: string;
@@ -33,14 +34,28 @@ export type RabbitMqMetadata = {
 
 interface NexxusRabbitMqEvents extends NexxusMessageQueueAdapterEvents {}
 
-export class NexxusRabbitMq extends NexxusMessageQueueAdapter<RabbitMQConfig, NexxusRabbitMqEvents> {
-  protected static loggerLabel: Readonly<string> = "NxxRabbitMq";
-  protected static schemaPath: string = path.join(__dirname, "../../src/schemas/rabbitmq.schema.json");
+/**
+ * RabbitMQ-specific stats. `amqplib` doesn't expose queue-level introspection
+ * (that needs the RabbitMQ management plugin's HTTP API on port 15672,
+ * which is a separate dependency we haven't taken). So this is intentionally
+ * lean for v1 — connection state plus broker identity when available.
+ * Full queue/exchange enumeration is future work.
+ */
+export type NexxusRabbitMqStats = NexxusMessageQueueAdapterStats & {
+  connected: boolean;
+  channelOpen?: boolean;
+  brokerProduct?: string;
+  brokerVersion?: string;
+};
+
+export class NexxusRabbitMq extends NexxusMessageQueueAdapter<RabbitMQConfig, NexxusRabbitMqEvents, NexxusRabbitMqStats> {
+  protected static loggerLabel: Readonly<string> = 'NxxRabbitMq';
+  protected static schemaPath: string = path.join(__dirname, '../../src/schemas/rabbitmq.schema.json');
   protected static envVars: ConfigEnvVars = [
-    { name: "MQ_HOST",     location: "host" },
-    { name: "MQ_PORT",     location: "port" },
-    { name: "MQ_USER",     location: "user" },
-    { name: "MQ_PASSWORD", location: "password" }
+    { name: 'MQ_HOST',     location: 'host' },
+    { name: 'MQ_PORT',     location: 'port' },
+    { name: 'MQ_USER',     location: 'user' },
+    { name: 'MQ_PASSWORD', location: 'password' }
   ];
 
   protected static cliArgs: ConfigCliArgs = [];
@@ -82,7 +97,12 @@ export class NexxusRabbitMq extends NexxusMessageQueueAdapter<RabbitMQConfig, Ne
 
     this.channel = await this.connection.createChannel();
 
-    NexxusRabbitMq.logger.info("Connected to RabbitMQ server", NexxusRabbitMq.loggerLabel);
+    this.connection.on('close', () => {
+      NexxusRabbitMq.logger.info('RabbitMQ connection closed', NexxusRabbitMq.loggerLabel);
+      this.emit('disconnect');
+    });
+
+    NexxusRabbitMq.logger.info('Connected to RabbitMQ server', NexxusRabbitMq.loggerLabel);
   }
 
   async reConnect(): Promise<void> {
@@ -95,6 +115,36 @@ export class NexxusRabbitMq extends NexxusMessageQueueAdapter<RabbitMQConfig, Ne
 
       this.connection = null;
     }
+  }
+
+  /**
+   * Lean by design — amqplib doesn't offer queue/exchange introspection
+   * without the RabbitMQ management HTTP API. What we CAN report cheaply
+   * from the client itself: whether the connection and channel are open,
+   * and the server-advertised broker identity from the AMQP handshake.
+   *
+   * `serverProperties` lives on amqplib's internal `Connection` object; we
+   * access it via the ChannelModel's underlying connection. Falls back to
+   * `undefined` if the shape changes in a future amqplib release.
+   */
+  async getStats(): Promise<NexxusRabbitMqStats> {
+    if (!this.connection) {
+      return { id: 'unknown', connected: false };
+    }
+
+    // TODO: actually use the rabbitmq management HTTP API to get queue/exchange stats, if we want to report more than just connection state
+    const serverProps = (this.connection as any).connection?.serverProperties as {
+      product?: string;
+      version?: string;
+    } | undefined;
+
+    return {
+      id: this.config.host,
+      connected: true,
+      channelOpen: this.channel !== null,
+      brokerProduct: serverProps?.product,
+      brokerVersion: serverProps?.version,
+    };
   }
 
   async publishMessage<Q extends NexxusQueueName>(

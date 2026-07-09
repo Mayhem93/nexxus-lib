@@ -1,11 +1,12 @@
 import {
   NexxusDatabaseAdapter,
   NexxusDatabaseAdapterEvents,
+  NexxusDatabaseAdapterStats,
   NexxusDbCountOptions,
   NexxusDbGetOptions,
   NexxusDbSearchOptions,
   NexxusDbUpdateOptions
-} from "./DatabaseAdapter";
+} from './DatabaseAdapter';
 import {
   NexxusConfig,
   ConfigCliArgs,
@@ -28,7 +29,7 @@ import {
   NEXXUS_PREFIX_LC,
   NEXXUS_BUILTIN_MODEL_SCHEMAS,
   isBuiltinModel
-} from "@mayhem93/nexxus-core-lib";
+} from '@mayhem93/nexxus-core-lib';
 
 import * as ElasticSearch from '@elastic/elasticsearch';
 import type { estypesWithBody } from '@elastic/elasticsearch';
@@ -38,9 +39,8 @@ type BulkOperationContainer = estypesWithBody.BulkOperationContainer;
 type BulkUpdateAction = estypesWithBody.BulkUpdateAction;
 type QueryDslQueryContainer = estypesWithBody.QueryDslQueryContainer;
 type QueryDslBoolQuery = estypesWithBody.QueryDslBoolQuery;
-type CountRequest = estypesWithBody.CountRequest;
 
-import * as path from "node:path";
+import * as path from 'node:path';
 
 type ElasticsearchConfig = {
   host: string;
@@ -53,21 +53,41 @@ export type ElasticSearchEvents = NexxusDatabaseAdapterEvents & {
   something: [string];
 }
 
+/**
+ * Elasticsearch-specific stats surfaced by `getStats()`. Cluster-level health
+ * plus per-index doc / size info. All fields are optional except `connected`
+ * because when the client isn't ready we return `{ connected: false }` and
+ * skip the ES calls entirely.
+ */
+export type NexxusElasticsearchDbStats = NexxusDatabaseAdapterStats & {
+  id: string | 'unknown';
+  connected: boolean;
+  clusterName?: string;
+  clusterStatus?: 'green' | 'yellow' | 'red';
+  numberOfNodes?: number;
+  indices?: Array<{
+    name: string;
+    docCount: number;
+    sizeBytes: number;
+    health: 'green' | 'yellow' | 'red';
+  }>;
+};
+
 type ESBulkRequest = {
   body: Array<BulkOperationBase | BulkOperationContainer | INexxusBaseModel>;
 }
 
-export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchConfig, ElasticSearchEvents> {
+export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchConfig, ElasticSearchEvents, NexxusElasticsearchDbStats> {
   private client: ElasticSearch.Client;
   private collectedIndices: Set<string> = new Set();
   private lastRefreshTimes: Map<string, number> = new Map();
 
-  protected static schemaPath: string = path.join(__dirname, "../../src/schemas/elasticsearch.schema.json");
+  protected static schemaPath: string = path.join(__dirname, '../../src/schemas/elasticsearch.schema.json');
   protected static envVars: ConfigEnvVars = [
-    { name: "DB_HOST",     location: "host" },
-    { name: "DB_PORT",     location: "port" },
-    { name: "DB_USERNAME", location: "user" },
-    { name: "DB_PASSWORD", location: "password" }
+    { name: 'DB_HOST',     location: 'host' },
+    { name: 'DB_PORT',     location: 'port' },
+    { name: 'DB_USERNAME', location: 'user' },
+    { name: 'DB_PASSWORD', location: 'password' }
   ];
 
   protected static cliArgs: ConfigCliArgs = [];
@@ -88,13 +108,13 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
     try {
       await this.client.ping({}, { requestTimeout: 2000, maxRetries: 5});
 
-      NexxusElasticsearchDb.logger.debug("Connection established with Elasticsearch database", NexxusDatabaseAdapter.loggerLabel);
+      NexxusElasticsearchDb.logger.debug('Connection established with Elasticsearch database', NexxusDatabaseAdapter.loggerLabel);
 
       const indices: ElasticSearch.estypes.CatIndicesResponse = await this.client.cat.indices({
-        format: "json",
-        h: ["index"],
+        format: 'json',
+        h: ['index'],
         index: `${NEXXUS_PREFIX_LC}-*`,
-        expand_wildcards: "open"
+        expand_wildcards: 'open'
       });
 
       NexxusElasticsearchDb.logger.debug(`Found ${indices.length} indices in Elasticsearch database`, NexxusDatabaseAdapter.loggerLabel);
@@ -103,9 +123,10 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
         this.collectedIndices.add(indexInfo.index as string);
       });
 
+      
     } catch (e : Error | unknown) {
       if (e instanceof ElasticSearch.errors.ConnectionError) {
-        throw new ConnectionException("Failed to connect to Elasticsearch database");
+        throw new ConnectionException('Failed to connect to Elasticsearch database');
       } else {
         throw e;
       }
@@ -118,6 +139,45 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
 
   async disconnect(): Promise<void> {
     return this.client.close();
+  }
+
+  /**
+   * Cluster health + per-nexxus-index doc/size info. Two ES round trips (one
+   * cluster.health, one cat.indices) — both cheap and observability-safe to
+   * poll on a short interval. If either call throws (typical when the client
+   * hasn't connected or the cluster is unreachable), we return
+   * `{ connected: false }` and let the caller decide what to do.
+   *
+   * `cat.indices` is scoped to `nxx-*` to match the existing convention in
+   * `connect()` — non-nexxus indices in the same cluster don't show up in
+   * the stats snapshot.
+   */
+  async getStats(): Promise<NexxusElasticsearchDbStats> {
+    try {
+      const health = await this.client.cluster.health();
+      const indices = await this.client.cat.indices({
+        format: 'json',
+        bytes: 'b',
+        index: `${NEXXUS_PREFIX_LC}-*`,
+        expand_wildcards: 'open',
+      });
+
+      return {
+        id: health.cluster_name,
+        connected: true,
+        clusterName: health.cluster_name,
+        clusterStatus: health.status as 'green' | 'yellow' | 'red',
+        numberOfNodes: health.number_of_nodes,
+        indices: indices.map(idx => ({
+          name: (idx.index as string) ?? '<unknown>',
+          docCount: parseInt((idx as any)['docs.count'] ?? '0', 10),
+          sizeBytes: parseInt((idx as any)['store.size'] ?? '0', 10),
+          health: ((idx.health as string) ?? 'red') as 'green' | 'yellow' | 'red',
+        })),
+      };
+    } catch {
+      return { id: 'unknown', connected: false };
+    }
   }
 
   private async createIndexIfNotExists(indexName: string): Promise<void> {

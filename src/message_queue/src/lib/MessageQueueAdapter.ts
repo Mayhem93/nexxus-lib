@@ -20,8 +20,16 @@ export interface NexxusQueueMessage<TPayload = NexxusBaseQueuePayload> {
   metadata?: Record<string, any>;
 }
 
-export abstract class NexxusMessageQueueAdapter<T extends NexxusConfig, Ev extends NexxusMessageQueueAdapterEvents>
-  extends NexxusBaseService<T, Ev extends NexxusMessageQueueAdapterEvents ? Ev : NexxusMessageQueueAdapterEvents> {
+export type NexxusMessageQueueAdapterStats = {
+  id: string | 'unknown';
+};
+
+export abstract class NexxusMessageQueueAdapter<
+  T extends NexxusConfig,
+  Ev extends NexxusMessageQueueAdapterEvents,
+  TStats extends NexxusMessageQueueAdapterStats
+>
+  extends NexxusBaseService<T, Ev extends NexxusMessageQueueAdapterEvents ? Ev : NexxusMessageQueueAdapterEvents, TStats> {
 
   protected static configRootKey: string = "message_queue";
   protected static loggerLabel: Readonly<string> = "NxxMessageQueue";

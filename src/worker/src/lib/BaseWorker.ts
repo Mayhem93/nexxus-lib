@@ -9,12 +9,18 @@ import {
   NexxusConfigManager,
   NexxusConstructableServiceClass,
   NexxusFactoryServiceClass,
+  NexxusManagementServer,
   FatalErrorException,
   NexxusApplication,
   MODEL_REGISTRY,
   WinstonNexxusLogger,
   resolveConstructableServiceClass,
-  resolveFactoryServiceClass
+  resolveFactoryServiceClass,
+  unregisterNode,
+  registerNodeWithRetry,
+  HubRegistrationHandle,
+  readNexxusDependencies,
+  discoverPrivateIpAddress
 } from '@mayhem93/nexxus-core-lib';
 import {
   NexxusDatabaseAdapter,
@@ -29,28 +35,84 @@ import {
 } from '@mayhem93/nexxus-message-queue-lib';
 import { NexxusRedis } from '@mayhem93/nexxus-redis';
 
+import { randomUUID } from 'node:crypto';
+
 export type NexxusBaseWorkerEvents = Record<string, any[]>;
 
 export interface NexxusWorkerServices extends INexxusBaseServices {
   database: NexxusDatabaseAdapter<NexxusConfig, NexxusDatabaseAdapterEvents>;
-  messageQueue: NexxusMessageQueueAdapter<NexxusConfig, NexxusMessageQueueAdapterEvents>;
+  messageQueue: NexxusMessageQueueAdapter<NexxusConfig, NexxusMessageQueueAdapterEvents, any>;
   redis: NexxusRedis;
 };
 
-export abstract class NexxusBaseWorker<T extends NexxusConfig, Ev extends NexxusBaseWorkerEvents = {}, TPayload extends NexxusBaseQueuePayload = NexxusBaseQueuePayload>
-  extends NexxusBaseService<T, Ev extends NexxusBaseWorkerEvents ? Ev : NexxusBaseWorkerEvents> {
+/**
+ * Runtime stats surfaced by `NexxusBaseWorker.getStats()`. Reports only
+ * worker-process state — the DB/MQ/Redis clients' stats are Hub's own
+ * concern (Hub connects to those services directly). Logger IS nested
+ * because it runs in-process with the worker.
+ *
+ * Concrete workers can widen this shape via the fourth template arg on
+ * `NexxusBaseWorker` if they want to expose additional per-role metrics
+ * (queue depth for the writer, in-flight subscriptions for the WS
+ * transport, etc.). To contribute those fields, override `getOwnStats()`
+ * on the subclass — the base's `getStats()` merges them into the public
+ * stats output automatically, so the baseline can't be accidentally
+ * dropped by a subclass forgetting to include it.
+ */
+export type NexxusBaseWorkerStats = {
+  uptime: number;
+  queueName: NexxusQueueName;
+  loadedApps: number;
+  initialized: boolean;
+  logger: Record<string, unknown>;
+};
+
+export type NexxusBaseWorkerConfig = NexxusConfig & {
+  /** Management HTTP server config — see `NexxusManagementServer`. */
+  management: {
+    port: number;
+    token: string;
+  };
+  hub?: {
+    endpoint: string;
+    token: string;
+  }
+};
+
+export abstract class NexxusBaseWorker<
+  T extends NexxusBaseWorkerConfig,
+  Ev extends NexxusBaseWorkerEvents = {},
+  TPayload extends NexxusBaseQueuePayload = NexxusBaseQueuePayload,
+  TStats extends NexxusBaseWorkerStats = NexxusBaseWorkerStats
+>
+  extends NexxusBaseService<T, Ev extends NexxusBaseWorkerEvents ? Ev : NexxusBaseWorkerEvents, TStats> {
 
   public static logger: NexxusBaseLogger<any>;
+  public static database: NexxusDatabaseAdapter<NexxusConfig, NexxusDatabaseAdapterEvents>;
+  public static messageQueue: NexxusMessageQueueAdapter<NexxusConfig, NexxusMessageQueueAdapterEvents, any>;
+  public static redis: NexxusRedis;
 
-  protected static configRootKey: string = "app";
+  protected static configRootKey: string = 'app';
   protected initialized: boolean = false;
-  protected static loggerLabel: Readonly<string> = "NxxWorker";
+  protected static loggerLabel: Readonly<string> = 'NxxWorker';
   protected static readonly loadedApps: Map<string, NexxusApplication> = new Map();
   protected abstract queueName: NexxusQueueName;
+  protected abstract nodeRole: string;
 
-  public static database: NexxusDatabaseAdapter<NexxusConfig, NexxusDatabaseAdapterEvents>;
-  public static messageQueue: NexxusMessageQueueAdapter<NexxusConfig, NexxusMessageQueueAdapterEvents>;
-  public static redis: NexxusRedis;
+  private managementServer: NexxusManagementServer | null = null;
+  /**
+   * Fresh uuid v4 minted at Hub registration time and held for the process
+   * lifetime so `close()` can send the matching de-register. Set only by
+   * the retry loop's `onSuccess` callback, so it stays `null` while the
+   * retry loop is still attempting or when `config.hub` is absent — the
+   * de-register path is a no-op in both cases.
+   */
+  private nodeId: string | null = null;
+  /**
+   * Handle for the background Hub-register retry loop. Held so `close()`
+   * can stop the loop if the process shuts down before first success.
+   */
+  private hubRegistration: HubRegistrationHandle | null = null;
 
   /**
    * Adapter classes this deployment ships as static dependencies. Config
@@ -65,6 +127,7 @@ export abstract class NexxusBaseWorker<T extends NexxusConfig, Ev extends Nexxus
   private static readonly builtinFactoryServices: Record<string, NexxusFactoryServiceClass> = {
     [WinstonNexxusLogger.name]: WinstonNexxusLogger,
   };
+
   private static readonly builtinConstructableServices: Record<string, NexxusConstructableServiceClass> = {
     [NexxusElasticsearchDb.name]: NexxusElasticsearchDb,
     [NexxusRabbitMq.name]:        NexxusRabbitMq,
@@ -132,7 +195,154 @@ export abstract class NexxusBaseWorker<T extends NexxusConfig, Ev extends Nexxus
   public async init() : Promise<void> {
     await NexxusBaseWorker.loadApps();
     await NexxusBaseWorker.messageQueue.consumeMessages(this.queueName, this.processMessage.bind(this) as any);
+
     this.initialized = true;
+
+    // Boot the management HTTP server after the worker is otherwise ready so
+    // `getStats()` responses reflect a fully-initialized node. The config
+    // field is guaranteed present by AJV validation at bootstrap time.
+    const managementConfig = this.config.management;
+
+    this.managementServer = new NexxusManagementServer(this, managementConfig);
+
+    await this.managementServer.start();
+
+    NexxusBaseWorker.logger.info(`Management server listening on port ${managementConfig.port}`, NexxusBaseWorker.loggerLabel);
+
+    this.registerWithHub();
+  }
+
+  /**
+   * Baseline close for any worker — stops the management HTTP server so its
+   * port frees and Hub sees the node fall off its heartbeat window. Concrete
+   * workers with additional cleanup (draining MQ consumers, terminating
+   * websocket connections, etc.) should override and call `super.close()`.
+   */
+  public async close(): Promise<void> {
+    // Halt the register retry loop first — no more attempts should fire
+    // while we're shutting down, whether we've succeeded or not.
+    this.hubRegistration?.stop();
+    this.hubRegistration = null;
+
+    // Tell Hub we're going down before we tear anything else down, so a
+    // watching operator sees the entry disappear before local ports close.
+    await this.unregisterFromHub();
+
+    this.managementServer?.close();
+    this.managementServer = null;
+
+    return Promise.resolve();
+  }
+
+  /**
+   * Public stats surface for this worker. Returns the baseline fields
+   * every worker exposes plus whatever `getOwnStats()` contributes.
+   *
+   * **Do not override.** Subclasses that need extra fields should
+   * implement `getOwnStats()` instead — that way the base fields can't
+   * be accidentally dropped by a subclass forgetting a `super` call,
+   * and the shape of the public stats stays consistent across every
+   * worker.
+   */
+  public async getStats(): Promise<TStats> {
+    return {
+      uptime: process.uptime(),
+      queueName: this.queueName,
+      loadedApps: NexxusBaseWorker.loadedApps.size,
+      initialized: this.initialized,
+      logger: await NexxusBaseWorker.logger.getStats(),
+      ...(await this.getOwnStats()),
+    } as unknown as TStats;
+  }
+
+  /**
+   * Extension hook for subclasses to contribute additional stats fields
+   * beyond the `NexxusBaseWorkerStats` baseline. Return type is
+   * `Omit<TStats, keyof NexxusBaseWorkerStats>` so the compiler enforces
+   * that the object contains exactly the fields the subclass widened
+   * `TStats` with — no base field can be shadowed from here.
+   *
+   * Multi-level chains (transport workers) that contribute fields at
+   * intermediate levels should override this AND spread
+   * `super.getOwnStats()` to preserve ancestor contributions.
+   *
+   * Default returns an empty object — right for subclasses that don't
+   * widen `TStats`.
+   */
+  protected async getOwnStats(): Promise<Omit<TStats, keyof NexxusBaseWorkerStats>> {
+    return Promise.resolve({} as Omit<TStats, keyof NexxusBaseWorkerStats>);
+  }
+
+  /**
+   * Kick off the Hub-register retry loop. No-op when `config.hub` is
+   * absent — nodes without a `hub` block run standalone (local dev).
+   *
+   * Non-blocking: returns as soon as the loop is scheduled. The first
+   * attempt fires immediately; subsequent attempts every 30s until
+   * success. `close()` stops the loop via the stored handle.
+   *
+   * `this.nodeId` is set only on the FIRST successful attempt (from the
+   * `onSuccess` callback), so `unregisterFromHub()` correctly no-ops
+   * while we're still retrying or if we never register.
+   */
+  private registerWithHub(): void {
+    if (!this.config.hub) {
+      return;
+    }
+
+    const hubCfg = this.config.hub;
+    const pendingNodeId = randomUUID();
+
+    this.hubRegistration = registerNodeWithRetry(
+      hubCfg,
+      async () => ({
+        id: pendingNodeId,
+        role: this.nodeRole,
+        privateIpAddress: discoverPrivateIpAddress(),
+        managementPort: this.config.management.port,
+        dependencies: readNexxusDependencies(),
+        stats: await this.getStats(),
+      }),
+      {
+        onSuccess: (nodeId) => {
+          this.nodeId = nodeId;
+          NexxusBaseWorker.logger.info(
+            `Registered with Hub as ${nodeId}`,
+            NexxusBaseWorker.loggerLabel
+          );
+        },
+        onError: (err) => {
+          NexxusBaseWorker.logger.warn(
+            `Hub register attempt failed, will retry: ${err.message}`,
+            NexxusBaseWorker.loggerLabel
+          );
+        },
+      }
+    );
+  }
+
+  /**
+   * Counterpart to `registerWithHub`. No-op when we never got a `nodeId`
+   * (Hub absent or register failed). Any failure here is logged and
+   * swallowed — worst case is a leaked entry that clears on the next Hub
+   * restart, which the design deliberately accepts.
+   */
+  private async unregisterFromHub(): Promise<void> {
+    if (this.nodeId === null || !this.config.hub) {
+      return;
+    }
+
+    try {
+      await unregisterNode(this.config.hub, this.nodeId);
+      NexxusBaseWorker.logger.info('Unregistered from Hub', NexxusBaseWorker.loggerLabel);
+    } catch (err) {
+      NexxusBaseWorker.logger.warn(
+        `Failed to unregister from Hub — leaving entry to leak: ${(err as Error).message}`,
+        NexxusBaseWorker.loggerLabel
+      );
+    } finally {
+      this.nodeId = null;
+    }
   }
 
   protected async publish<Q extends NexxusQueueName>(

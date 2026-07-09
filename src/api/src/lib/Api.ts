@@ -9,13 +9,19 @@ import {
   NexxusConfigManager,
   NexxusConstructableServiceClass,
   NexxusFactoryServiceClass,
+  NexxusManagementServer,
   MODEL_REGISTRY,
   FatalErrorException,
   InvalidConfigException,
   INexxusUser,
   WinstonNexxusLogger,
   resolveConstructableServiceClass,
-  resolveFactoryServiceClass
+  resolveFactoryServiceClass,
+  unregisterNode,
+  registerNodeWithRetry,
+  HubRegistrationHandle,
+  readNexxusDependencies,
+  discoverPrivateIpAddress
 } from '@mayhem93/nexxus-core-lib';
 import {
   NexxusDatabaseAdapter,
@@ -83,6 +89,7 @@ import * as path from 'node:path';
 import { readFileSync } from 'node:fs';
 import { IncomingHttpHeaders, Server as HttpServer } from 'node:http';
 import https from 'node:https';
+import { randomUUID } from 'node:crypto';
 
 import Express from 'express';
 import helmet from 'helmet';
@@ -107,6 +114,22 @@ export type NexxusApiUser = Pick<INexxusUser, | 'username' | 'userType' | 'authP
 }
 
 export interface NexxusApiResponse extends Express.Response {}
+
+/**
+ * Runtime stats surfaced by `NexxusApi.getStats()`. Reports only API-process
+ * state — the DB/MQ/Redis clients' stats are Hub's own concern (Hub
+ * connects to those services directly and calls their `getStats()` itself).
+ * Logger IS nested here because it runs in-process with the API, not as an
+ * external service Hub touches.
+ */
+export type NexxusApiStats = {
+  uptime: number;
+  port: number;
+  loadedApps: number;
+  authStrategies: Array<string>;
+  authEnabled: boolean;
+  logger: Record<string, unknown>;
+};
 
 export type NexxusApiConfig = {
   name: string;
@@ -140,23 +163,57 @@ export type NexxusApiConfig = {
   auth?: {
     availableStrategies: string[];
   }
+  /**
+   * Management HTTP server config. Every node runs one for observability
+   * (`/stats` endpoint, bearer-auth). Consumed by external tools (CLI,
+   * monitoring, humans) and optionally by Hub for out-of-band fresh-stats
+   * pulls. See `NexxusManagementServer` for the endpoint contract.
+   */
+  management: {
+    port: number;
+    token: string;
+  };
+  /**
+   * Optional Hub coordinates. When present, the API registers itself with
+   * Hub during `init()` and de-registers during `close()` — Hub is a soft
+   * dependency, so any register/unregister failure is logged and swallowed.
+   * Omit the whole block to run the node standalone (useful for local dev).
+   * See `HubClient.registerNode` for the wire contract.
+   */
+  hub?: {
+    endpoint: string;
+    token: string;
+  };
 } & NexxusConfig;
 
 interface ApiServices extends INexxusBaseServices {
   database: NexxusDatabaseAdapter<NexxusConfig, NexxusDatabaseAdapterEvents>;
-  messageQueue: NexxusMessageQueueAdapter<NexxusConfig, NexxusMessageQueueAdapterEvents>;
+  messageQueue: NexxusMessageQueueAdapter<NexxusConfig, NexxusMessageQueueAdapterEvents, any>;
   redis: NexxusRedis;
 };
 
-export class NexxusApi extends NexxusBaseService<NexxusApiConfig> {
+export class NexxusApi extends NexxusBaseService<NexxusApiConfig, {}, NexxusApiStats> {
   public static logger: NexxusBaseLogger<any>;
   public static database: NexxusDatabaseAdapter<NexxusConfig, NexxusDatabaseAdapterEvents>;
-  public static messageQueue: NexxusMessageQueueAdapter<NexxusConfig, NexxusMessageQueueAdapterEvents>;
+  public static messageQueue: NexxusMessageQueueAdapter<NexxusConfig, NexxusMessageQueueAdapterEvents, any>;
   public static redis: NexxusRedis;
   public static instance: NexxusApi;
 
   protected static cliArgs: ConfigCliArgs = [];
-  protected static envVars: ConfigEnvVars = [];
+  protected static envVars: ConfigEnvVars = [
+    {
+      name: 'API_PORT',
+      location: 'port'
+    },
+    {
+      name: 'API_MANAGEMENT_PORT',
+      location: 'management.port'
+    },
+    {
+      name: 'API_MANAGEMENT_TOKEN',
+      location: 'management.token'
+    }
+  ];
 
   protected static configRootKey: string = "app";
   protected static schemaPath: string = path.join(__dirname, '../../src/schemas/api.schema.json');
@@ -180,43 +237,23 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig> {
     [NexxusRabbitMq.name]:        NexxusRabbitMq,
   };
 
-  /**
-   * Resolves + registers a factory-style service (currently just the logger).
-   * Config value is looked up in `builtinFactoryServices` first; a miss falls
-   * through to dynamic import against the app's install tree. Registration is
-   * batched — the next `configManager.validateServices()` call picks up the
-   * resolved class's schema.
-   */
-  public static async resolveFactoryService(
-    configManager: NexxusConfigManager,
-    configuredName: string
-  ): Promise<NexxusFactoryServiceClass> {
-    const cls = await resolveFactoryServiceClass(configuredName, NexxusApi.builtinFactoryServices);
-
-    configManager.registerService(cls);
-
-    return cls;
-  }
-
-  /**
-   * Resolves + registers a constructable service (database, message queue).
-   * Same lookup-then-import shape as `resolveFactoryService`, minus the
-   * `create()` requirement.
-   */
-  public static async resolveConstructableService(
-    configManager: NexxusConfigManager,
-    configuredName: string
-  ): Promise<NexxusConstructableServiceClass> {
-    const cls = await resolveConstructableServiceClass(configuredName, NexxusApi.builtinConstructableServices);
-
-    configManager.registerService(cls);
-
-    return cls;
-  }
-
   private express: Express.Express;
   private server : HttpServer | https.Server | null = null;
   private httpsServer?: https.Server;
+  private managementServer: NexxusManagementServer | null = null;
+  /**
+   * Fresh uuid v4 minted at Hub registration time and held for the process
+   * lifetime so `close()` can send the matching de-register. Set only by
+   * the retry loop's `onSuccess` callback, so it stays `null` while the
+   * retry loop is still attempting or when `config.hub` is absent — the
+   * de-register path is a no-op in both cases.
+   */
+  private nodeId: string | null = null;
+  /**
+   * Handle for the background Hub-register retry loop. Held so `close()`
+   * can stop the loop if the process shuts down before first success.
+   */
+  private hubRegistration: HubRegistrationHandle | null = null;
   /**
    * Registry of auth strategy CLASSES, keyed by strategy name. Populated by
    * `addAuthStrategy()` before `init()`. Per-application strategy INSTANCES
@@ -326,9 +363,97 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig> {
     this.server?.on('listening', () => {
       NexxusApi.logger.info(`API service is listening on port ${this.config.port}`, NexxusApi.loggerLabel);
     });
+
+    // Boot the management HTTP server last, once every other subsystem is
+    // wired. `getStats()` responses will reflect a fully-initialized node.
+    this.managementServer = new NexxusManagementServer(this, this.config.management);
+
+    await this.managementServer.start();
+
+    NexxusApi.logger.info(`Management server listening on port ${this.config.management.port}`, NexxusApi.loggerLabel);
+
+    this.registerWithHub();
+  }
+
+  /**
+   * Kick off the Hub-register retry loop. No-op when `config.hub` is
+   * absent — nodes without a `hub` block run standalone (local dev).
+   *
+   * Non-blocking: returns as soon as the loop is scheduled. The first
+   * attempt fires immediately; subsequent attempts every 30s until
+   * success. `close()` stops the loop via the stored handle.
+   *
+   * `this.nodeId` is set only on the FIRST successful attempt (from the
+   * `onSuccess` callback), so `unregisterFromHub()` correctly no-ops
+   * while we're still retrying or if we never register.
+   */
+  private registerWithHub(): void {
+    if (!this.config.hub) {
+      return;
+    }
+
+    const hubCfg = this.config.hub;
+    const pendingNodeId = randomUUID();
+
+    this.hubRegistration = registerNodeWithRetry(
+      hubCfg,
+      async () => ({
+        id: pendingNodeId,
+        role: 'api',
+        privateIpAddress: discoverPrivateIpAddress(),
+        managementPort: this.config.management.port,
+        dependencies: readNexxusDependencies(),
+        stats: await this.getStats(),
+      }),
+      {
+        onSuccess: (nodeId) => {
+          this.nodeId = nodeId;
+          NexxusApi.logger.info(
+            `Registered with Hub as ${nodeId}`,
+            NexxusApi.loggerLabel
+          );
+        },
+        onError: (err) => {
+          NexxusApi.logger.warn(
+            `Hub register attempt failed, will retry: ${err.message}`,
+            NexxusApi.loggerLabel
+          );
+        },
+      }
+    );
+  }
+
+  /**
+   * API-process stats snapshot. Cheap — reads in-memory state (loaded apps,
+   * registered auth strategies) plus `process.uptime()`. The nested `logger`
+   * stats add one call to the plugged-in logger's own `getStats()`, which
+   * for the built-in Winston logger is also in-memory (see
+   * `WinstonNexxusLogger.getStats`). No external I/O.
+   */
+  public async getStats(): Promise<NexxusApiStats> {
+    return {
+      uptime: process.uptime(),
+      port: this.config.port,
+      loadedApps: NexxusApi.loadedApps.size,
+      authStrategies: [...this.authStrategyClasses.keys()],
+      authEnabled: this.authStrategyClasses.size > 0,
+      logger: await NexxusApi.logger.getStats(),
+    };
   }
 
   public async close(): Promise<void> {
+    // Halt the register retry loop first — no more attempts should fire
+    // while we're shutting down, whether we've succeeded or not.
+    this.hubRegistration?.stop();
+    this.hubRegistration = null;
+
+    // Tell Hub we're going down before we tear anything else down, so a
+    // watching operator sees the entry disappear before local ports close.
+    await this.unregisterFromHub();
+
+    this.managementServer?.close();
+    this.managementServer = null;
+
     if (this.server) {
       await new Promise<void>((resolve, reject) => {
         this.server?.close((err?: Error) => {
@@ -341,6 +466,32 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig> {
       });
 
       NexxusApi.logger.info('API service has been closed', NexxusApi.loggerLabel);
+    }
+
+    return Promise.resolve();
+  }
+
+  /**
+   * Counterpart to `registerWithHub`. No-op when we never got a `nodeId`
+   * (Hub absent or register failed). Any failure here is logged and
+   * swallowed — worst case is a leaked entry that clears on the next Hub
+   * restart, which the design deliberately accepts.
+   */
+  private async unregisterFromHub(): Promise<void> {
+    if (this.nodeId === null || !this.config.hub) {
+      return;
+    }
+
+    try {
+      await unregisterNode(this.config.hub, this.nodeId);
+      NexxusApi.logger.info('Unregistered from Hub', NexxusApi.loggerLabel);
+    } catch (err) {
+      NexxusApi.logger.warn(
+        `Failed to unregister from Hub — leaving entry to leak: ${(err as Error).message}`,
+        NexxusApi.loggerLabel
+      );
+    } finally {
+      this.nodeId = null;
     }
   }
 
@@ -585,6 +736,40 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig> {
         );
       }
     }
+  }
+
+  /**
+   * Resolves + registers a factory-style service (currently just the logger).
+   * Config value is looked up in `builtinFactoryServices` first; a miss falls
+   * through to dynamic import against the app's install tree. Registration is
+   * batched — the next `configManager.validateServices()` call picks up the
+   * resolved class's schema.
+   */
+  public static async resolveFactoryService(
+    configManager: NexxusConfigManager,
+    configuredName: string
+  ): Promise<NexxusFactoryServiceClass> {
+    const cls = await resolveFactoryServiceClass(configuredName, NexxusApi.builtinFactoryServices);
+
+    configManager.registerService(cls);
+
+    return cls;
+  }
+
+  /**
+   * Resolves + registers a constructable service (database, message queue).
+   * Same lookup-then-import shape as `resolveFactoryService`, minus the
+   * `create()` requirement.
+   */
+  public static async resolveConstructableService(
+    configManager: NexxusConfigManager,
+    configuredName: string
+  ): Promise<NexxusConstructableServiceClass> {
+    const cls = await resolveConstructableServiceClass(configuredName, NexxusApi.builtinConstructableServices);
+
+    configManager.registerService(cls);
+
+    return cls;
   }
 
   private async loadApps(): Promise<void> {

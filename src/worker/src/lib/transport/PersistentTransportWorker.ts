@@ -1,10 +1,18 @@
-import { NexxusBaseTransportWorker } from "./BaseTransportWorker";
-import { NexxusBaseWorkerEvents, NexxusWorkerServices } from "../BaseWorker";
-
 import { NexxusDevice } from '@mayhem93/nexxus-redis';
-import { NexxusConfig } from '@mayhem93/nexxus-core-lib';
 
-export type NexxusPersistentTransportWorkerConfig = NexxusConfig;
+import {
+  NexxusBaseTransportWorker,
+  NexxusBaseTransportWorkerConfig,
+  NexxusBaseTransportWorkerStats
+} from './BaseTransportWorker';
+import {
+  NexxusBaseWorkerEvents,
+  NexxusWorkerServices
+} from '../BaseWorker';
+
+export type NexxusPersistentTransportWorkerConfig = NexxusBaseTransportWorkerConfig & {};
+
+export type NexxusPersistentTransportWorkerStats = NexxusBaseTransportWorkerStats & {};
 
 /**
  * Base class for transport workers that deliver via a 3rd-party push service
@@ -29,9 +37,10 @@ export type NexxusPersistentTransportWorkerConfig = NexxusConfig;
 export abstract class NexxusPersistentTransportWorker<
   T extends NexxusPersistentTransportWorkerConfig,
   Ev extends NexxusBaseWorkerEvents = {},
-> extends NexxusBaseTransportWorker<T, Ev> {
+  S extends NexxusPersistentTransportWorkerStats = NexxusPersistentTransportWorkerStats
+> extends NexxusBaseTransportWorker<T, Ev, S> {
 
-  protected static loggerLabel: Readonly<string> = "NxxPersistentTransport";
+  protected static loggerLabel: Readonly<string> = 'NxxPersistentTransport';
 
   constructor(services: NexxusWorkerServices) {
     super(services);
