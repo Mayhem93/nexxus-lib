@@ -14,7 +14,7 @@ export const enum NexxusLoggerLevels {
   ALERT = "alert",
   CRITICAL = "crit",
   ERROR = "error",
-  WARNING = "warn",
+  WARNING = "warning",
   NOTICE = "notice",
   INFO = "info",
   DEBUG = "debug"
@@ -64,7 +64,10 @@ export interface INexxusAsyncLogger {
 
 interface NexxusLoggerServices extends Omit<INexxusBaseServices, 'logger'> {}
 
-export abstract class NexxusBaseLogger<T extends NexxusConfig> extends NexxusBaseService<T> implements INexxusLogger {
+export abstract class NexxusBaseLogger<
+  T extends NexxusConfig,
+  TStats = Record<string, unknown>
+> extends NexxusBaseService<T, {}, TStats> implements INexxusLogger {
 
   protected static configRootKey: string = "logger";
 
@@ -163,7 +166,17 @@ export abstract class NexxusBaseLogger<T extends NexxusConfig> extends NexxusBas
   }
 }
 
-export class WinstonNexxusLogger extends NexxusBaseLogger<WinstonNexxusLoggerConfig> {
+/**
+ * Winston-specific stats. `level` and `logType` are picked directly off the
+ * config type so they stay in lockstep — no risk of the two shapes drifting.
+ * `transports` adds runtime info (names/kinds of active transports) so
+ * observability tooling can tell what's actually consuming log records.
+ */
+export type WinstonNexxusLoggerStats = Pick<WinstonNexxusLoggerConfig, 'level' | 'logType'> & {
+  transports: Array<string>;
+};
+
+export class WinstonNexxusLogger extends NexxusBaseLogger<WinstonNexxusLoggerConfig, WinstonNexxusLoggerStats> {
   private winston : Winston.Logger;
   protected static schemaPath: string = path.join(__dirname, "../../src/schemas/winston-logger.schema.json");
   protected static envVars: ConfigEnvVars = [
@@ -354,5 +367,21 @@ export class WinstonNexxusLogger extends NexxusBaseLogger<WinstonNexxusLoggerCon
 
   public log(level: NexxusLoggerLevels, message: string, attributes?: LogAttributes, label?: string): void {
     this.winston.log(level, message, { label, attrs: attributes });
+  }
+
+  /**
+   * Cheap, in-memory snapshot. No I/O — Winston keeps the transport list
+   * on the local logger instance. Transport identifiers fall back to the
+   * constructor name when the transport doesn't set a `name` (custom ones
+   * loaded via `loadCustomTransport` often don't).
+   */
+  public async getStats(): Promise<WinstonNexxusLoggerStats> {
+    return {
+      level: this.config.level,
+      logType: this.config.logType,
+      transports: this.winston.transports.map(
+        t => (t as { name?: string }).name ?? t.constructor.name
+      ),
+    };
   }
 }

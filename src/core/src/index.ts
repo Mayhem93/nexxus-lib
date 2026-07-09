@@ -3,6 +3,8 @@ export * from "./lib/ConfigProvider";
 export * from "./lib/ConfigManager";
 export * from "./lib/BaseService";
 export * from "./lib/Logger";
+export * from "./lib/ManagementServer";
+export * from "./lib/HubClient";
 export * from "./lib/ServiceResolver";
 
 export * from "./common/QueuePayloads";

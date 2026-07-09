@@ -104,7 +104,11 @@ class TypedEventEmitter<E> {
   }
 }
 
-export abstract class NexxusBaseService<T extends NexxusConfig, Ev extends EventMap = {}> extends TypedEventEmitter<Ev> {
+export abstract class NexxusBaseService<
+  T extends NexxusConfig,
+  Ev extends EventMap = {},
+  TStats = Record<string, unknown>
+> extends TypedEventEmitter<Ev> {
   @frozen
   protected config: Readonly<T>;
 
@@ -125,6 +129,22 @@ export abstract class NexxusBaseService<T extends NexxusConfig, Ev extends Event
 
     this.config = config;
   }
+
+  /**
+   * Snapshot of this service's runtime state — surfaced by the management
+   * endpoint on nodes and by Hub itself when it introspects its own connected
+   * services. Shape is per-subclass; the third template arg narrows it.
+   *
+   * Concrete implementations should keep this cheap — it may be polled on a
+   * short interval by observability tooling. If a stat requires hitting an
+   * external service (ES cluster health, RabbitMQ queue depth), that's fine
+   * — just document it.
+   *
+   * Convention: each service reports only its OWN state. Composite services
+   * (API, workers) don't roll up the stats of their dependencies — Hub
+   * introspects those services independently.
+   */
+  public abstract getStats(): Promise<TStats>;
 
   public static envVarConfig(): ConfigEnvVars {
     if (!this.envVars) {
