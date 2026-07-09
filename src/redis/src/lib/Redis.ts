@@ -11,6 +11,12 @@ import * as Redis from 'redis';
 
 import * as path from 'node:path';
 
+type RedisEvents = {
+  connect: [];
+  disconnect: [];
+  error: [Error];
+}
+
 export type NexxusRedisConfig = {
   host: string;
   port: number;
@@ -19,7 +25,61 @@ export type NexxusRedisConfig = {
   cluster?: boolean;
 } & NexxusConfig;
 
-export class NexxusRedis extends NexxusBaseService<NexxusRedisConfig> {
+/**
+ * Redis-specific stats. `connected` is a hard requirement — everything else
+ * comes from parsing `INFO`, so we make them optional in case the format
+ * changes or a field is missing.
+ */
+export type NexxusRedisStats = {
+  id: string | 'unknown';
+  connected: boolean;
+  memoryUsedBytes?: number;
+  connectedClients?: number;
+  totalKeys?: number;
+  usedCpuSys?: number;
+  usedCpuUser?: number;
+};
+
+/**
+ * Redis `INFO` output is a text blob with `# Section` headers and `key:value`
+ * lines. We flatten it to a `key → value` map and let the caller pick fields.
+ * Blank lines and section headers are skipped.
+ */
+function parseRedisInfo(info: string): Record<string, string> {
+  const out: Record<string, string> = {};
+
+  for (const line of info.split(/\r?\n/)) {
+    if (!line || line.startsWith('#')) {
+      continue;
+    }
+
+    const sep = line.indexOf(':');
+
+    if (sep > 0) {
+      out[line.slice(0, sep)] = line.slice(sep + 1);
+    }
+  }
+
+  return out;
+}
+
+function parseIntOrUndefined(s: string | undefined): number | undefined {
+  if (s === undefined) return undefined;
+
+  const n = parseInt(s, 10);
+
+  return Number.isNaN(n) ? undefined : n;
+}
+
+function parseFloatOrUndefined(s: string | undefined): number | undefined {
+  if (s === undefined) return undefined;
+
+  const n = parseFloat(s);
+
+  return Number.isNaN(n) ? undefined : n;
+}
+
+export class NexxusRedis extends NexxusBaseService<NexxusRedisConfig, RedisEvents, NexxusRedisStats> {
   private client: Redis.RedisClientType | Redis.RedisClusterType | null = null;
 
   protected static loggerLabel: Readonly<string> = 'NxxRedis';
@@ -85,15 +145,54 @@ export class NexxusRedis extends NexxusBaseService<NexxusRedisConfig> {
       }) as unknown as Redis.RedisClientType;
     }
 
-    await this.client.connect();
+    this.client.on('end', () => {
+      NexxusRedis.logger.info('Redis connection closed', NexxusRedis.loggerLabel);
+      this.emit('disconnect');
+    }).on('error', (err) => {
+      NexxusRedis.logger.error(`Redis connection error: ${err.message}`, NexxusRedis.loggerLabel);
+      this.emit('error', err);
+      this.emit('disconnect');
+    }).on('ready', () => {
+      NexxusRedis.logger.info('Connected to redis', NexxusRedis.loggerLabel);
+      this.emit('connect');
+    });
 
-    NexxusRedis.logger.info('Connected to redis', NexxusRedis.loggerLabel);
+    await this.client.connect();
   }
 
   async close(): Promise<void> {
     if (this.client) {
       await this.client.close();
-      NexxusRedis.logger.info('Disconnected', NexxusRedis.loggerLabel);
+    }
+  }
+
+  /**
+   * Uses Redis's `INFO` command (returns a multi-section text blob) plus
+   * `DBSIZE` for the key count. Two RTTs, both cheap. Parses out just the
+   * fields observability tooling actually wants — everything else in INFO
+   * is dropped to keep the payload compact and stable.
+   */
+  async getStats(): Promise<NexxusRedisStats> {
+    if (!this.client) {
+      return { id: 'unknown', connected: false };
+    }
+
+    try {
+      const info = await this.client.info();
+      const totalKeys = await this.client.dbSize();
+      const parsed = parseRedisInfo(typeof info === 'string' ? info : String(info));
+
+      return {
+        id: parsed.run_id ?? 'unknown',
+        connected: true,
+        memoryUsedBytes: parseIntOrUndefined(parsed.used_memory),
+        connectedClients: parseIntOrUndefined(parsed.connected_clients),
+        totalKeys: Number(totalKeys),
+        usedCpuSys: parseFloatOrUndefined(parsed.used_cpu_sys),
+        usedCpuUser: parseFloatOrUndefined(parsed.used_cpu_user),
+      };
+    } catch {
+      return { id: 'unknown', connected: false };
     }
   }
 }
