@@ -1,15 +1,4 @@
 import {
-  NexxusVolatileTransportWorker,
-  NexxusVolatileTransportWorkerConfig
-} from "./VolatileTransportWorker";
-import { NexxusBaseWorkerEvents, NexxusWorkerServices } from "../BaseWorker";
-import { NexxusWsClient } from './ws/Client';
-import {
-  NexxusWsInternalServerException,
-  NexxusWsInvalidParametersException
-} from './ws/Exceptions';
-
-import {
   ConfigCliArgs,
   ConfigEnvVars,
   NexxusQueueName,
@@ -17,11 +6,23 @@ import {
 } from '@mayhem93/nexxus-core-lib';
 import { RedisDeviceInvalidParamsException } from '@mayhem93/nexxus-redis';
 
-import * as path from "node:path";
+import {
+  NexxusVolatileTransportWorker,
+  NexxusVolatileTransportWorkerConfig,
+  NexxusVolatileTransportWorkerStats
+} from './VolatileTransportWorker';
+import { NexxusBaseWorkerEvents, NexxusBaseWorkerStats, NexxusWorkerServices } from '../BaseWorker';
+import { NexxusWsClient } from './ws/Client';
+import {
+  NexxusWsInternalServerException,
+  NexxusWsInvalidParametersException
+} from './ws/Exceptions';
 
-import { WebSocketServer, type WebSocket } from "ws";
+import { WebSocketServer, type WebSocket } from 'ws';
 
-export type NexxusWebsocketsTransportWorkerConfig = NexxusVolatileTransportWorkerConfig & {
+import * as path from 'node:path';
+
+type NexxusWebsocketsTransportWorkerConfig = NexxusVolatileTransportWorkerConfig & {
   name: string;
   port: number;
   /** Class name of the logger service (see `NexxusApiConfig.logger`). */
@@ -36,15 +37,23 @@ type NexxusWebsocketsTransportWorkerEvents = NexxusBaseWorkerEvents & {
   message: [string];
 }
 
+type NexxusWebsocketsTransportWorkerStats = NexxusVolatileTransportWorkerStats & {
+  unregisteredClients: number;
+  registeredClients: number;
+  totalConnections: number;
+}
+
 export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWorker<
   NexxusWebsocketsTransportWorkerConfig,
-  NexxusWebsocketsTransportWorkerEvents
+  NexxusWebsocketsTransportWorkerEvents,
+  NexxusWebsocketsTransportWorkerStats
 > {
-  protected queueName : NexxusQueueName = "websockets-transport";
-  protected static loggerLabel: Readonly<string> = "NxxWebsocketsTransportWorker";
+  protected nodeRole: string = 'websockets-transport';
+  protected queueName : NexxusQueueName = 'websockets-transport';
+  protected static loggerLabel: Readonly<string> = 'NxxWebsocketsTransportWorker';
   protected static cliArgs: ConfigCliArgs = [];
   protected static envVars: ConfigEnvVars = [];
-  protected static schemaPath: string = path.join(__dirname, "../../../src/schemas/websockets-transport-worker.schema.json");
+  protected static schemaPath: string = path.join(__dirname, '../../../src/schemas/websockets-transport-worker.schema.json');
 
   private server! : WebSocketServer;
   private unregisteredClients: Set<NexxusWsClient> = new Set();
@@ -199,5 +208,31 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
         NexxusWebsocketsTransportWorker.logger.error('Unexpected error on client disconnect', { error: e }, NexxusWebsocketsTransportWorker.loggerLabel);
       }
     }
+  }
+
+  public async close(): Promise<void> {
+    super.close();
+
+    if (this.server) {
+      await new Promise<void>((resolve, reject) => {
+        this.server.close(err => {
+          if (err) {
+            reject(err);
+          } else {
+            resolve();
+          }
+        });
+      });
+
+      NexxusWebsocketsTransportWorker.logger.info('WebSocket server closed', NexxusWebsocketsTransportWorker.loggerLabel);
+    }
+  }
+
+  protected async getOwnStats(): Promise<Omit<NexxusWebsocketsTransportWorkerStats, keyof NexxusBaseWorkerStats>> {
+    return Promise.resolve({
+      unregisteredClients: this.unregisteredClients.size,
+      registeredClients: this.registeredClients.size,
+      totalConnections: this.wsToNexxusClientMap.size
+    });
   }
 }

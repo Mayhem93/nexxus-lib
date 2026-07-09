@@ -1,7 +1,6 @@
 import {
   ConfigCliArgs,
   ConfigEnvVars,
-  NexxusConfig,
   NexxusQueueName,
   NexxusWriterPayload,
   NexxusAppModel,
@@ -14,12 +13,14 @@ import { NexxusQueueMessage } from '@mayhem93/nexxus-message-queue-lib';
 import {
   NexxusBaseWorker,
   NexxusBaseWorkerEvents,
+  NexxusBaseWorkerConfig,
+  NexxusBaseWorkerStats,
   NexxusWorkerServices
-} from "./BaseWorker";
+} from './BaseWorker';
 
 import * as path from "node:path";
 
-export type NexxusWriterWorkerConfig = NexxusConfig & {
+export type NexxusWriterWorkerConfig = NexxusBaseWorkerConfig & {
   name: string;
   /** Class name of the logger service (see `NexxusApiConfig.logger`). */
   logger: string;
@@ -33,8 +34,16 @@ type NexxusWriterWorkerEvents = NexxusBaseWorkerEvents & {
   message: [string];
 };
 
-export class NexxusWriterWorker extends NexxusBaseWorker<NexxusWriterWorkerConfig, NexxusWriterWorkerEvents, NexxusWriterPayload> {
-  protected queueName : NexxusQueueName = 'writer';
+type NexxusWriterWorkerStats = NexxusBaseWorkerStats & {}
+
+export class NexxusWriterWorker extends NexxusBaseWorker<
+  NexxusWriterWorkerConfig,
+  NexxusWriterWorkerEvents,
+  NexxusWriterPayload,
+  NexxusWriterWorkerStats
+> {
+  protected nodeRole: string = 'writer';
+  protected queueName: NexxusQueueName = 'writer';
   protected static loggerLabel: Readonly<string> = 'NxxWriterWorker';
   protected static cliArgs: ConfigCliArgs = [];
   protected static envVars: ConfigEnvVars = [];

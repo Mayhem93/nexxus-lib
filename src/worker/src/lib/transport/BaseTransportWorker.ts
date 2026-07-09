@@ -1,20 +1,26 @@
 import {
-  NexxusBaseWorker,
-  NexxusBaseWorkerEvents,
-  NexxusWorkerServices
-} from "../BaseWorker";
-
-import {
   NexxusBaseQueuePayload,
-  NexxusConfig,
   NexxusTransportWorkerPayload
 } from '@mayhem93/nexxus-core-lib';
 import { NexxusQueueMessage } from '@mayhem93/nexxus-message-queue-lib';
 
+import {
+  NexxusBaseWorker,
+  NexxusBaseWorkerEvents,
+  NexxusBaseWorkerConfig,
+  NexxusBaseWorkerStats,
+  NexxusWorkerServices
+} from '../BaseWorker';
+
+export type NexxusBaseTransportWorkerConfig = NexxusBaseWorkerConfig & {}
+
+export type NexxusBaseTransportWorkerStats = NexxusBaseWorkerStats & {}
+
 export abstract class NexxusBaseTransportWorker<
-  T extends NexxusConfig,
+  T extends NexxusBaseTransportWorkerConfig,
   Ev extends NexxusBaseWorkerEvents = {},
-> extends NexxusBaseWorker<T, Ev, NexxusTransportWorkerPayload> {
+  S extends NexxusBaseTransportWorkerStats = NexxusBaseTransportWorkerStats
+> extends NexxusBaseWorker<T, Ev, NexxusTransportWorkerPayload, S> {
 
   protected static loggerLabel: Readonly<string> = "NxxTransport";
 

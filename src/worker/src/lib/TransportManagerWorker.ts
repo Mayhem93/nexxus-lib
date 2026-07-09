@@ -1,7 +1,6 @@
 import {
   ConfigCliArgs,
   ConfigEnvVars,
-  NexxusConfig,
   NexxusQueueName,
   NexxusTransportManagerPayload,
   NexxusModelCreatedPayload,
@@ -22,12 +21,14 @@ import {
 import {
   NexxusBaseWorker,
   NexxusBaseWorkerEvents,
+  NexxusBaseWorkerConfig,
+  NexxusBaseWorkerStats,
   NexxusWorkerServices
-} from "./BaseWorker";
+} from './BaseWorker';
 
-import * as path from "node:path";
+import * as path from 'node:path';
 
-export type NexxusTransportManagerWorkerConfig = NexxusConfig & {
+export type NexxusTransportManagerWorkerConfig = NexxusBaseWorkerConfig & {
   name: string;
   /** Class name of the logger service (see `NexxusApiConfig.logger`). */
   logger: string;
@@ -41,12 +42,20 @@ type NexxusTransportManagerWorkerEvents = NexxusBaseWorkerEvents & {
   message: [string];
 }
 
-export class NexxusTransportManagerWorker extends NexxusBaseWorker<NexxusTransportManagerWorkerConfig, NexxusTransportManagerWorkerEvents, NexxusTransportManagerPayload> {
-  protected queueName : NexxusQueueName = "transport-manager";
-  protected static loggerLabel: Readonly<string> = "NxxTransportManagerWorker";
+type NexxusTransportManagerWorkerStats = NexxusBaseWorkerStats & {}
+
+export class NexxusTransportManagerWorker extends NexxusBaseWorker<
+  NexxusTransportManagerWorkerConfig,
+  NexxusTransportManagerWorkerEvents,
+  NexxusTransportManagerPayload,
+  NexxusTransportManagerWorkerStats
+> {
+  protected nodeRole: string = 'transport-manager';
+  protected queueName: NexxusQueueName = 'transport-manager';
+  protected static loggerLabel: Readonly<string> = 'NxxTransportManagerWorker';
   protected static cliArgs: ConfigCliArgs = [];
   protected static envVars: ConfigEnvVars = [];
-  protected static schemaPath: string = path.join(__dirname, "../../src/schemas/transport-manager-worker.schema.json");
+  protected static schemaPath: string = path.join(__dirname, '../../src/schemas/transport-manager-worker.schema.json');
 
   constructor(services: NexxusWorkerServices) {
     super(services);

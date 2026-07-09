@@ -1,19 +1,25 @@
-import { NexxusBaseTransportWorker } from "./BaseTransportWorker";
-import { NexxusBaseWorkerEvents, NexxusWorkerServices } from "../BaseWorker";
-
 import { NexxusDevice } from '@mayhem93/nexxus-redis';
-import { NexxusConfig } from '@mayhem93/nexxus-core-lib';
 
-export type NexxusVolatileTransportWorkerConfig = NexxusConfig & {
-  workerId?: number;
-};
+import {
+  NexxusBaseTransportWorker,
+  NexxusBaseTransportWorkerConfig,
+  NexxusBaseTransportWorkerStats
+} from './BaseTransportWorker';
+import {
+  NexxusBaseWorkerEvents,
+  NexxusWorkerServices
+} from '../BaseWorker';
 
+export type NexxusVolatileTransportWorkerConfig = NexxusBaseTransportWorkerConfig & {};
+
+export type NexxusVolatileTransportWorkerStats = NexxusBaseTransportWorkerStats & {};
 export abstract class NexxusVolatileTransportWorker<
   T extends NexxusVolatileTransportWorkerConfig,
   Ev extends NexxusBaseWorkerEvents = {},
-> extends NexxusBaseTransportWorker<T, Ev> {
+  S extends NexxusVolatileTransportWorkerStats = NexxusVolatileTransportWorkerStats
+> extends NexxusBaseTransportWorker<T, Ev, S> {
 
-  protected static loggerLabel: Readonly<string> = "NxxVolatileTransport";
+  protected static loggerLabel: Readonly<string> = 'NxxVolatileTransport';
 
   constructor(services: NexxusWorkerServices) {
     super(services);
