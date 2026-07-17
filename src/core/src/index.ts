@@ -15,9 +15,11 @@ export * from "./common/SchemaValidator";
 export * from "./models/BaseModel";
 export * from "./models/BuiltinModel";
 export * from './common/BuiltinSchemas';
+export * from './common/ModelTypes';
 export * from "./models/AppModel";
 export * from "./models/Application";
 export * from "./models/User";
+export * from "./models/Setting";
 
 export const NEXXUS_PREFIX_LC = "nxx";
 export const NEXXUS_PREFIX_UC = "NXX";

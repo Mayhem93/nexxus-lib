@@ -29,7 +29,12 @@ export type NexxusJsonPatchConstructor = {
 };
 
 export type NexxusJsonPatchMetadata = {
-  appId: string;
+  /**
+   * App scope for the patched document. Required for every model type
+   * EXCEPT `'setting'`, which is deployment-scoped (no app to belong to).
+   * Enforced at construction — see the `NexxusJsonPatch` constructor.
+   */
+  appId?: string;
   id: string;
   type: string;
   userId?: string;
@@ -177,8 +182,14 @@ export class NexxusJsonPatch {
       throw new InvalidJsonPatchException(`Patch metadata must include type`);
     }
 
-    if (!fullPatch.metadata.appId || typeof fullPatch.metadata.appId !== 'string') {
-      throw new InvalidJsonPatchException(`Patch metadata must include appId`);
+    // `setting` is the one deployment-scoped model that has no app to
+    // belong to; every other model type is per-app and MUST carry an appId.
+    // If more deployment-scoped models get added later, generalize this
+    // (e.g. by asking the model class whether it's app-scoped).
+    if (fullPatch.metadata.type !== 'setting') {
+      if (!fullPatch.metadata.appId || typeof fullPatch.metadata.appId !== 'string') {
+        throw new InvalidJsonPatchException(`Patch metadata must include appId`);
+      }
     }
 
     if (!fullPatch.metadata.id || typeof fullPatch.metadata.id !== 'string') {
@@ -204,8 +215,14 @@ export class NexxusJsonPatch {
     const partialModel: Partial<INexxusAppModel> = {
       id: this.fullPatch.metadata.id,
       type: this.fullPatch.metadata.type,
-      appId: this.fullPatch.metadata.appId
     };
+
+    // Only per-app models carry appId; deployment-scoped models (currently
+    // `setting`) leave it undefined and the DB adapter routes to a global
+    // index rather than the per-app one.
+    if (this.fullPatch.metadata.appId) {
+      partialModel.appId = this.fullPatch.metadata.appId;
+    }
 
     for (let i = 0; i < this.fullPatch.path.length; i++) {
       const path = this.fullPatch.path[i];
