@@ -10,14 +10,14 @@ import * as path from 'node:path';
 export type LogAttributes = Record<string, unknown>;
 
 export const enum NexxusLoggerLevels {
-  EMERGENCY = "emerg",
-  ALERT = "alert",
-  CRITICAL = "crit",
-  ERROR = "error",
-  WARNING = "warning",
-  NOTICE = "notice",
-  INFO = "info",
-  DEBUG = "debug"
+  EMERGENCY = 'emerg',
+  ALERT = 'alert',
+  CRITICAL = 'crit',
+  ERROR = 'error',
+  WARNING = 'warning',
+  NOTICE = 'notice',
+  INFO = 'info',
+  DEBUG = 'debug'
 }
 
 export type StdoutTransportConfig = { type: 'stdout' };
@@ -48,7 +48,7 @@ export type WinstonNexxusTransportConfig =
 
 type WinstonNexxusLoggerConfig = {
   level: NexxusLoggerLevels;
-  logType: "json" | "text";
+  logType: 'json' | 'text';
   timestamps: boolean;
   colors: boolean;
   transports?: Array<WinstonNexxusTransportConfig>;
@@ -69,7 +69,7 @@ export abstract class NexxusBaseLogger<
   TStats = Record<string, unknown>
 > extends NexxusBaseService<T, {}, TStats> implements INexxusLogger {
 
-  protected static configRootKey: string = "logger";
+  protected static configRootKey: string = 'logger';
 
   constructor(services: NexxusLoggerServices) {
     super(services.configManager.getConfig('logger') as T);
@@ -178,10 +178,11 @@ export type WinstonNexxusLoggerStats = Pick<WinstonNexxusLoggerConfig, 'level' |
 
 export class WinstonNexxusLogger extends NexxusBaseLogger<WinstonNexxusLoggerConfig, WinstonNexxusLoggerStats> {
   private winston : Winston.Logger;
-  protected static schemaPath: string = path.join(__dirname, "../../src/schemas/winston-logger.schema.json");
+  protected static schemaPath: string = path.join(__dirname, '../../src/schemas/winston-logger.schema.json');
   protected static envVars: ConfigEnvVars = [
-    { name: "LOG_LEVEL", location: "level" }
+    { name: 'LOG_LEVEL', location: 'level' }
   ];
+
   protected static cliArgs: ConfigCliArgs = [];
 
   /**
@@ -194,7 +195,7 @@ export class WinstonNexxusLogger extends NexxusBaseLogger<WinstonNexxusLoggerCon
 
     let format: Winston.Logform.Format;
 
-    if (this.config.logType === "json") {
+    if (this.config.logType === 'json') {
       format = Winston.format.printf(info => {
         const record: Record<string, unknown> = {};
 
@@ -203,7 +204,7 @@ export class WinstonNexxusLogger extends NexxusBaseLogger<WinstonNexxusLoggerCon
         }
 
         record.level = info.level;
-        record.label = (info.label as string | undefined) ?? "default-label";
+        record.label = (info.label as string | undefined) ?? 'default-label';
         record.msg = info.message;
 
         const attrs = info.attrs as LogAttributes | undefined;
@@ -223,7 +224,7 @@ export class WinstonNexxusLogger extends NexxusBaseLogger<WinstonNexxusLoggerCon
       }
     } else {
       format = Winston.format.printf(info => {
-        const label = (info.label as string | undefined) ?? "default-label";
+        const label = (info.label as string | undefined) ?? 'default-label';
         const timestampPrefix = info.timestamp ? `[${info.timestamp}] ` : '';
         const header = `${timestampPrefix}${info.level.toLocaleUpperCase()} [${label}]: ${info.message}`;
 

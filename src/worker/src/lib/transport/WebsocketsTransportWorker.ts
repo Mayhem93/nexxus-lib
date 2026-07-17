@@ -104,6 +104,9 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
     const client = this.registeredClients.get(deviceId);
 
     if (!client) {
+      // this happens when a device disconnects from transport while
+      // the worker is still processing a message for it. In this case,
+      // we just log and ignore the message.
       NexxusWebsocketsTransportWorker.logger.info(
         `No registered client found for device ID: "${deviceId}"`,
         { deviceId },

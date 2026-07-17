@@ -1,16 +1,12 @@
 /**
- * HTTP client for the Nexxus Hub node-registry endpoints, plus the small
- * helpers a node needs to build its registration payload. Kept as
- * exported functions rather than a class — statelessness fits the
- * two-shot register/unregister lifecycle, and holding a class here would
- * imply state (a client instance) that isn't actually needed.
+ * HTTP client for the Nexxus Hub node-registry endpoints. Class-based so
+ * each service (API, BaseWorker, adapters that grow Hub-awareness later)
+ * carries its own config and retry-loop state.
  *
- * Callers should treat register/unregister as best-effort and continue on
- * failure: Hub is a soft dependency, a Hub outage must not block node
- * startup or crash a node during shutdown.
- *
- * Uses Node's global `fetch`. No retries in v1 — a Hub restart wipes the
- * registry anyway, and nodes only re-register on their own next boot.
+ * Hub is treated as a soft dependency: register / list operations retry
+ * transparently until Hub is reachable. `unregisterNode` deliberately does
+ * NOT retry — a lingering retry timer at shutdown would keep the process
+ * alive, breaking graceful exit.
  *
  * Wire contract lives in `nexxus-hub-api/src/lib/routes/Node.ts`.
  */
@@ -18,10 +14,12 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { readFileSync } from 'node:fs';
 
+import { NexxusBaseLogger } from './Logger';
+
 /**
  * Where Hub lives and the shared secret it expects.
  */
-export type HubClientConfig = {
+export type NexxusHubClientConfig = {
   /** Hub base URL, e.g. `http://hub.internal:8080`. Trailing slashes are trimmed. */
   endpoint: string;
   /** Shared secret sent in the `Nxx-Hub-Token` header on every request. */
@@ -29,15 +27,17 @@ export type HubClientConfig = {
 };
 
 /**
- * Payload for `POST /node`. Field names match Hub's route contract verbatim.
+ * A node in Hub's registry. Sent as-is on `POST /node`; returned as-is
+ * from `GET /node`. Field names match Hub's route contract verbatim.
+ *
  * Note: the id key is `id`, NOT `nodeId` — Hub destructures `id` off the body.
  */
-export type NodeRegistration = {
+export type NexxusHubNode = {
   /** Fresh uuid v4 minted per node boot; hold locally so `unregisterNode()` can reference it. */
   id: string;
-  /** Node role: `'api' | 'writer' | ...` — free-form string, no server-side enum. */
+  /** Node role: `'api' | 'writer' | 'websockets-transport' | ...` — free-form string, no server-side enum. */
   role: string;
-  /** Node's private-network IPv4, discovered by the caller (`discoverPrivateIpAddress` or override). */
+  /** Node's private-network IPv4, discovered via `discoverPrivateIpAddress` or overridden. */
   privateIpAddress: string;
   /** Management port for the node. */
   managementPort: number;
@@ -45,10 +45,13 @@ export type NodeRegistration = {
   dependencies: Record<string, string>;
   /** `getStats()` snapshot at registration time — Hub does not refresh this after boot. */
   stats: Record<string, unknown>;
+  /**
+   * Slot number for volatile-transport nodes (websockets-transport,
+   * mqtt-transport, …). Undefined for non-volatile roles (api, writer, …)
+   * that don't participate in slot pools.
+   */
+  slot?: number;
 };
-
-const HUB_TOKEN_HEADER = 'Nxx-Hub-Token';
-const HUB_REQUEST_TIMEOUT_MS = 1000;
 
 /**
  * The set of `@mayhem93/nexxus-*` packages a node scans for in its
@@ -65,207 +68,299 @@ export const NEXXUS_DEPENDENCY_NAMES = [
   '@mayhem93/nexxus-worker-lib',
 ] as const;
 
-/**
- * Trim trailing slashes so `${base}/node` doesn't produce a double slash.
- * The base URL should carry no path; if callers pass one, that's their
- * problem to notice via the resulting 404.
- */
-function normalizeBase(endpoint: string): string {
-  return endpoint.replace(/\/+$/, '');
-}
-
-/**
- * Register this node with Hub. Called once during `init()` after all local
- * services are up. Throws on network failure, non-2xx response, or timeout —
- * callers should catch and log, then continue (Hub is a soft dependency).
- */
-export async function registerNode(cfg: HubClientConfig, payload: NodeRegistration): Promise<void> {
-  const res = await fetch(`${normalizeBase(cfg.endpoint)}/node`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      [HUB_TOKEN_HEADER]: cfg.token,
-    },
-    body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(HUB_REQUEST_TIMEOUT_MS),
-  });
-
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-
-    throw new Error(`Hub registerNode failed: ${res.status} ${res.statusText}${body ? ` — ${body}` : ''}`);
-  }
-}
-
-/**
- * De-register this node with Hub. Called during graceful shutdown, before
- * the process exits. Idempotent on Hub's side — a missing id still returns
- * 204. Same soft-dep semantics as `registerNode`: catch and continue.
- */
-export async function unregisterNode(cfg: HubClientConfig, nodeId: string): Promise<void> {
-  const res = await fetch(`${normalizeBase(cfg.endpoint)}/node/${encodeURIComponent(nodeId)}`, {
-    method: 'DELETE',
-    headers: {
-      [HUB_TOKEN_HEADER]: cfg.token,
-    },
-    signal: AbortSignal.timeout(HUB_REQUEST_TIMEOUT_MS),
-  });
-
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-
-    throw new Error(`Hub unregisterNode failed: ${res.status} ${res.statusText}${body ? ` — ${body}` : ''}`);
-  }
-}
-
-/**
- * Read installed `@mayhem93/nexxus-*` versions from the running app's
- * `node_modules` for the Hub registration payload. Anchored on
- * `process.cwd()` so it resolves against the runnable's install tree, not
- * this library's — same convention as `ServiceResolver`.
- *
- * Packages that aren't installed are omitted (no error). This is what lets
- * a worker process register without needing the API package installed just
- * so this call succeeds.
- */
-export function readNexxusDependencies(): Record<string, string> {
-  const deps: Record<string, string> = {};
-
-  for (const name of NEXXUS_DEPENDENCY_NAMES) {
-    try {
-      const pkgJsonPath = path.join(process.cwd(), 'node_modules', name, 'package.json');
-      const parsed = JSON.parse(readFileSync(pkgJsonPath, 'utf8'));
-
-      if (typeof parsed.version === 'string') {
-        deps[name] = parsed.version;
-      }
-    } catch {
-      // Not installed — skip silently.
-    }
-  }
-
-  return deps;
-}
-
-/**
- * Pick the first non-internal IPv4 address from the machine's network
- * interfaces. Right for most container / VM / single-NIC-host cases; if
- * you have multiple NICs and need a specific one, callers should read a
- * config override and pass that string instead.
- *
- * Throws if no non-internal IPv4 is found — a node with only 127.0.0.1
- * has nothing useful to report to Hub anyway.
- */
-export function discoverPrivateIpAddress(): string {
-  const interfaces = os.networkInterfaces();
-
-  for (const nets of Object.values(interfaces)) {
-    for (const net of nets ?? []) {
-      if (net.family === 'IPv4' && !net.internal) {
-        return net.address;
-      }
-    }
-  }
-
-  throw new Error('discoverPrivateIpAddress: no non-internal IPv4 address found on any network interface');
-}
-
-/**
- * Handle returned by `registerNodeWithRetry`, controlling the retry loop's
- * lifetime. Callers hold onto this and call `stop()` during shutdown so the
- * interval clears and no register attempts fire after `close()`.
- */
-export type HubRegistrationHandle = {
+export class NexxusHubClient {
+  private static readonly HUB_TOKEN_HEADER = 'Nxx-Hub-Token';
+  private static readonly REQUEST_TIMEOUT_MS = 1000;
+  private static readonly RETRY_INTERVAL_MS = 30_000;
   /**
-   * Cancel the retry loop. Idempotent — safe to call whether registration
-   * has succeeded, is still retrying, or was never started. After this
-   * call, no further register attempts fire and no callbacks are invoked.
+   * How often we re-POST /node after the initial registration succeeds.
+   * Hub's registry is in-memory (v1) so a Hub restart wipes it — periodic
+   * re-register recreates the entry within one tick.
    */
-  stop(): void;
-};
+  private static readonly REREGISTER_INTERVAL_MS = 30_000;
+  private static readonly LOGGER_LABEL = 'NxxHubClient';
 
-const DEFAULT_RETRY_INTERVAL_MS = 30_000;
+  private readonly baseUrl: string;
+  /**
+   * Set by `dispose()`. Checked at the top of every `retryUntilSuccess`
+   * iteration AND before every re-register tick, so both loops bail out
+   * cleanly on shutdown.
+   */
+  private disposed: boolean = false;
+  /**
+   * Timer for the periodic re-register loop. Non-null only between the
+   * first successful register and `dispose()`. `.unref()` on it so it
+   * never keeps the process alive on its own.
+   */
+  private reregisterTimer: NodeJS.Timeout | null = null;
 
-/**
- * Kick off a background retry loop that keeps calling `registerNode` until
- * it succeeds or `stop()` is called on the returned handle. Since Hub is a
- * soft dependency and nodes never re-register spontaneously, the loop
- * runs from boot until first success only — a Hub outage present at boot
- * doesn't strand the node forever.
- *
- * `buildPayload` is a function (not a value) so each attempt can capture a
- * fresh `getStats()` snapshot and can also retry IP / dependency discovery
- * in case any of those weren't available at the moment of the first try
- * (network not fully up yet in a container, etc.). Payload `id` should be
- * stable across attempts so Hub upserts idempotently on any partial
- * success.
- *
- * Failures go to `onError` and never throw — the loop keeps running. The
- * first success fires `onSuccess` exactly once and the loop stops on its
- * own.
- */
-export function registerNodeWithRetry(
-  cfg: HubClientConfig,
-  buildPayload: () => Promise<NodeRegistration>,
-  opts: {
-    retryIntervalMs?: number;
-    onSuccess?: (nodeId: string) => void;
-    onError?: (err: Error) => void;
-  } = {}
-): HubRegistrationHandle {
-  const retryIntervalMs = opts.retryIntervalMs ?? DEFAULT_RETRY_INTERVAL_MS;
-  let timer: ReturnType<typeof setInterval> | null = null;
-  let stopped = false;
-  let succeeded = false;
-  let inflight = false;
+  constructor(
+    private readonly config: NexxusHubClientConfig,
+    private readonly logger: NexxusBaseLogger<any>,
+  ) {
+    this.baseUrl = config.endpoint.replace(/\/+$/, '');
+  }
 
-  const attempt = async (): Promise<void> => {
-    if (stopped || succeeded || inflight) {
-      return;
-    }
-    inflight = true;
-
-    try {
+  /**
+   * Register this node with Hub. Retries transparently until Hub accepts
+   * the payload or `dispose()` is called. Since retry is invisible,
+   * callers can either `await` (block until Hub is up) or fire-and-forget
+   * (`void hubClient.registerNode(...)`) depending on whether they need
+   * Hub connectivity before proceeding.
+   *
+   * `buildPayload` is a function (not a value) so each attempt captures a
+   * fresh `getStats()` snapshot and re-runs IP / dependency discovery in
+   * case those weren't available at the first try (network not fully up
+   * yet in a container, etc.). The `id` field should be stable across
+   * attempts so Hub upserts idempotently on any partial success.
+   */
+  public async registerNode(buildPayload: () => Promise<NexxusHubNode>): Promise<NexxusHubNode> {
+    const first = await this.retryUntilSuccess(async () => {
       const payload = await buildPayload();
 
-      await registerNode(cfg, payload);
+      await this.doJson('POST', '/node', payload);
 
-      if (stopped) {
+      return payload;
+    }, 'registerNode');
+
+    // After first success, keep the entry alive across Hub restarts by
+    // re-POSTing on an interval. Idempotent upsert (Hub keys on `id`), so
+    // a running Hub sees no-op-shaped writes; a restarted Hub picks the
+    // node back up within one tick.
+    this.startReregisterLoop(buildPayload);
+
+    return first;
+  }
+
+  /**
+   * List nodes currently registered under the given role. Retries — the
+   * volatile-transport worker startup path relies on this to pick a slot,
+   * and can't proceed without an answer.
+   *
+   * The `slot` field on returned records is undefined for nodes that
+   * don't have one (i.e. non-volatile roles).
+   */
+  public listNodesByRole(role: string): Promise<NexxusHubNode[]> {
+    return this.retryUntilSuccess(
+      () => this.doJson<NexxusHubNode[]>('GET', `/node?role=${encodeURIComponent(role)}`),
+      'listNodesByRole',
+    );
+  }
+
+  /**
+   * De-register this node from Hub. Does NOT retry — a lingering retry
+   * timer here would prevent the process from exiting cleanly during
+   * shutdown. Throws on failure; callers should catch-and-continue, since
+   * Hub-registry drift heals on the next Hub restart anyway.
+   */
+  public async unregisterNode(nodeId: string): Promise<void> {
+    await this.doJson('DELETE', `/node/${encodeURIComponent(nodeId)}`);
+  }
+
+  /**
+   * Cancel any in-flight retry loops. Call during graceful shutdown so
+   * no `retryUntilSuccess` await gets stuck if the process is otherwise
+   * still running.
+   *
+   * `setTimeout(...).unref()` on our sleep timers already prevents them
+   * from keeping the process alive on their own — `dispose()` is for the
+   * explicit early-cancel case, not for basic process-exit hygiene.
+   */
+  public dispose(): void {
+    this.disposed = true;
+
+    if (this.reregisterTimer) {
+      clearInterval(this.reregisterTimer);
+      this.reregisterTimer = null;
+    }
+  }
+
+  /**
+   * Kick off the re-register interval. Failures in a tick log at `warn`
+   * and wait for the next tick — no fast retry inside the tick, because
+   * the interval already IS the retry cadence.
+   *
+   * Guarded against overlap: if a tick's payload build + POST hasn't
+   * finished by the time the next tick fires, we skip that tick rather
+   * than pile up concurrent registers.
+   */
+  private startReregisterLoop(buildPayload: () => Promise<NexxusHubNode>): void {
+    if (this.reregisterTimer || this.disposed) {
+      return;
+    }
+
+    let tickInFlight = false;
+    // Tracks whether the previous tick failed. When a tick succeeds after
+    // one or more failures, we log an info-level "recovered" message so
+    // operators see the recovery event in node logs — otherwise successful
+    // ticks are silent (they're the expected steady state and would be
+    // pure spam every REREGISTER_INTERVAL_MS).
+    let previousTickFailed = false;
+
+    const tick = async (): Promise<void> => {
+      if (this.disposed || tickInFlight) {
         return;
       }
-      succeeded = true;
 
-      if (timer !== null) {
-        clearInterval(timer);
-        timer = null;
+      tickInFlight = true;
+
+      try {
+        const payload = await buildPayload();
+
+        if (this.disposed) {
+          return;
+        }
+
+        await this.doJson('POST', '/node', payload);
+
+        if (previousTickFailed) {
+          this.logger.info(
+            `Hub re-register recovered — connection to Hub re-established`,
+            NexxusHubClient.LOGGER_LABEL,
+          );
+          previousTickFailed = false;
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+
+        this.logger.warn(
+          `Hub re-register failed (waiting ${NexxusHubClient.REREGISTER_INTERVAL_MS}ms for next tick): ${msg}`,
+          NexxusHubClient.LOGGER_LABEL,
+        );
+        previousTickFailed = true;
+      } finally {
+        tickInFlight = false;
       }
-      opts.onSuccess?.(payload.id);
-    } catch (err) {
-      opts.onError?.(err instanceof Error ? err : new Error(String(err)));
-    } finally {
-      inflight = false;
+    };
+
+    this.reregisterTimer = setInterval(() => { void tick(); }, NexxusHubClient.REREGISTER_INTERVAL_MS);
+    this.reregisterTimer.unref();
+  }
+
+  /**
+   * Read installed `@mayhem93/nexxus-*` versions from the running app's
+   * `node_modules` for the Hub registration payload. Anchored on
+   * `process.cwd()` so it resolves against the runnable's install tree,
+   * not this library's — same convention as `ServiceResolver`.
+   *
+   * Packages that aren't installed are omitted (no error). This lets a
+   * worker process register without needing the API package installed
+   * just so this call succeeds.
+   */
+  public static readNexxusDependencies(): Record<string, string> {
+    const deps: Record<string, string> = {};
+
+    for (const name of NEXXUS_DEPENDENCY_NAMES) {
+      try {
+        const pkgJsonPath = path.join(process.cwd(), 'node_modules', name, 'package.json');
+        const parsed = JSON.parse(readFileSync(pkgJsonPath, 'utf8'));
+
+        if (typeof parsed.version === 'string') {
+          deps[name] = parsed.version;
+        }
+      } catch {
+        // Not installed — skip silently.
+      }
     }
-  };
 
-  // Fire the first attempt immediately so a successful startup doesn't
-  // wait out the interval before appearing in Hub.
-  void attempt();
+    return deps;
+  }
 
-  // Subsequent attempts on the interval. `unref` so the timer alone
-  // doesn't keep the process alive if everything else has shut down.
-  timer = setInterval(() => {
-    void attempt();
-  }, retryIntervalMs);
-  timer.unref();
+  /**
+   * Pick the first non-internal IPv4 address from the machine's network
+   * interfaces. Right for most container / VM / single-NIC-host cases; if
+   * you have multiple NICs and need a specific one, callers should read a
+   * config override and pass that string instead.
+   *
+   * Throws if no non-internal IPv4 is found — a node with only 127.0.0.1
+   * has nothing useful to report to Hub anyway.
+   */
+  public static discoverPrivateIpAddress(): string {
+    const interfaces = os.networkInterfaces();
 
-  return {
-    stop(): void {
-      stopped = true;
-
-      if (timer !== null) {
-        clearInterval(timer);
-        timer = null;
+    for (const nets of Object.values(interfaces)) {
+      for (const net of nets ?? []) {
+        if (net.family === 'IPv4' && !net.internal) {
+          return net.address;
+        }
       }
-    },
-  };
+    }
+
+    throw new Error('discoverPrivateIpAddress: no non-internal IPv4 address found on any network interface');
+  }
+
+  private async retryUntilSuccess<T>(op: () => Promise<T>, opName: string): Promise<T> {
+    while (true) {
+      if (this.disposed) {
+        throw new Error(`NexxusHubClient disposed while ${opName} was retrying`);
+      }
+
+      try {
+        return await op();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+
+        this.logger.warn(
+          `Hub ${opName} failed, retrying in ${NexxusHubClient.RETRY_INTERVAL_MS}ms: ${msg}`,
+          NexxusHubClient.LOGGER_LABEL,
+        );
+
+        await this.unrefSleep(NexxusHubClient.RETRY_INTERVAL_MS);
+      }
+    }
+  }
+
+  private unrefSleep(ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      const t = setTimeout(resolve, ms);
+
+      // Key bit — this timer never keeps the process alive on its own. If
+      // everything else has shut down while we're mid-sleep, the process
+      // exits cleanly and this promise never resolves (which is fine —
+      // the awaiter is going down with the process).
+      t.unref();
+    });
+  }
+
+  /**
+   * Shared fetch wrapper. All Hub calls: optional JSON body in, JSON body
+   * out (or empty), `Nxx-Hub-Token` auth header, per-request timeout.
+   * Non-2xx throws with Hub's error text so callers see the reason.
+   */
+  private async doJson<TResponse = void>(
+    method: 'GET' | 'POST' | 'DELETE',
+    requestPath: string,
+    body?: unknown,
+  ): Promise<TResponse> {
+    const res = await fetch(`${this.baseUrl}${requestPath}`, {
+      method,
+      headers: {
+        [NexxusHubClient.HUB_TOKEN_HEADER]: this.config.token,
+        ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+      },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(NexxusHubClient.REQUEST_TIMEOUT_MS),
+    });
+
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '');
+
+      throw new Error(
+        `Hub ${method} ${requestPath} failed: ${res.status} ${res.statusText}${detail ? ` — ${detail}` : ''}`,
+      );
+    }
+
+    // 204 / empty body: nothing to parse.
+    if (res.status === 204 || res.headers.get('content-length') === '0') {
+      return undefined as TResponse;
+    }
+
+    // Best-effort JSON parse. If Hub returns non-JSON on a 2xx (shouldn't,
+    // but defensive), treat it as an empty response rather than throwing.
+    try {
+      return (await res.json()) as TResponse;
+    } catch {
+      return undefined as TResponse;
+    }
+  }
 }

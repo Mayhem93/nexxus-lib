@@ -155,7 +155,7 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<
 
   private async handleModelUpdated(data: NexxusTransportManagerModelUpdatedPayload['data']): Promise<void> {
     const channel = {
-      appId: data[0].metadata.appId,
+      appId: data[0].metadata.appId!,
       userId: data[0].metadata.userId,
       model: data[0].metadata.type,
       modelId: data[0].metadata.id

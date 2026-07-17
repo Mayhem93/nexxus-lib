@@ -62,11 +62,21 @@ export const NEXXUS_BUILTIN_MODEL_SCHEMAS = {
     auth: {
       type: 'object', required: false, nullable: true,
       properties: {
-        jwtSecret:    { type: 'string', required: true },
-        jwtExpiresIn: { type: 'string', required: false },
-        strategies:   { type: 'object', required: true, properties: {} },
+        jwtSecret:        { type: 'string', required: true },
+        jwtExpiresIn:     { type: 'string', required: false },
+        strategies:       { type: 'object', required: true,  properties: {} },
+        userTypes:        { type: 'object', required: false, properties: {} },
+        userDetailSchema: { type: 'object', required: false, properties: {} },
       },
     },
+  },
+  /**
+   * Deployment-scoped setting. One document per setting; the document `id`
+   * is the setting name, and `value` is always a JSON-encoded string
+   * (see `NexxusSetting`). Not filterable — settings are looked up by id.
+   */
+  setting: {
+    value: { type: 'string', required: true },
   }
 } as const satisfies Record<string, NexxusModelDef>;
 

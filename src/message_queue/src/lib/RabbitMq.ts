@@ -5,7 +5,6 @@ import {
   INexxusBaseServices,
   NexxusQueueName,
   NexxusQueuePayload,
-  FatalErrorException,
 } from '@mayhem93/nexxus-core-lib';
 import {
   NexxusMessageQueueAdapter,
@@ -13,6 +12,10 @@ import {
   NexxusMessageQueueAdapterStats,
   NexxusQueueMessage
 } from './MessageQueueAdapter';
+import {
+  NexxusRabbitMqBootstrapper,
+  NexxusRabbitMqBootstrapOptions,
+} from './RabbitMqBootstrapper';
 
 import * as amqplib from 'amqplib';
 
@@ -23,8 +26,7 @@ type RabbitMQConfig = {
   port: number;
   user: string;
   password: string;
-  exclusive: boolean;
-  worker_name: string;
+  managementPort: number;
 } & NexxusConfig;
 
 export type RabbitMqMetadata = {
@@ -68,53 +70,74 @@ export class NexxusRabbitMq extends NexxusMessageQueueAdapter<RabbitMQConfig, Ne
     super(services);
   }
 
-  async connect(): Promise<void> {
-    try {
-      this.connection = await amqplib.connect({
-        protocol: 'amqp',
-        hostname: this.config.host,
-        port: this.config.port,
-        username: this.config.user,
-        password: this.config.password,
-        vhost: '/nexxus',
-        heartbeat: 10
-      });
-    } catch (err) {
-      if (err.name === 'AggregateError') {
-        throw new FatalErrorException(`Failed to connect to RabbitMQ server: ${(err as Error).message}`);
-      }
+  public getBootstrapper(options: NexxusRabbitMqBootstrapOptions): NexxusRabbitMqBootstrapper {
+    // No connect() prerequisite — the bootstrapper runs entirely over the
+    // management HTTP API. That's the point: it's what creates the vhost
+    // this adapter's AMQP layer will later connect to.
+    return new NexxusRabbitMqBootstrapper(options, this.config);
+  }
 
-      throw err;
-    }
+  /**
+   * Open the AMQP connection + channel and wire close/error handlers back
+   * into the base's retry loop via `onConnectionLost()`. The base owns
+   * everything upstream — retry timing, resolver bookkeeping, event
+   * emission. Throwing here just re-arms the retry timer (or trips the
+   * fatal branch, via `isFatalConnectError()`).
+   */
+  protected async doConnect(): Promise<void> {
+    const connection = await amqplib.connect({
+      protocol: 'amqp',
+      hostname: this.config.host,
+      port: this.config.port,
+      username: this.config.user,
+      password: this.config.password,
+      vhost: '/nexxus',
+      heartbeat: 10
+    });
 
-    this.connection.on('error', (err) => {
+    const channel = await connection.createChannel();
+
+    connection.on('error', (err) => {
       NexxusRabbitMq.logger.error(`RabbitMQ connection error: ${err.message}`, NexxusRabbitMq.loggerLabel);
-
-      this.reConnect().catch(reconnectErr => {
-        NexxusRabbitMq.logger.error(`Failed to reconnect to RabbitMQ: ${reconnectErr.message}`, NexxusRabbitMq.loggerLabel);
-      });
+      // amqplib emits 'close' right after 'error'; the close handler owns
+      // reconnection so we don't call onConnectionLost() from here.
     });
 
-    this.channel = await this.connection.createChannel();
-
-    this.connection.on('close', () => {
-      NexxusRabbitMq.logger.info('RabbitMQ connection closed', NexxusRabbitMq.loggerLabel);
-      this.emit('disconnect');
+    connection.once('close', () => {
+      this.connection = null;
+      this.channel = null;
+      this.onConnectionLost();
     });
 
-    NexxusRabbitMq.logger.info('Connected to RabbitMQ server', NexxusRabbitMq.loggerLabel);
+    this.connection = connection;
+    this.channel = channel;
   }
 
-  async reConnect(): Promise<void> {
-    // Implementation for reconnecting to RabbitMQ
-  }
-
-  async disconnect(): Promise<void> {
-    if(this.connection) {
+  protected async doDisconnect(): Promise<void> {
+    if (this.connection) {
       await this.connection.close();
 
       this.connection = null;
+      this.channel = null;
     }
+  }
+
+  /**
+   * Which handshake errors are worth retrying and which mean "give up."
+   *
+   * RabbitMQ reports auth-refused and missing-vhost both as 403
+   * ACCESS-REFUSED, but with different trailing messages:
+   *   - "Login was refused..."   → bad creds; not going to fix itself.
+   *   - "vhost <name> refused..." → the bootstrapper will create it, retry.
+   *
+   * Match on the auth message specifically; anything else (network errors,
+   * broker-not-ready, unrecognized handshake failures) defaults to
+   * retryable — see the base's contract for `isFatalConnectError()`.
+   */
+  protected isFatalConnectError(err: unknown): boolean {
+    const msg = err instanceof Error ? err.message : String(err);
+
+    return /Login was refused/i.test(msg);
   }
 
   /**
@@ -155,15 +178,6 @@ export class NexxusRabbitMq extends NexxusMessageQueueAdapter<RabbitMQConfig, Ne
     // Implementation for publishing a message to a RabbitMQ queue
     const messageBuffer = Buffer.from(JSON.stringify(message));
 
-    // TODO: remove queue assertions when implementing a rabbitmq bootstrap process
-    /* const res = await this.channel?.assertQueue(queueName, { durable: true, arguments: { 'x-queue-type': 'quorum' } });
-
-    if (res === undefined) {
-      throw new FatalErrorException(`Failed to assert RabbitMQ queue ${queueName}`);
-    }
-
-    NxxSvcs.logger.debug(`Asserted RabbitMQ queue ${res.queue}`, NexxusRabbitMq.loggerLabel); */
-
     NexxusRabbitMq.logger.debug(`Publishing message to RabbitMQ queue ${queueName}: ${messageBuffer.toString()}`, NexxusRabbitMq.loggerLabel);
 
     const options : amqplib.Options.Publish = {
@@ -173,6 +187,101 @@ export class NexxusRabbitMq extends NexxusMessageQueueAdapter<RabbitMQConfig, Ne
     };
 
     this.channel?.sendToQueue(queueName, messageBuffer, options);
+  }
+
+  async queueExists(name: string): Promise<boolean> {
+    if (!this.connection) {
+      throw new Error('RabbitMQ connection not available — call connect() before queueExists()');
+    }
+
+    // `checkQueue` is amqplib's passive declare — it throws (and closes the
+    // channel) if the queue doesn't exist, exists on a different connection
+    // as exclusive, or hits any other broker-side error. Run it on a
+    // throwaway channel so a NOT_FOUND doesn't kill the main channel.
+    // For the volatile-transport pre-check, either kind of "we can't use it"
+    // outcome (missing vs locked) is fine — the caller only cares whether
+    // this slot is safe to grab.
+    let tempChannel: amqplib.Channel | null = null;
+
+    try {
+      tempChannel = await this.connection.createChannel();
+
+      // Absorb channel-level 'error' events. `checkQueue` on a non-existent
+      // queue triggers a channel error (404 NOT_FOUND); without a listener
+      // to catch it here, amqplib escalates the unhandled channel-emitted
+      // 'error' into a full CONNECTION teardown — which nulls out
+      // `this.channel` via our close handler, so any subsequent adapter
+      // call sees "channel not available". The no-op listener is enough:
+      // we still surface the error via the rejected `checkQueue` promise
+      // in the catch below.
+      tempChannel.on('error', () => { /* absorbed */ });
+
+      await tempChannel.checkQueue(name);
+
+      return true;
+    } catch (err) {
+      // amqplib surfaces broker channel errors with a numeric `code`:
+      //   404 NOT_FOUND        → queue doesn't exist; safe to create.
+      //   405 RESOURCE_LOCKED  → exists as exclusive on another connection.
+      // Anything else we don't recognize is treated as "not safe to grab"
+      // — over-reporting existence is the safer failure mode here (the
+      // worker will refuse to steal the slot).
+      const errCode = (err as { code?: number })?.code;
+
+      if (errCode === 404) {
+        return false;
+      }
+
+      return true;
+    } finally {
+      if (tempChannel) {
+        try { await tempChannel.close(); } catch { /* already closed on error */ }
+      }
+    }
+  }
+
+  async createVolatileQueue(name: string): Promise<void> {
+    if (!this.channel) {
+      throw new Error('RabbitMQ channel not available — call connect() before createVolatileQueue()');
+    }
+
+    // `exclusive` does double duty here:
+    //   1. Only this connection can consume from the queue — the slot
+    //      identity is tied to the owning worker.
+    //   2. Two workers racing for the same slot number both call
+    //      assertQueue — the second one gets RESOURCE_LOCKED from the
+    //      broker, which is exactly the collision-detection signal we
+    //      want. Propagates up as a thrown error.
+    // `autoDelete` + no `durable` are implied by `exclusive` in practice,
+    // but stated explicitly so the intent is readable at the call site.
+    // No `x-queue-type: quorum` — quorum queues aren't compatible with
+    // non-durable / exclusive semantics. Classic queue is right here.
+    await this.channel.assertQueue(name, {
+      durable: false,
+      autoDelete: true,
+      exclusive: true
+    });
+
+    NexxusRabbitMq.logger.info(
+      `Declared volatile queue ${name}`,
+      NexxusRabbitMq.loggerLabel,
+    );
+  }
+
+  async deleteQueue(name: string): Promise<void> {
+    if (!this.channel) {
+      throw new Error('RabbitMQ channel not available — call connect() before deleteQueue()');
+    }
+
+    // Safe if the queue has already gone (auto-delete usually beats us to it).
+    // `deleteQueue` returns { messageCount } on success; RabbitMQ swallows a
+    // NOT_FOUND at the protocol level so we don't have to translate errors.
+    await this.channel.deleteQueue(name);
+
+    NexxusRabbitMq.logger.info(
+      `Deleted queue ${name}`,
+      NexxusRabbitMq.loggerLabel,
+    );
   }
 
   async consumeMessages<Q extends NexxusQueueName>(
