@@ -88,7 +88,7 @@ export class NexxusWriterWorker extends NexxusBaseWorker<
         const validatedPatches: Array<NexxusTransportManagerJsonPatch> = [];
 
         for (const patchData of payload.data) {
-          const app = NexxusWriterWorker.loadedApps.get(patchData.metadata.appId);
+          const app = NexxusWriterWorker.loadedApps.get(patchData.metadata.appId!);
           const modelSchema = app!.getAppModelSchema(patchData.metadata.type);
           const jsonPatch = new NexxusJsonPatch(patchData);
 
