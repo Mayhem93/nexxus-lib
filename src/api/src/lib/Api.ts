@@ -17,11 +17,7 @@ import {
   WinstonNexxusLogger,
   resolveConstructableServiceClass,
   resolveFactoryServiceClass,
-  unregisterNode,
-  registerNodeWithRetry,
-  HubRegistrationHandle,
-  readNexxusDependencies,
-  discoverPrivateIpAddress
+  NexxusHubClient,
 } from '@mayhem93/nexxus-core-lib';
 import {
   NexxusDatabaseAdapter,
@@ -243,17 +239,20 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig, {}, NexxusApiS
   private managementServer: NexxusManagementServer | null = null;
   /**
    * Fresh uuid v4 minted at Hub registration time and held for the process
-   * lifetime so `close()` can send the matching de-register. Set only by
-   * the retry loop's `onSuccess` callback, so it stays `null` while the
-   * retry loop is still attempting or when `config.hub` is absent — the
-   * de-register path is a no-op in both cases.
+   * lifetime so `close()` can send the matching de-register. Set only when
+   * the register-retry promise resolves — stays `null` while retry is
+   * still attempting or when `config.hub` is absent, and the de-register
+   * path is a no-op in both cases.
    */
   private nodeId: string | null = null;
   /**
-   * Handle for the background Hub-register retry loop. Held so `close()`
-   * can stop the loop if the process shuts down before first success.
+   * Hub client instance held for this process lifetime. Constructed in
+   * `registerWithHub()`, disposed at the start of `close()` so any
+   * in-flight register retry halts, then used one more time by
+   * `unregisterFromHub()` for the DELETE (which doesn't retry, so
+   * dispose doesn't interfere).
    */
-  private hubRegistration: HubRegistrationHandle | null = null;
+  private hubClient: NexxusHubClient | null = null;
   /**
    * Registry of auth strategy CLASSES, keyed by strategy name. Populated by
    * `addAuthStrategy()` before `init()`. Per-application strategy INSTANCES
@@ -392,35 +391,35 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig, {}, NexxusApiS
       return;
     }
 
-    const hubCfg = this.config.hub;
     const pendingNodeId = randomUUID();
 
-    this.hubRegistration = registerNodeWithRetry(
-      hubCfg,
-      async () => ({
-        id: pendingNodeId,
-        role: 'api',
-        privateIpAddress: discoverPrivateIpAddress(),
-        managementPort: this.config.management.port,
-        dependencies: readNexxusDependencies(),
-        stats: await this.getStats(),
-      }),
-      {
-        onSuccess: (nodeId) => {
-          this.nodeId = nodeId;
-          NexxusApi.logger.info(
-            `Registered with Hub as ${nodeId}`,
-            NexxusApi.loggerLabel
-          );
-        },
-        onError: (err) => {
-          NexxusApi.logger.warn(
-            `Hub register attempt failed, will retry: ${err.message}`,
-            NexxusApi.loggerLabel
-          );
-        },
-      }
-    );
+    this.hubClient = new NexxusHubClient(this.config.hub, NexxusApi.logger);
+
+    // Fire-and-forget: the client retries internally until Hub is reachable
+    // (logging each failed attempt at `warn` from inside `retryUntilSuccess`),
+    // so we don't need our own onError callback here. On first success the
+    // promise resolves once — we capture the id then. A rejection reaches us
+    // only if `dispose()` interrupts the retry loop during shutdown; log at
+    // debug and move on.
+    void this.hubClient.registerNode(async () => ({
+      id: pendingNodeId,
+      role: 'api',
+      privateIpAddress: NexxusHubClient.discoverPrivateIpAddress(),
+      managementPort: this.config.management.port,
+      dependencies: NexxusHubClient.readNexxusDependencies(),
+      stats: await this.getStats(),
+    })).then((payload) => {
+      this.nodeId = payload.id;
+      NexxusApi.logger.info(
+        `Registered with Hub as ${payload.id}`,
+        NexxusApi.loggerLabel
+      );
+    }).catch((err: Error) => {
+      NexxusApi.logger.debug(
+        `Hub registration abandoned: ${err.message}`,
+        NexxusApi.loggerLabel
+      );
+    });
   }
 
   /**
@@ -442,14 +441,17 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig, {}, NexxusApiS
   }
 
   public async close(): Promise<void> {
-    // Halt the register retry loop first — no more attempts should fire
-    // while we're shutting down, whether we've succeeded or not.
-    this.hubRegistration?.stop();
-    this.hubRegistration = null;
+    // Halt any still-in-flight register retry. dispose() flips a flag the
+    // retry loop checks at each iteration; the pending register promise
+    // rejects (caught in registerWithHub). No effect if register already
+    // succeeded — the retry loop was inactive.
+    this.hubClient?.dispose();
 
     // Tell Hub we're going down before we tear anything else down, so a
     // watching operator sees the entry disappear before local ports close.
+    // Uses the same client; unregisterNode doesn't retry so dispose() is fine.
     await this.unregisterFromHub();
+    this.hubClient = null;
 
     this.managementServer?.close();
     this.managementServer = null;
@@ -478,12 +480,12 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig, {}, NexxusApiS
    * restart, which the design deliberately accepts.
    */
   private async unregisterFromHub(): Promise<void> {
-    if (this.nodeId === null || !this.config.hub) {
+    if (this.nodeId === null || !this.hubClient) {
       return;
     }
 
     try {
-      await unregisterNode(this.config.hub, this.nodeId);
+      await this.hubClient.unregisterNode(this.nodeId);
       NexxusApi.logger.info('Unregistered from Hub', NexxusApi.loggerLabel);
     } catch (err) {
       NexxusApi.logger.warn(
