@@ -7,6 +7,7 @@ import {
   NexxusDbSearchOptions,
   NexxusDbUpdateOptions
 } from './DatabaseAdapter';
+import { NexxusElasticsearchDbBootstrapper } from './ElasticsearchDbBootstrapper';
 import {
   NexxusConfig,
   ConfigCliArgs,
@@ -22,6 +23,8 @@ import {
   INexxusAppModel,
   NexxusUser,
   INexxusUser,
+  NexxusSetting,
+  INexxusSetting,
   NexxusJsonPatch,
   NexxusFilterQuery,
   NexxusLogicalOperator,
@@ -122,8 +125,6 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
       indices.forEach(indexInfo => {
         this.collectedIndices.add(indexInfo.index as string);
       });
-
-      
     } catch (e : Error | unknown) {
       if (e instanceof ElasticSearch.errors.ConnectionError) {
         throw new ConnectionException('Failed to connect to Elasticsearch database');
@@ -139,6 +140,16 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
 
   async disconnect(): Promise<void> {
     return this.client.close();
+  }
+
+  /**
+   * Returns a bootstrapper wired with this adapter's ES client. Called by
+   * the Nexxus CLI at deployment provisioning time and by the Hub API on
+   * application-lifecycle events. See `NexxusElasticsearchDbBootstrapper`
+   * for what ES-specific work runs at each hook.
+   */
+  public getBootstrapper(): NexxusElasticsearchDbBootstrapper {
+    return new NexxusElasticsearchDbBootstrapper(this.client);
   }
 
   /**
@@ -206,6 +217,12 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
 
           break;
 
+        case NexxusSetting:
+          itemData = item.getData();
+          index = `${NEXXUS_PREFIX_LC}-setting`;
+
+          break;
+
         case NexxusUser:
           itemData = (item as NexxusUser).getData();
           index = `${NEXXUS_PREFIX_LC}-app-${itemData.appId}-${itemData.type}`;
@@ -263,6 +280,7 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
 
   async searchItems(options: NexxusDbSearchOptions<'application'>): Promise<NexxusApplication[]>;
   async searchItems(options: NexxusDbSearchOptions<'user'>): Promise<NexxusUser[]>;
+  async searchItems(options: NexxusDbSearchOptions<'setting'>): Promise<NexxusSetting[]>;
   async searchItems(options: NexxusDbSearchOptions<string>): Promise<NexxusAppModel[]>;
 
   async searchItems(options: NexxusDbSearchOptions<string>): Promise<Array<AnyNexxusModel>> {
@@ -301,6 +319,9 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
         case 'user':
           return new NexxusUser(res._source as INexxusUser);
 
+        case 'setting':
+          return new NexxusSetting(res._source as INexxusSetting);
+
         default:
           // Inject the ES-side _version into the model data before construction.
           // Only app models carry a version; built-ins above intentionally don't.
@@ -316,6 +337,7 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
 
   async getItems(options: NexxusDbGetOptions<'application'>): Promise<Array<NexxusApplication | null>>;
   async getItems(options: NexxusDbGetOptions<'user'>): Promise<Array<NexxusUser | null>>;
+  async getItems(options: NexxusDbGetOptions<'setting'>): Promise<Array<NexxusSetting | null>>;
   async getItems(options: NexxusDbGetOptions<string>): Promise<Array<NexxusAppModel | null>>;
 
   async getItems(options: NexxusDbGetOptions<string>): Promise<Array<NexxusBaseModel | null>> {
@@ -323,7 +345,12 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
 
     switch(options.type) {
       case 'application':
-        index = `${NEXXUS_PREFIX_LC}-applications`;
+        index = `${NEXXUS_PREFIX_LC}-application`;
+
+        break;
+
+      case 'setting':
+        index = `${NEXXUS_PREFIX_LC}-setting`;
 
         break;
 
@@ -370,6 +397,9 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
           case 'user':
             return new NexxusUser(doc._source as INexxusUser);
 
+          case 'setting':
+            return new NexxusSetting(doc._source as INexxusSetting);
+
           default:
             // Inject the ES-side _version into the model data before construction.
             return NexxusAppModel.fromStorage({
@@ -413,8 +443,8 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
       const patchData = patch.get();
       let index = `${NEXXUS_PREFIX_LC}-`;
 
-      if (patchData.metadata.type === 'application') {
-        index += `${patchData.metadata.type}`;
+      if (patchData.metadata.type === 'application' || patchData.metadata.type === 'setting') {
+        index += patchData.metadata.type;
       } else {
         if (!patchData.metadata.appId) {
           throw new Error("App ID is required for updating user or app-specific models");
@@ -564,10 +594,13 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
 
       if (item instanceof NexxusApplication) {
         itemData = item.getData();
-        index = `${NEXXUS_PREFIX_LC}-applications`;
+        index = `${NEXXUS_PREFIX_LC}-application`;
+      } else if (item instanceof NexxusSetting) {
+        itemData = item.getData();
+        index = `${NEXXUS_PREFIX_LC}-setting`;
       } else if (item instanceof NexxusUser) {
         itemData = item.getData();
-        index = `${NEXXUS_PREFIX_LC}-${itemData.appId}-user`;
+        index = `${NEXXUS_PREFIX_LC}-app-${itemData.appId}-user`;
       } else {
         itemData = (item as NexxusAppModel).getData();
         index = `${NEXXUS_PREFIX_LC}-app-${itemData.appId}-${itemData.type}`;
@@ -599,6 +632,12 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
 
     switch (options.type) {
       case 'application': {
+        index += `-${options.type}`;
+
+        break;
+      }
+
+      case 'setting': {
         index += `-${options.type}`;
 
         break;
@@ -688,13 +727,13 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
         let fieldQuery: any;
 
         if (node.operator === 'eq') {
-          fieldQuery = { term: { [`${node.field}.keyword`]: node.value } };
+          fieldQuery = { term: { [node.field]: node.value } };
         } else if (node.operator === 'in') {
-          fieldQuery = { terms: { [`${node.field}.keyword`]: node.value } };
+          fieldQuery = { terms: { [node.field]: node.value } };
         } else if (node.operator === 'ne') {
-          fieldQuery = { bool: { must_not: { term: { [`${node.field}.keyword`]: node.value } } } };
+          fieldQuery = { bool: { must_not: { term: { [node.field]: node.value } } } };
         } else {
-          // Range operators (gte, lte, gt, lt) - NO CHANGE HERE
+          // Range operators (gte, lte, gt, lt).
           fieldQuery = { range: { [node.field]: { [node.operator]: node.value } } };
         }
 

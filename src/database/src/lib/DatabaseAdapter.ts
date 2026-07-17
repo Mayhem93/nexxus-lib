@@ -6,6 +6,7 @@ import {
   NexxusBaseModel,
   NexxusApplication,
   NexxusUser,
+  NexxusSetting,
   NexxusAppModel,
   NexxusModelTypeName,
   AnyNexxusModel,
@@ -78,17 +79,68 @@ export abstract class NexxusDatabaseAdapter<
   abstract reConnect(): Promise<void>;
   abstract disconnect(): Promise<void>;
 
+  /**
+   * Returns a bootstrapper wired to this adapter's already-connected
+   * client. Called by the Nexxus CLI at deployment provisioning time and
+   * by the Hub API on application-lifecycle events (v1: creation only).
+   * See `NexxusDatabaseBootstrapper` for the full contract.
+   */
+  abstract getBootstrapper(): NexxusDatabaseBootstrapper;
+
   abstract createItems(collection: Array<AnyNexxusModel>): Promise<void>;
   // abstract getItems(options: NexxusDbGetOptions): Promise<Array<NexxusBaseModel | null>>;
   abstract getItems(options: NexxusDbGetOptions<'application'>): Promise<Array<NexxusApplication | null>>;
   abstract getItems(options: NexxusDbGetOptions<'user'>): Promise<Array<NexxusUser | null>>;
+  abstract getItems(options: NexxusDbGetOptions<'setting'>): Promise<Array<NexxusSetting | null>>;
   abstract getItems(options: NexxusDbGetOptions<string>): Promise<Array<NexxusAppModel | null>>;
   abstract searchItems(options: NexxusDbSearchOptions<'application'>): Promise<NexxusApplication[]>;
   abstract searchItems(options: NexxusDbSearchOptions<'user'>): Promise<NexxusUser[]>;
+  abstract searchItems(options: NexxusDbSearchOptions<'setting'>): Promise<NexxusSetting[]>;
   abstract searchItems(options: NexxusDbSearchOptions<string>): Promise<NexxusAppModel[]>;
   abstract updateItems(collection: Array<NexxusJsonPatch>, options?: NexxusDbUpdateOptions): Promise<Array<Partial<AnyNexxusModelData>> | void>;
   abstract deleteItems(collection: Array<NexxusBaseModel>): Promise<void>;
   abstract countItems(options: NexxusDbCountOptions): Promise<number>;
 
   protected abstract buildQuery(options: NexxusDbSearchOptions<string>): string | object;
+}
+
+/**
+ * Deployment-time hook surface for a database adapter. Each concrete adapter
+ * ships its own subclass with the client passed in at construction; callers
+ * (the Nexxus CLI at provisioning time, the Hub API when an application is
+ * created) obtain an instance via the adapter's `getBootstrapper()` method so
+ * they never touch the adapter's underlying driver directly.
+ *
+ * **Migration is explicitly out of scope for this class.** The bootstrapper
+ * sets up infrastructure the runtime pipeline expects to exist; it does not
+ * handle framework-version upgrades, cross-version schema evolution, or data
+ * rewrites. Those belong to a separate migration surface (not yet designed)
+ * and should not be bolted on here.
+ */
+export abstract class NexxusDatabaseBootstrapper {
+  /**
+   * Idempotent one-shot deployment setup. Creates the base infrastructure
+   * the runtime pipeline expects to exist — per-adapter: base indices, base
+   * tables, base collections, etc. Called by the CLI at deployment
+   * provisioning time.
+   *
+   * **Must be idempotent.** Safe to re-run: skip anything already present
+   * rather than error. Operators running `nexxus bootstrap` twice, or Hub
+   * replaying a partial setup after a restart, must be a no-op the second
+   * time.
+   */
+  public abstract bootstrapDeployment(): Promise<void>;
+
+  /**
+   * Called when a new Nexxus application is created (via Hub or CLI). The
+   * adapter provisions whatever per-application storage its runtime needs —
+   * for ES, per-app-per-model indices with explicit mappings; for a
+   * relational store, per-app tables; for a document store, a per-app
+   * collection; etc.
+   *
+   * **Must be idempotent.** A re-create for an already-known app id should
+   * skip any per-app storage that already exists rather than fail. This
+   * lets Hub safely replay an `app_created` event after a restart.
+   */
+  public abstract onApplicationCreated(app: NexxusApplication): Promise<void>;
 }
