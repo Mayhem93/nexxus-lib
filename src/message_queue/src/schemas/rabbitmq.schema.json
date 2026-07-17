@@ -12,6 +12,10 @@
     },
     "password": {
       "type": "string"
+    },
+    "managementPort": {
+      "type": "number",
+      "default": 15672
     }
   },
   "required": [
