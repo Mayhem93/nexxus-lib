@@ -496,7 +496,7 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
             break;
 
           case 'incr':
-            if (fieldType === 'number' || fieldType === 'date') {
+            if (fieldType === 'int' || fieldType === 'float' || fieldType === 'date') {
               scriptLine = `if (ctx._source.${path} == null) { ctx._source.${path} = ${patchData.value[idx]}; } ctx._source.${path} += params.${paramName}`;
             } else {
               NexxusElasticsearchDb.logger.warn(`Incr operation not supported for field type: ${fieldType}`, NexxusDatabaseAdapter.loggerLabel);
@@ -505,7 +505,7 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
             break;
 
           case 'decr':
-            if (fieldType === 'number' || fieldType === 'date') {
+            if (fieldType === 'int' || fieldType === 'float' || fieldType === 'date') {
               scriptLine = `if (ctx._source.${path} == null) { ctx._source.${path} = ${patchData.value[idx]}; } ctx._source.${path} -= params.${paramName}`;
             } else {
               NexxusElasticsearchDb.logger.warn(`Decr operation not supported for field type: ${fieldType}`, NexxusDatabaseAdapter.loggerLabel);

@@ -284,9 +284,9 @@ export class NexxusFilterQuery {
     const comparisonOps: NexxusComparisonOperator[] = ['gte', 'lte', 'gt', 'lt'];
 
     if (comparisonOps.includes(operator)) {
-      if (type !== 'number' && type !== 'date') {
+      if (!['int', 'float', 'date'].includes(type as string)) {
         throw new InvalidQueryFilterException(
-          `Operator "${operator}" at path "${path}" can only be used with number or date fields`
+          `Operator "${operator}" at path "${path}" can only be used with int, float or date fields`
         );
       }
     }
@@ -315,9 +315,15 @@ export class NexxusFilterQuery {
         }
         break;
 
-      case 'number':
-        if (typeof value !== 'number' || isNaN(value)) {
-          throw new InvalidQueryFilterException(`Value at path "${path}" must be a number`);
+      case 'int':
+        if (typeof value !== 'number' || !Number.isInteger(value)) {
+          throw new InvalidQueryFilterException(`Value at path "${path}" must be an integer`);
+        }
+        break;
+
+      case 'float':
+        if (typeof value !== 'number' || !Number.isFinite(value)) {
+          throw new InvalidQueryFilterException(`Value at path "${path}" must be a float`);
         }
         break;
 
@@ -327,7 +333,7 @@ export class NexxusFilterQuery {
         }
         break;
 
-      case 'date':
+      case 'date': {
         const isValidDate =
           (typeof value === 'number' && !isNaN(value)) || // Unix timestamp
           (typeof value === 'string' && !isNaN(Date.parse(value))); // ISO string
@@ -336,8 +342,9 @@ export class NexxusFilterQuery {
           throw new InvalidQueryFilterException(`Value at path "${path}" must be a Unix timestamp or ISO date string`);
         }
         break;
+      }
 
-      case 'array':
+      case 'array': {
         // For array fields, we check if the value matches the arrayType
         const arrayFieldDef = fieldDef as NexxusArrayFieldDef;
         const arrayType = arrayFieldDef.arrayType;
@@ -348,9 +355,14 @@ export class NexxusFilterQuery {
               throw new InvalidQueryFilterException(`Value at path "${path}" must be a string (array contains strings)`);
             }
             break;
-          case 'number':
-            if (typeof value !== 'number') {
-              throw new InvalidQueryFilterException(`Value at path "${path}" must be a number (array contains numbers)`);
+          case 'int':
+            if (typeof value !== 'number' || !Number.isInteger(value)) {
+              throw new InvalidQueryFilterException(`Value at path "${path}" must be an integer (array contains integers)`);
+            }
+            break;
+          case 'float':
+            if (typeof value !== 'number' || !Number.isFinite(value)) {
+              throw new InvalidQueryFilterException(`Value at path "${path}" must be a float (array contains floats)`);
             }
             break;
           case 'boolean':
@@ -366,7 +378,9 @@ export class NexxusFilterQuery {
           case 'object':
             throw new InvalidQueryFilterException(`Cannot query array of objects at path "${path}". Use dot notation for nested fields.`);
         }
+
         break;
+      }
 
       case 'object':
         throw new InvalidQueryFilterException(`Cannot query object field "${path}" directly. Use dot notation for nested fields.`);

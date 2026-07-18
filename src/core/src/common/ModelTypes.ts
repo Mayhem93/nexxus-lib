@@ -1,4 +1,4 @@
-export type NexxusModelPrimitiveType = 'string' | 'number' | 'boolean' | 'date';
+export type NexxusModelPrimitiveType = 'string' | 'int' | 'float' | 'boolean' | 'date';
 export type NexxusModelFieldType = NexxusModelPrimitiveType | 'array' | 'object';
 
 interface BaseFieldDef {

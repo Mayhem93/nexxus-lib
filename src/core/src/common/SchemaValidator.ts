@@ -69,8 +69,11 @@ export class NexxusSchemaValidator {
       case 'string':
         return NexxusSchemaValidator.validateString(value, path);
 
-      case 'number':
-        return NexxusSchemaValidator.validateNumber(value, path);
+      case 'int':
+        return NexxusSchemaValidator.validateInt(value, path);
+
+      case 'float':
+        return NexxusSchemaValidator.validateFloat(value, path);
 
       case 'boolean':
         return NexxusSchemaValidator.validateBoolean(value, path);
@@ -97,9 +100,17 @@ export class NexxusSchemaValidator {
     return value;
   }
 
-  private static validateNumber(value: unknown, path: string): number {
+  private static validateInt(value: unknown, path: string): number {
+    if (typeof value !== 'number' || !Number.isInteger(value)) {
+      throw new InvalidSchemaDataException(`Expected integer at path "${path}", got ${typeof value}`);
+    }
+
+    return value;
+  }
+
+  private static validateFloat(value: unknown, path: string): number {
     if (typeof value !== 'number' || !Number.isFinite(value)) {
-      throw new InvalidSchemaDataException(`Expected number at path "${path}", got ${typeof value}`);
+      throw new InvalidSchemaDataException(`Expected float at path "${path}", got ${typeof value}`);
     }
 
     return value;

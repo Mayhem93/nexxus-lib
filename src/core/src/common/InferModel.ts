@@ -3,14 +3,16 @@
 
 export type InferFieldDef<D> =
   D extends { type: 'string' }  ? string  :
-  D extends { type: 'number' }  ? number  :
+  D extends { type: 'int' }     ? number  :
+  D extends { type: 'float' }   ? number  :
   D extends { type: 'boolean' } ? boolean :
   D extends { type: 'date' }    ? number  :
   D extends { type: 'array', arrayType: infer AT, properties?: infer P } ?
     AT extends 'object'
       ? P extends Record<string, any> ? Array<InferModel<P>> : never
       : AT extends 'string'  ? string[]
-      : AT extends 'number'  ? number[]
+      : AT extends 'int'     ? number[]
+      : AT extends 'float'   ? number[]
       : AT extends 'boolean' ? boolean[]
       : AT extends 'date'    ? number[]
       : never :

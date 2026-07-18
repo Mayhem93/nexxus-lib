@@ -70,7 +70,7 @@ export class NexxusJsonPatch {
 
   private static readonly OPERATION_RULES: Record<typeof JSON_OPS[number], OperationRule> = {
     replace: {
-      allowedTypes: ['string', 'number', 'boolean', 'date', 'object', 'array'],
+      allowedTypes: ['string', 'int', 'float', 'boolean', 'date', 'object', 'array'],
       validateValue: (value: any, fieldDef: NexxusFieldDef, path: string) =>
         NexxusSchemaValidator.validateValue(value, fieldDef, path)
     },
@@ -154,12 +154,12 @@ export class NexxusJsonPatch {
       }
     },
     incr: {
-      allowedTypes: ['number', 'date'],
+      allowedTypes: ['int', 'float', 'date'],
       validateValue: (value: any, fieldDef: NexxusFieldDef, path: string) =>
         NexxusSchemaValidator.validateValue(value, fieldDef, path)
     },
     decr: {
-      allowedTypes: ['number', 'date'],
+      allowedTypes: ['int', 'float', 'date'],
       validateValue: (value: any, fieldDef: NexxusFieldDef, path: string) =>
         NexxusSchemaValidator.validateValue(value, fieldDef, path)
     }
