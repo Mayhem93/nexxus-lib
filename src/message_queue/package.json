@@ -37,6 +37,7 @@
   },
   "dependencies": {
     "amqplib": "^0.10.9",
+    "lz4-napi": "^2.8.0",
     "tslib": "2.8.1"
   },
   "peerDependencies": {

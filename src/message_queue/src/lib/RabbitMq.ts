@@ -1,7 +1,6 @@
 import {
   ConfigCliArgs,
   ConfigEnvVars,
-  NexxusConfig,
   INexxusBaseServices,
   NexxusQueueName,
   NexxusQueuePayload,
@@ -10,6 +9,7 @@ import {
   NexxusMessageQueueAdapter,
   NexxusMessageQueueAdapterEvents,
   NexxusMessageQueueAdapterStats,
+  NexxusMessageQueueConfig,
   NexxusQueueMessage
 } from './MessageQueueAdapter';
 import {
@@ -27,7 +27,7 @@ type RabbitMQConfig = {
   user: string;
   password: string;
   managementPort: number;
-} & NexxusConfig;
+} & NexxusMessageQueueConfig;
 
 export type RabbitMqMetadata = {
   fields: amqplib.MessageFields;
@@ -175,14 +175,20 @@ export class NexxusRabbitMq extends NexxusMessageQueueAdapter<RabbitMQConfig, Ne
     message: NexxusQueuePayload<Q>,
     metadata?: amqplib.Options.Publish
   ): Promise<void> {
-    // Implementation for publishing a message to a RabbitMQ queue
-    const messageBuffer = Buffer.from(JSON.stringify(message));
+    // `serializePayload` on the base handles JSON encode + optional
+    // compression per the adapter's config. Content-type reflects the
+    // post-compression wire shape so any inspector (RabbitMQ management
+    // UI, tracing) knows not to try JSON-parsing the raw bytes.
+    const messageBuffer = await this.serializePayload(message);
 
-    NexxusRabbitMq.logger.debug(`Publishing message to RabbitMQ queue ${queueName}: ${messageBuffer.toString()}`, NexxusRabbitMq.loggerLabel);
+    NexxusRabbitMq.logger.debug(
+      `Publishing message to RabbitMQ queue ${queueName} (${messageBuffer.length} bytes${this.compressor ? ', compressed' : ''})`,
+      NexxusRabbitMq.loggerLabel,
+    );
 
     const options : amqplib.Options.Publish = {
       persistent: true,
-      contentType: 'application/json',
+      contentType: this.compressor ? 'application/octet-stream' : 'application/json',
       ...metadata || {}
     };
 
@@ -240,7 +246,7 @@ export class NexxusRabbitMq extends NexxusMessageQueueAdapter<RabbitMQConfig, Ne
     }
   }
 
-  async createVolatileQueue(name: string): Promise<void> {
+  public async createVolatileQueue(name: string): Promise<void> {
     if (!this.channel) {
       throw new Error('RabbitMQ channel not available — call connect() before createVolatileQueue()');
     }
@@ -268,7 +274,7 @@ export class NexxusRabbitMq extends NexxusMessageQueueAdapter<RabbitMQConfig, Ne
     );
   }
 
-  async deleteQueue(name: string): Promise<void> {
+  public async deleteQueue(name: string): Promise<void> {
     if (!this.channel) {
       throw new Error('RabbitMQ channel not available — call connect() before deleteQueue()');
     }
@@ -284,13 +290,15 @@ export class NexxusRabbitMq extends NexxusMessageQueueAdapter<RabbitMQConfig, Ne
     );
   }
 
-  async consumeMessages<Q extends NexxusQueueName>(
+  public async consumeMessages<Q extends NexxusQueueName>(
     queueName: Q,
     onMessage: (message: NexxusQueueMessage<NexxusQueuePayload<Q>>) => Promise<void>
   ) : Promise<void> {
     await this.channel?.consume(queueName, async msg => {
       if (msg !== null) {
-        const payload = JSON.parse(msg.content.toString()) as NexxusQueuePayload<Q>;
+        // `deserializePayload` on the base handles decompression (when
+        // enabled) + JSON.parse, so compression policy stays in one place.
+        const payload = await this.deserializePayload<Q>(msg.content);
         const metadata : RabbitMqMetadata = {
           fields: msg.fields,
           properties: msg.properties

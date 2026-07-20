@@ -9,6 +9,18 @@ import {
   FatalErrorException,
 } from '@mayhem93/nexxus-core-lib';
 
+import { NexxusMessageCompressor, NexxusCompressionConfig } from './Compression';
+
+/**
+ * Shared shape every MQ adapter's config extends. Currently just adds the
+ * optional `compression` block; future MQ-generic fields (message TTL,
+ * retry policy, etc.) belong here too so every concrete adapter picks
+ * them up.
+ */
+export type NexxusMessageQueueConfig = NexxusConfig & {
+  compression?: NexxusCompressionConfig;
+};
+
 export type NexxusMessageQueueAdapterEvents = {
   connect: [];
   disconnect: [];
@@ -26,7 +38,7 @@ export type NexxusMessageQueueAdapterStats = {
 };
 
 export abstract class NexxusMessageQueueAdapter<
-  T extends NexxusConfig,
+  T extends NexxusMessageQueueConfig,
   Ev extends NexxusMessageQueueAdapterEvents,
   TStats extends NexxusMessageQueueAdapterStats
 >
@@ -37,6 +49,18 @@ export abstract class NexxusMessageQueueAdapter<
   protected abstract reconnectDelayMs: number;
 
   public static logger: NexxusBaseLogger<any>;
+
+  /**
+   * Compressor used by `serializePayload` / `deserializePayload`. Non-null
+   * only when `config.compression.enabled === true`. Deployment-wide
+   * policy: every node must have the same setting, otherwise producers
+   * and consumers will talk past each other.
+   *
+   * Definite-assignment `!` — assigned unconditionally in the constructor
+   * (to either an instance or `null`), TS just can't see through the
+   * ternary from the property declaration site.
+   */
+  protected readonly compressor!: NexxusMessageCompressor | null;
 
   /** Retry timer for the reconnection loop. Null when we're not actively trying. */
   private retryTimer: NodeJS.Timeout | null = null;
@@ -63,6 +87,52 @@ export abstract class NexxusMessageQueueAdapter<
     }
 
     NexxusMessageQueueAdapter.logger = services.logger;
+
+    this.compressor = this.config.compression?.enabled
+      ? new NexxusMessageCompressor(this.config.compression)
+      : null;
+
+    if (this.compressor) {
+      NexxusMessageQueueAdapter.logger.info(
+        `MQ compression enabled: algo=${this.config.compression!.algo}`,
+        NexxusMessageQueueAdapter.loggerLabel,
+      );
+    }
+  }
+
+  /**
+   * Encode a typed payload for the wire. JSON → Buffer, then compress if
+   * enabled. Concrete adapters call this in their `publishMessage` in
+   * place of the raw `Buffer.from(JSON.stringify(...))` so compression
+   * policy stays in one place.
+   */
+  protected serializePayload<Q extends NexxusQueueName>(
+    payload: NexxusQueuePayload<Q>,
+  ): Promise<Buffer> {
+    const jsonBuf = Buffer.from(JSON.stringify(payload));
+
+    if (!this.compressor) {
+      return Promise.resolve(jsonBuf);
+    }
+
+    return this.compressor.compress(jsonBuf);
+  }
+
+  /**
+   * Decode a wire buffer back to the typed payload. Decompress if enabled,
+   * then JSON.parse. Concrete adapters call this in their consume loop
+   * in place of the raw `JSON.parse(buf.toString())`.
+   *
+   * Whether the buffer is actually compressed is a deployment-wide
+   * property, not per-message — this method trusts `this.compressor`
+   * being non-null to mean "everything on the wire is compressed."
+   */
+  protected async deserializePayload<Q extends NexxusQueueName>(
+    buf: Buffer,
+  ): Promise<NexxusQueuePayload<Q>> {
+    const jsonBuf = this.compressor ? await this.compressor.decompress(buf) : buf;
+
+    return JSON.parse(jsonBuf.toString()) as NexxusQueuePayload<Q>;
   }
 
   /**
