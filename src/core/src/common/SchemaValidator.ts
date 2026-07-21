@@ -17,39 +17,61 @@ import { InvalidSchemaDataException } from '../lib/Exceptions';
  * Used by:
  *   - NexxusJsonPatch (per-path validation on patch operations)
  *   - NexxusAppModel (whole-model validation on construction)
- *
- * Required-field checking is intentionally NOT performed here yet; only fields
- * present in the input are validated.
  */
 export class NexxusSchemaValidator {
 
   /**
-   * Validate every present field of `data` against the model definition.
-   * Returns a shallow-merged copy of `data` with each value normalized.
-   * Unknown fields (present in data but not declared in modelDef) are passed
-   * through unchanged.
+   * Validate `data` against the model definition, enforcing `required` and
+   * the per-field type checks. Iterates the SCHEMA (not the data) so that
+   * required fields the caller omits entirely still get caught — the old
+   * data-iterating shape silently skipped them.
+   *
+   * Returns a shallow-merged copy of `data` with each declared value
+   * normalized. Unknown fields (present in data but not declared in
+   * modelDef) are passed through unchanged — the schema DSL is
+   * intentionally open (developers can add ad-hoc fields not covered
+   * by their declared schema).
    */
   public static validateAgainstSchema(data: Record<string, unknown>, modelDef: NexxusModelDef): Record<string, unknown> {
     if (!data || typeof data !== 'object' || Array.isArray(data)) {
       throw new InvalidSchemaDataException(`Schema validation: input must be a non-null object`);
     }
 
+    // `version` is set exclusively by the database adapter on writes;
+    // user input cannot supply it. Checked before the schema loop so it
+    // triggers regardless of whether the schema happens to declare it.
+    if ('version' in data) {
+      throw new InvalidSchemaDataException(
+        `Field "version" is a system-managed Nexxus field and cannot be set by user input`
+      );
+    }
+
     const result: Record<string, unknown> = { ...data };
 
-    for (const [fieldName, value] of Object.entries(data)) {
-      // `version` is set exclusively by the database adapter on writes;
-      // user input cannot supply it. If more system-managed fields join later,
-      // extract a NEXXUS_SYSTEM_MANAGED_FIELDS constant at that point.
-      if (fieldName === 'version') {
-        throw new InvalidSchemaDataException(
-          `Field "version" is a system-managed Nexxus field and cannot be set by user input`
-        );
+    for (const [fieldName, fieldDef] of Object.entries(modelDef)) {
+      const value = data[fieldName];
+      const absent = !(fieldName in data) || value === undefined;
+
+      if (absent) {
+        if (fieldDef.required === true) {
+          throw new InvalidSchemaDataException(
+            `Required field "${fieldName}" is missing`
+          );
+        }
+
+        continue;
       }
 
-      const fieldDef = modelDef[fieldName];
+      if (value === null) {
+        if (fieldDef.nullable === true) {
+          result[fieldName] = null;
 
-      if (!fieldDef) {
-        continue;
+          continue;
+        }
+
+        throw new InvalidSchemaDataException(
+          `Field "${fieldName}" cannot be null`
+        );
       }
 
       result[fieldName] = NexxusSchemaValidator.validateValue(value, fieldDef, fieldName);
@@ -163,10 +185,37 @@ export class NexxusSchemaValidator {
     const input = value as Record<string, unknown>;
     const result: Record<string, unknown> = { ...input };
 
+    // Same shape as `validateAgainstSchema`: iterate the schema so missing
+    // required nested fields are caught, and null/absent handling matches
+    // the top-level behaviour.
     for (const [key, propDef] of Object.entries(fieldDef.properties)) {
-      if (key in input) {
-        result[key] = NexxusSchemaValidator.validateValue(input[key], propDef, `${path}.${key}`);
+      const subPath = `${path}.${key}`;
+      const subValue = input[key];
+      const absent = !(key in input) || subValue === undefined;
+
+      if (absent) {
+        if (propDef.required === true) {
+          throw new InvalidSchemaDataException(
+            `Required field "${subPath}" is missing`
+          );
+        }
+
+        continue;
       }
+
+      if (subValue === null) {
+        if (propDef.nullable === true) {
+          result[key] = null;
+
+          continue;
+        }
+
+        throw new InvalidSchemaDataException(
+          `Field "${subPath}" cannot be null`
+        );
+      }
+
+      result[key] = NexxusSchemaValidator.validateValue(subValue, propDef, subPath);
     }
 
     return result;

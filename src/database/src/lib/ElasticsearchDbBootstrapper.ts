@@ -119,10 +119,27 @@ export class NexxusElasticsearchDbBootstrapper extends NexxusDatabaseBootstrappe
     const schema = app.getSchema();
 
     // Per-app-per-model indices — one per model type the app declares.
-    for (const [modelType, modelSchema] of Object.entries(schema)) {
+    // The Application schema now wraps field defs under a `fields` key so
+    // we can carry per-model flags (`subscribable`, `transient`); the ES
+    // index mapping only cares about the field defs.
+    //
+    // Transient models are skipped — they're notification-shaped, created
+    // by the API and published directly to the transport-manager without
+    // ever hitting the writer or the DB, so an index would sit empty
+    // forever. See `NexxusApplication` for the flag semantics.
+    for (const [modelType, modelDef] of Object.entries(schema)) {
+      if (modelDef.transient === true) {
+        NexxusDatabaseAdapter.logger.info(
+          `Skipping index creation for transient model "${modelType}" on app ${appId}`,
+          NexxusElasticsearchDbBootstrapper.LOGGER_LABEL,
+        );
+
+        continue;
+      }
+
       await this.createIndexIfMissing(
         `${NEXXUS_PREFIX_LC}-app-${appId}-${modelType}`,
-        this.buildMapping(modelSchema, true),
+        this.buildMapping(modelDef.fields, true),
       );
     }
 

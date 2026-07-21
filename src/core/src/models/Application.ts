@@ -3,15 +3,42 @@ import {
   MODEL_REGISTRY
 } from './BaseModel';
 import { NexxusBuiltinModel } from './BuiltinModel';
-import { NexxusFieldDef, NexxusModelDef } from '../common/ModelTypes';
+import {
+  NexxusFieldDef,
+  NexxusModelDef,
+  PrimitiveFieldDef
+} from '../common/ModelTypes';
 import { InferModel } from '../common/InferModel';
-import { NEXXUS_BUILTIN_MODEL_SCHEMAS, NEXXUS_RESERVED_FIELD_NAMES } from '../common/BuiltinSchemas';
+import {
+  NEXXUS_BUILTIN_MODEL_SCHEMAS,
+  NEXXUS_RESERVED_FIELD_NAMES
+} from '../common/BuiltinSchemas';
 import { NexxusUserDetailSchema } from './User';
 
 import * as Dot from 'dot-prop';
 
+/**
+ * Per-app-model definition. Wraps the field defs with per-model flags:
+ *   - `subscribable` (default true): whether the subscribe route accepts
+ *     this model. `false` = traditional-DB shape — search works, all
+ *     fields are treated as filterable, subscribe/unsubscribe 400.
+ *   - `transient` (default false): create-only. `true` = update/delete
+ *     routes 400. Meant for notification-shaped models where records are
+ *     produced once and consumed via subscribe/search.
+ *
+ * The combination `subscribable: false && transient: true` is invalid —
+ * a model that's create-only and can't be subscribed to has no useful
+ * shape (the caller can't be notified of new records and can't mutate
+ * existing ones). Rejected at construction.
+ */
+export interface NexxusApplicationModelDef {
+  fields: NexxusModelDef;
+  subscribable?: boolean;
+  transient?: boolean;
+}
+
 export interface NexxusApplicationSchema {
-  [modelName: string]: NexxusModelDef;
+  [modelName: string]: NexxusApplicationModelDef;
 }
 
 export interface NexxusUserTypeConfig {
@@ -72,12 +99,41 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
       throw new Error('Application schema cannot be empty');
     }
 
-    // Reject any app-model schema that declares a field with a Nexxus-reserved
-    // name. These names are managed by the system (id/createdAt/updatedAt by
-    // BaseModel, type/appId/userId by the API/Worker, version by the database
-    // adapter) and cannot be redefined by app developers.
+    // Validate each per-model entry: `fields` presence + shape, per-model
+    // flags, reserved-name check on declared fields, and the invalid flag
+    // combo (subscribable=false + transient=true).
     for (const [modelName, modelDef] of Object.entries(data.schema)) {
-      for (const fieldName of Object.keys(modelDef)) {
+      if (!modelDef || typeof modelDef !== 'object') {
+        throw new Error(`Application schema: model "${modelName}" must be an object`);
+      }
+
+      if (!modelDef.fields || typeof modelDef.fields !== 'object') {
+        throw new Error(`Application schema: model "${modelName}" must have a "fields" object`);
+      }
+
+      if (modelDef.subscribable !== undefined && typeof modelDef.subscribable !== 'boolean') {
+        throw new Error(`Application schema: model "${modelName}" "subscribable" must be a boolean if provided`);
+      }
+
+      if (modelDef.transient !== undefined && typeof modelDef.transient !== 'boolean') {
+        throw new Error(`Application schema: model "${modelName}" "transient" must be a boolean if provided`);
+      }
+
+      if (modelDef.subscribable === false && modelDef.transient === true) {
+        throw new Error(
+          `Application schema: model "${modelName}" cannot be both non-subscribable and transient — ` +
+          `a create-only model that clients also can't subscribe to has no observable shape`
+        );
+      }
+
+      modelDef.subscribable = modelDef.subscribable ?? true;
+      modelDef.transient = modelDef.transient ?? false;
+
+      // Reject any app-model schema that declares a field with a Nexxus-reserved
+      // name. These names are managed by the system (id/createdAt/updatedAt by
+      // BaseModel, type/appId/userId by the API/Worker, version by the database
+      // adapter) and cannot be redefined by app developers.
+      for (const fieldName of Object.keys(modelDef.fields)) {
         if (NEXXUS_RESERVED_FIELD_NAMES.has(fieldName)) {
           throw new Error(
             `Application schema: model "${modelName}" declares a field "${fieldName}", ` +
@@ -187,6 +243,12 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
    * Runtime field schema for one of the developer-declared models in this
    * application's `schema` field. Built-in models (user, application) have
    * their own static `getModelSchema` and are not resolved here.
+   *
+   * When the model is `subscribable: false`, every primitive field is
+   * force-marked `filterable: true` recursively — that's how the
+   * "traditional-DB, all-fields-filterable" behaviour lands in downstream
+   * FilterQuery validation without those callers needing to know about
+   * the flag.
    */
   public getAppModelSchema(modelType: string): NexxusModelDef {
     const appModelDef = this.data.schema[modelType];
@@ -195,13 +257,60 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
       throw new Error(`Unknown app model type: ${modelType}`);
     }
 
-    const appModelSchema = structuredClone(appModelDef);
+    const fields = structuredClone(appModelDef.fields);
 
     if (this.hasAuthEnabled()) {
-      appModelSchema.userId = { type: 'string', required: true, filterable: true };
+      fields.userId = { type: 'string', required: true, filterable: true };
     }
 
-    return appModelSchema;
+    if (appModelDef.subscribable === false) {
+      NexxusApplication.markAllPrimitivesFilterable(fields);
+    }
+
+    return fields;
+  }
+
+  /**
+   * Recursively set `filterable: true` on every primitive field def in the
+   * given schema. Arrays are skipped (the query DSL doesn't filter into
+   * arrays). Mutates in place — callers pass a clone.
+   */
+  private static markAllPrimitivesFilterable(fields: Record<string, NexxusFieldDef>): void {
+    for (const def of Object.values(fields)) {
+      if (def.type === 'object') {
+        NexxusApplication.markAllPrimitivesFilterable(def.properties);
+      } else if (def.type !== 'array') {
+        (def as PrimitiveFieldDef).filterable = true;
+      }
+    }
+  }
+
+  /**
+   * Whether the given model type accepts subscribe/unsubscribe. Default:
+   * true (existing behaviour when the flag is unspecified).
+   */
+  public isSubscribable(modelType: string): boolean {
+    const appModelDef = this.data.schema[modelType];
+
+    if (!appModelDef) {
+      throw new Error(`Unknown app model type: ${modelType}`);
+    }
+
+    return appModelDef.subscribable !== false;
+  }
+
+  /**
+   * Whether the given model type is create-only (update/delete routes
+   * reject it). Default: false.
+   */
+  public isTransient(modelType: string): boolean {
+    const appModelDef = this.data.schema[modelType];
+
+    if (!appModelDef) {
+      throw new Error(`Unknown app model type: ${modelType}`);
+    }
+
+    return appModelDef.transient === true;
   }
 
   /**
@@ -213,7 +322,7 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
   }
 
   public getAppModelFieldType(modelType: string, fieldPath: string): string | undefined {
-    const appModelFieldType = Dot.getProperty(this.getSchema(), `${modelType}.${fieldPath}.type`);
+    const appModelFieldType = Dot.getProperty(this.getSchema(), `${modelType}.fields.${fieldPath}.type`);
 
     return appModelFieldType as string | undefined;
   }
@@ -226,22 +335,25 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
       return filterableFields;
     }
 
-    // Recursive helper to traverse nested fields
+    // Route through `getAppModelSchema` so we pick up the auto-marked
+    // filterable fields on non-subscribable models (and the userId
+    // injection when auth is enabled). The traversal below then only
+    // needs to look at the `filterable` flag.
+    const fields = this.getAppModelSchema(modelType);
+
     const collectFilterableFields = (
-      fields: Record<string, NexxusFieldDef>,
+      subFields: Record<string, NexxusFieldDef>,
       prefix: string = ''
     ): void => {
-      for (const [fieldName, fieldDef] of Object.entries(fields)) {
+      for (const [fieldName, fieldDef] of Object.entries(subFields)) {
         const fieldPath = prefix ? `${prefix}.${fieldName}` : fieldName;
 
         if (fieldDef.type === 'object') {
-          // Recurse into nested object
           collectFilterableFields(fieldDef.properties, fieldPath);
         } else if (fieldDef.type === 'array') {
           // Skip arrays entirely (not filterable)
           continue;
         } else {
-          // Primitive field - check filterable flag
           if (fieldDef.filterable) {
             filterableFields.add(fieldPath);
           }
@@ -249,7 +361,7 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
       }
     };
 
-    collectFilterableFields(modelDef);
+    collectFilterableFields(fields);
 
     return filterableFields;
   }

@@ -44,7 +44,8 @@ import {
   NotFoundMiddleware,
   ErrorMiddleware,
   RequestLoggerMiddleware,
-  RequiredHeadersMiddleware
+  RequiredHeadersMiddleware,
+  AppExistsMiddleware
 } from './middlewares';
 import {
   NexxusAuthStrategy,
@@ -622,6 +623,7 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig, {}, NexxusApiS
       this.express.post(
         `/auth/${name}`,
         RequiredHeadersMiddleware('nxx-app-id') as Express.RequestHandler,
+        AppExistsMiddleware() as Express.RequestHandler,
         (req, res, next) => {
           const appId = req.headers['nxx-app-id'] as string;
           const strategy = this.getAppAuthStrategy(appId, name);
