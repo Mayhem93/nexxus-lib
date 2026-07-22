@@ -17,7 +17,7 @@ import { NexxusDatabaseAdapter, NexxusDatabaseBootstrapper } from './DatabaseAda
  * more machinery than clarity.
  */
 type EsFieldMapping =
-  | { type: 'keyword' | 'boolean' | 'date' | 'double' }
+  | { type: 'keyword' | 'boolean' | 'date' | 'double' | 'long' }
   | { type: 'object'; properties?: Record<string, EsFieldMapping>; enabled?: boolean }
   | { properties: Record<string, EsFieldMapping> };
 
@@ -34,11 +34,11 @@ type EsIndexMapping = {
  * Explicit mappings are the whole point of this class. The runtime adapter
  * lets ES dynamic-map fields on first write, which loses precision and
  * breaks filter semantics we care about (strings default to `text` +
- * `keyword` multi-field, integers become `long`, decimals become `float`).
- * The bootstrapper declares mappings up front — keyword-only strings, no
- * analyzers anywhere, `double` for every numeric — and installs dynamic
- * templates so any subtree left open in the Nexxus schema inherits the
- * same policy when ES eventually infers a mapping for it.
+ * `keyword` multi-field, decimals default to `float`). The bootstrapper
+ * declares mappings up front — keyword-only strings, no analyzers
+ * anywhere, `long` for `int` and `double` for `float` — and installs
+ * dynamic templates so any subtree left open in the Nexxus schema
+ * inherits the same policy when ES eventually infers a mapping for it.
  */
 export class NexxusElasticsearchDbBootstrapper extends NexxusDatabaseBootstrapper {
   private static readonly LOGGER_LABEL = 'NxxDbBootstrap';
@@ -51,7 +51,7 @@ export class NexxusElasticsearchDbBootstrapper extends NexxusDatabaseBootstrappe
    */
   private static readonly DYNAMIC_TEMPLATES: Array<Partial<Record<string, estypesWithBody.MappingDynamicTemplate>>> = [
     { strings_as_keyword: { match_mapping_type: 'string', mapping: { type: 'keyword' } } },
-    { integers_as_double: { match_mapping_type: 'long',   mapping: { type: 'double'  } } },
+    { integers_as_long:   { match_mapping_type: 'long',   mapping: { type: 'long'    } } },
     { floats_as_double:   { match_mapping_type: 'double', mapping: { type: 'double'  } } },
   ];
 
@@ -119,10 +119,27 @@ export class NexxusElasticsearchDbBootstrapper extends NexxusDatabaseBootstrappe
     const schema = app.getSchema();
 
     // Per-app-per-model indices — one per model type the app declares.
-    for (const [modelType, modelSchema] of Object.entries(schema)) {
+    // The Application schema now wraps field defs under a `fields` key so
+    // we can carry per-model flags (`subscribable`, `transient`); the ES
+    // index mapping only cares about the field defs.
+    //
+    // Transient models are skipped — they're notification-shaped, created
+    // by the API and published directly to the transport-manager without
+    // ever hitting the writer or the DB, so an index would sit empty
+    // forever. See `NexxusApplication` for the flag semantics.
+    for (const [modelType, modelDef] of Object.entries(schema)) {
+      if (modelDef.transient === true) {
+        NexxusDatabaseAdapter.logger.info(
+          `Skipping index creation for transient model "${modelType}" on app ${appId}`,
+          NexxusElasticsearchDbBootstrapper.LOGGER_LABEL,
+        );
+
+        continue;
+      }
+
       await this.createIndexIfMissing(
         `${NEXXUS_PREFIX_LC}-app-${appId}-${modelType}`,
-        this.buildMapping(modelSchema, true),
+        this.buildMapping(modelDef.fields, true),
       );
     }
 
@@ -208,7 +225,8 @@ export class NexxusElasticsearchDbBootstrapper extends NexxusDatabaseBootstrappe
   private static fieldToEsMapping(def: NexxusFieldDef): EsFieldMapping {
     switch (def.type) {
       case 'string':  return { type: 'keyword' };
-      case 'number':  return { type: 'double'  };
+      case 'int':     return { type: 'long'  };
+      case 'float':   return { type: 'double'  };
       case 'boolean': return { type: 'boolean' };
       case 'date':    return { type: 'date'    };
       case 'array':

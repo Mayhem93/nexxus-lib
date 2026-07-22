@@ -53,7 +53,7 @@ export class NexxusAppModel extends NexxusBaseModel<INexxusAppModel> {
     // present in `props` are validated.
     const normalized = NexxusSchemaValidator.validateAgainstSchema(
       props as Record<string, unknown>,
-      modelDef
+      modelDef.fields
     );
 
     super(normalized as INexxusAppModel);

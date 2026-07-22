@@ -2,6 +2,7 @@ import { InvalidParametersException, ModelNotFoundException } from '../Exception
 import { NexxusApiBaseRoute } from '../BaseRoute';
 import { type NexxusApiRequest, type NexxusApiResponse, NexxusApi } from '../Api';
 import { RequiredHeadersMiddleware, AppExistsMiddleware, AuthMiddleware } from '../middlewares';
+import { validateModelQueryParams, buildDatabaseFilter } from '../ModelQueryValidation';
 import {
   NexxusAppModel,
   NexxusJsonPatch,
@@ -15,6 +16,21 @@ import {
 } from '@mayhem93/nexxus-core-lib';
 
 import type { Router, RequestHandler } from 'express';
+
+type SearchModelRequestBody = {
+  id?: string;
+  userId?: string;
+  filter?: NexxusFilterQueryType;
+  limit?: number;
+  offset?: number;
+};
+
+interface SearchModelRequest extends NexxusApiRequest {
+  body: SearchModelRequestBody;
+  params: {
+    type: string;
+  };
+}
 
 interface GetModelRequest extends NexxusApiRequest {
   params: {
@@ -82,6 +98,53 @@ export default class ModelRoute extends NexxusApiBaseRoute {
     this.router.post('/count',
       this.countModel.bind(this) as RequestHandler<any, any, CountModelRequestBody>
     );
+    this.router.post('/:type/search',
+      this.searchModel.bind(this) as RequestHandler<SearchModelRequest['params'], any, SearchModelRequest['body']>
+    );
+  }
+
+  /**
+   * Traditional search — no subscription side-effect. Model type comes
+   * from the URL param; filter / pagination / id / userId from the body.
+   * Shared validation with subscribe/unsubscribe lives in
+   * `ModelQueryValidation.validateModelQueryParams`.
+   */
+  private async searchModel(req: SearchModelRequest, res: NexxusApiResponse): Promise<void> {
+    const validated = validateModelQueryParams(req, req.body, req.params.type);
+    const { appId, app, model } = validated;
+
+    // Pagination — kept inline because only this route uses it.
+    let limit = req.body.limit;
+
+    if (limit !== undefined && (typeof limit !== 'number' || limit <= 0)) {
+      throw new InvalidParametersException('Invalid limit parameter');
+    }
+
+    limit = limit ?? app.getData().defaultLimit;
+
+    if (limit! > app.getData().maxLimit!) {
+      throw new InvalidParametersException(`Limit parameter exceeds maximum allowed value (${app.getData().maxLimit})`);
+    }
+
+    let offset = req.body.offset;
+
+    if (offset === undefined) {
+      offset = 0;
+    } else if (typeof offset !== 'number' || offset < 0) {
+      throw new InvalidParametersException('Invalid offset parameter');
+    }
+
+    const databaseFilter = buildDatabaseFilter(validated, req.body.filter);
+
+    const results = (await NexxusApi.database.searchItems({
+      appId,
+      type: model,
+      filter: databaseFilter,
+      limit,
+      offset,
+    })).map(item => item.getData());
+
+    res.status(200).send({ data: { items: results } });
   }
 
   private async getModel(req: GetModelRequest, res: NexxusApiResponse): Promise<void> {
@@ -111,7 +174,8 @@ export default class ModelRoute extends NexxusApiBaseRoute {
 
   private async createModel(req: CreateAppModelRequest, res: NexxusApiResponse): Promise<void> {
     const appId = req.headers['nxx-app-id'] as string;
-    const appSchema = NexxusApi.getStoredApp(appId)?.getSchema() as NexxusApplicationSchema;
+    const app = NexxusApi.getStoredApp(appId)!;
+    const appSchema = app.getSchema();
 
     if (!appSchema[req.body.type]) {
       throw new ModelNotFoundException(`Model "${req.body.type}" not found in schema for the application "${appId}"`);
@@ -123,17 +187,39 @@ export default class ModelRoute extends NexxusApiBaseRoute {
       userId: req.user?.id
     }, appSchema);
 
-    await NexxusApi.messageQueue.publishMessage('writer', { event: 'model_created', data: newModel.getData() });
+    // Transient models bypass the writer entirely — their records are
+    // notification-shaped, existing only long enough to fan out to
+    // subscribers. Publishing directly to transport-manager saves the
+    // DB write and the writer's re-validate hop. The payload shape is
+    // identical (both queues accept NexxusModelCreatedPayload).
+    if (app.isTransient(req.body.type)) {
+      await NexxusApi.messageQueue.publishMessage('transport-manager', {
+        event: 'model_created',
+        data: newModel.getData(),
+      });
+    } else {
+      await NexxusApi.messageQueue.publishMessage('writer', {
+        event: 'model_created',
+        data: newModel.getData(),
+      });
+    }
 
     res.status(202).send({ message: 'Model created successfully!' });
   }
 
   private async updateModel(req: UpdateAppModelRequest, res: NexxusApiResponse): Promise<void> {
     const appId = req.headers['nxx-app-id'] as string;
-    const appSchema = NexxusApi.getStoredApp(appId)?.getSchema() as NexxusApplicationSchema;
+    const app = NexxusApi.getStoredApp(appId)!;
+    const appSchema = app.getSchema();
 
     if (!appSchema[req.body.type]) {
       throw new ModelNotFoundException(`Model "${req.body.type}" not found in schema for the application "${appId}"`);
+    }
+
+    if (app.isTransient(req.body.type)) {
+      throw new InvalidParametersException(
+        `Model "${req.body.type}" is transient (create-only) and cannot be updated`
+      );
     }
 
     try {
@@ -163,10 +249,17 @@ export default class ModelRoute extends NexxusApiBaseRoute {
 
   private async deleteModel(req: DeleteAppModelRequest, res: NexxusApiResponse): Promise<void> {
     const appId = req.headers['nxx-app-id'] as string;
-    const appSchema = NexxusApi.getStoredApp(appId)?.getSchema() as NexxusApplicationSchema;
+    const app = NexxusApi.getStoredApp(appId)!;
+    const appSchema = app.getSchema();
 
     if (!appSchema[req.body.type]) {
       throw new ModelNotFoundException(`Model "${req.body.type}" not found in schema for the application "${appId}"`);
+    }
+
+    if (app.isTransient(req.body.type)) {
+      throw new InvalidParametersException(
+        `Model "${req.body.type}" is transient (create-only) and cannot be deleted`
+      );
     }
 
     await NexxusApi.messageQueue.publishMessage('writer', { event: 'model_deleted', data: {

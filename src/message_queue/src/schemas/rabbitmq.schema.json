@@ -16,6 +16,19 @@
     "managementPort": {
       "type": "number",
       "default": 15672
+    },
+    "compression": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "algo": {
+          "type": "string",
+          "enum": ["lz4"]
+        },
+        "options": { "type": "object", "default": {} }
+      },
+      "required": ["enabled", "algo"],
+      "additionalProperties": false
     }
   },
   "required": [
