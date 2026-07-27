@@ -79,6 +79,24 @@ export abstract class NexxusMessageQueueAdapter<
   /** Reentrance guard for `tryOnce` — prevents overlap if `doConnect` hangs longer than `reconnectDelayMs`. */
   private tryInFlight: boolean = false;
 
+  /**
+   * True when consumption is externally paused via `pauseConsuming()`.
+   * Guards the auto-restore path in `tryOnce()` (won't re-consume on
+   * reconnect while paused). Cleared by `resumeConsuming()`.
+   */
+  protected consumingPaused: boolean = false;
+
+  /**
+   * (queueName → callback) tuples for every active `consumeMessages`
+   * call. Retained across MQ reconnects so the state machine restores
+   * each consumer via `doConsume(queue, cb)` after `doConnect`
+   * succeeds. The callback type is erased to `any` here because
+   * TypeScript Maps can't hold heterogeneous parameterized callbacks;
+   * the public `consumeMessages` signature preserves the Q-generic for
+   * callers, and the erasure is invisible outside this class.
+   */
+  protected consumers: Map<NexxusQueueName, (message: NexxusQueueMessage<any>) => Promise<void>> = new Map();
+
   constructor(services: INexxusBaseServices) {
     super(services.configManager.getConfig('message_queue') as T);
 
@@ -242,10 +260,90 @@ export abstract class NexxusMessageQueueAdapter<
     metadata?: Record<string, any>
   ): Promise<void>;
 
-  abstract consumeMessages<Q extends NexxusQueueName>(
+  /**
+   * Register a callback to consume messages from `queueName`. The
+   * (queue, callback) tuple is retained on the base so MQ reconnects
+   * and external `resumeConsuming()` calls can restore the consumer
+   * without the caller re-registering.
+   *
+   * If already connected and not paused, dispatches immediately to
+   * `doConsume`. Otherwise the tuple is stashed and picked up by the
+   * next reconnect / resume transition.
+   */
+  public async consumeMessages<Q extends NexxusQueueName>(
     queueName: Q,
     onMessage: (message: NexxusQueueMessage<NexxusQueuePayload<Q>>) => Promise<void>
-  ) : Promise<void>;
+  ): Promise<void> {
+    const erased = onMessage as (message: NexxusQueueMessage<any>) => Promise<void>;
+
+    this.consumers.set(queueName, erased);
+
+    if (this.connected && !this.consumingPaused) {
+      await this.doConsume(queueName, erased);
+    }
+  }
+
+  /**
+   * Pause all consumption. Idempotent — second+ call is a no-op. If
+   * currently connected, delegates to `doCancelAll` so the concrete
+   * can cancel its consumer tags with the broker. If disconnected,
+   * only the flag is set — the next reconnect's auto-restore consults
+   * the flag and skips.
+   */
+  public async pauseConsuming(): Promise<void> {
+    if (this.consumingPaused) {
+      return;
+    }
+
+    this.consumingPaused = true;
+
+    if (this.connected) {
+      await this.doCancelAll();
+    }
+  }
+
+  /**
+   * Resume consumption. Idempotent — second+ call is a no-op. If
+   * currently connected, iterates the stored consumers and re-registers
+   * each via `doConsume`. If disconnected, only the flag is cleared —
+   * the next reconnect's auto-restore now sees `!consumingPaused` and
+   * does the actual work.
+   */
+  public async resumeConsuming(): Promise<void> {
+    if (!this.consumingPaused) {
+      return;
+    }
+
+    this.consumingPaused = false;
+
+    if (this.connected) {
+      for (const [queue, cb] of this.consumers) {
+        await this.doConsume(queue, cb);
+      }
+    }
+  }
+
+  /**
+   * Concrete's entry point for actually opening a consumer against the
+   * live connection. Called from the base's `consumeMessages` (initial
+   * registration), `resumeConsuming` (external override), and
+   * `tryOnce`'s auto-restore branch (MQ reconnect). The concrete tracks
+   * broker-specific state — e.g. RabbitMQ's per-consumer tag — locally
+   * so it can cancel later via `doCancelAll`.
+   */
+  protected abstract doConsume(
+    queueName: NexxusQueueName,
+    onMessage: (message: NexxusQueueMessage<any>) => Promise<void>
+  ): Promise<void>;
+
+  /**
+   * Cancel every active consumer on the live connection. Called from
+   * `pauseConsuming` when connected. Idempotent-friendly — safe even
+   * if the concrete's channel is already null (e.g. connection just
+   * dropped mid-pause). Errors on individual cancellations should be
+   * logged and swallowed; failing to cancel doesn't block shutdown.
+   */
+  protected abstract doCancelAll(): Promise<void>;
 
   /**
    * Check whether a queue by this name currently exists on the broker.
@@ -324,6 +422,24 @@ export abstract class NexxusMessageQueueAdapter<
 
       this.connected = true;
       this.stopRetryLoop();
+
+      // Restore any previously-registered consumers unless externally
+      // paused. Callers of consumeMessages don't have to re-register on
+      // MQ reconnect — the (queue, cb) map is retained across drop →
+      // reconnect cycles. When paused, this is skipped; the worker's
+      // resumeConsuming() call is the sole restore path in that case.
+      if (!this.consumingPaused && this.consumers.size > 0) {
+        for (const [queue, cb] of this.consumers) {
+          try {
+            await this.doConsume(queue, cb);
+          } catch (restoreErr) {
+            NexxusMessageQueueAdapter.logger.warn(
+              `Failed to restore consumer for queue "${queue}": ${(restoreErr as Error).message}`,
+              NexxusMessageQueueAdapter.loggerLabel,
+            );
+          }
+        }
+      }
 
       NexxusMessageQueueAdapter.logger.info('Connected to MQ broker', NexxusMessageQueueAdapter.loggerLabel);
       this.emit('connect');

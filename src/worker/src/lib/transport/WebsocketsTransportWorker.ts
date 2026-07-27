@@ -22,7 +22,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 
 import * as path from 'node:path';
 
-type NexxusWebsocketsTransportWorkerConfig = NexxusVolatileTransportWorkerConfig & {
+export type NexxusWebsocketsTransportWorkerConfig = NexxusVolatileTransportWorkerConfig & {
   name: string;
   port: number;
   /** Class name of the logger service (see `NexxusApiConfig.logger`). */
@@ -100,7 +100,7 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
     this.server.on('connection', this.handleConnection.bind(this));
   }
 
-  protected async sendToDevice(deviceId: string, data: NexxusTransportWorkerPayload['data']): Promise<void> {
+  protected sendToDevice(deviceId: string, data: NexxusTransportWorkerPayload['data']): Promise<void> {
     const client = this.registeredClients.get(deviceId);
 
     if (!client) {
@@ -113,7 +113,7 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
         NexxusWebsocketsTransportWorker.loggerLabel
       );
 
-      return;
+      return Promise.resolve();
     }
 
     switch (data.event) {
@@ -131,6 +131,8 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
           NexxusWebsocketsTransportWorker.loggerLabel
         );
     }
+
+    return Promise.resolve();
   }
 
   private handleConnection(ws: WebSocket): void {
@@ -231,7 +233,7 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
     }
   }
 
-  protected async getOwnStats(): Promise<Omit<NexxusWebsocketsTransportWorkerStats, keyof NexxusBaseWorkerStats>> {
+  protected getOwnStats(): Promise<Omit<NexxusWebsocketsTransportWorkerStats, keyof NexxusBaseWorkerStats>> {
     return Promise.resolve({
       unregisteredClients: this.unregisteredClients.size,
       registeredClients: this.registeredClients.size,

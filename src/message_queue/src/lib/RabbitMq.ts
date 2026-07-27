@@ -66,6 +66,14 @@ export class NexxusRabbitMq extends NexxusMessageQueueAdapter<RabbitMQConfig, Ne
   private connection: amqplib.ChannelModel | null = null;
   private channel: amqplib.Channel | null = null;
 
+  /**
+   * amqplib consumer tags keyed by queue name. Populated by `doConsume`
+   * on each `channel.consume()` call, drained by `doCancelAll`. Cleared
+   * on channel close as well — a fresh channel will get fresh tags via
+   * the base's auto-restore path after reconnect.
+   */
+  private consumerTags: Map<NexxusQueueName, string> = new Map();
+
   constructor(services: INexxusBaseServices) {
     super(services);
   }
@@ -106,6 +114,10 @@ export class NexxusRabbitMq extends NexxusMessageQueueAdapter<RabbitMQConfig, Ne
     connection.once('close', () => {
       this.connection = null;
       this.channel = null;
+      // The channel is dead — any consumer tags we tracked against it
+      // are meaningless now. The base's auto-restore path repopulates
+      // them via doConsume() after the next reconnect.
+      this.consumerTags.clear();
       this.onConnectionLost();
     });
 
@@ -150,9 +162,9 @@ export class NexxusRabbitMq extends NexxusMessageQueueAdapter<RabbitMQConfig, Ne
    * access it via the ChannelModel's underlying connection. Falls back to
    * `undefined` if the shape changes in a future amqplib release.
    */
-  async getStats(): Promise<NexxusRabbitMqStats> {
+  public getStats(): Promise<NexxusRabbitMqStats> {
     if (!this.connection) {
-      return { id: 'unknown', connected: false };
+      return Promise.resolve({ id: 'unknown', connected: false });
     }
 
     // TODO: actually use the rabbitmq management HTTP API to get queue/exchange stats, if we want to report more than just connection state
@@ -161,16 +173,16 @@ export class NexxusRabbitMq extends NexxusMessageQueueAdapter<RabbitMQConfig, Ne
       version?: string;
     } | undefined;
 
-    return {
+    return Promise.resolve({
       id: this.config.host,
       connected: true,
       channelOpen: this.channel !== null,
       brokerProduct: serverProps?.product,
       brokerVersion: serverProps?.version,
-    };
+    });
   }
 
-  async publishMessage<Q extends NexxusQueueName>(
+  public async publishMessage<Q extends NexxusQueueName>(
     queueName: Q,
     message: NexxusQueuePayload<Q>,
     metadata?: amqplib.Options.Publish
@@ -195,7 +207,7 @@ export class NexxusRabbitMq extends NexxusMessageQueueAdapter<RabbitMQConfig, Ne
     this.channel?.sendToQueue(queueName, messageBuffer, options);
   }
 
-  async queueExists(name: string): Promise<boolean> {
+  public async queueExists(name: string): Promise<boolean> {
     if (!this.connection) {
       throw new Error('RabbitMQ connection not available — call connect() before queueExists()');
     }
@@ -290,22 +302,33 @@ export class NexxusRabbitMq extends NexxusMessageQueueAdapter<RabbitMQConfig, Ne
     );
   }
 
-  public async consumeMessages<Q extends NexxusQueueName>(
-    queueName: Q,
-    onMessage: (message: NexxusQueueMessage<NexxusQueuePayload<Q>>) => Promise<void>
-  ) : Promise<void> {
-    await this.channel?.consume(queueName, async msg => {
+  /**
+   * amqplib entry point for actually starting a consumer. Called by the
+   * base's `consumeMessages` on initial registration, by `resumeConsuming`
+   * on external unpause, and by `tryOnce`'s auto-restore on reconnect.
+   * The returned consumer tag is stashed keyed by queue name so
+   * `doCancelAll` can address it later.
+   */
+  protected async doConsume(
+    queueName: NexxusQueueName,
+    onMessage: (message: NexxusQueueMessage<any>) => Promise<void>
+  ): Promise<void> {
+    if (!this.channel) {
+      throw new Error('RabbitMQ channel not available — call connect() before doConsume()');
+    }
+
+    const { consumerTag } = await this.channel.consume(queueName, async msg => {
       if (msg !== null) {
         // `deserializePayload` on the base handles decompression (when
         // enabled) + JSON.parse, so compression policy stays in one place.
-        const payload = await this.deserializePayload<Q>(msg.content);
-        const metadata : RabbitMqMetadata = {
+        const payload = await this.deserializePayload<any>(msg.content);
+        const metadata: RabbitMqMetadata = {
           fields: msg.fields,
-          properties: msg.properties
+          properties: msg.properties,
         };
-        const queueMessage : NexxusQueueMessage<NexxusQueuePayload<Q>> = {
+        const queueMessage: NexxusQueueMessage<any> = {
           payload,
-          metadata
+          metadata,
         };
 
         NexxusRabbitMq.logger.debug(`Received message from RabbitMQ queue ${queueName}: ${msg.content.toString()}`, NexxusRabbitMq.loggerLabel);
@@ -316,6 +339,33 @@ export class NexxusRabbitMq extends NexxusMessageQueueAdapter<RabbitMQConfig, Ne
       }
     });
 
-    return Promise.resolve();
+    this.consumerTags.set(queueName, consumerTag);
+  }
+
+  /**
+   * Cancel every tracked consumer on the current channel. Errors on
+   * individual `channel.cancel` calls are logged and swallowed —
+   * failing to cancel doesn't block pauseConsuming. Tags are always
+   * cleared so a subsequent doConsume registers fresh.
+   */
+  protected async doCancelAll(): Promise<void> {
+    if (!this.channel) {
+      this.consumerTags.clear();
+
+      return;
+    }
+
+    for (const [queue, tag] of this.consumerTags) {
+      try {
+        await this.channel.cancel(tag);
+      } catch (err) {
+        NexxusRabbitMq.logger.warn(
+          `Failed to cancel consumer tag ${tag} for queue "${queue}": ${(err as Error).message}`,
+          NexxusRabbitMq.loggerLabel,
+        );
+      }
+    }
+
+    this.consumerTags.clear();
   }
 }

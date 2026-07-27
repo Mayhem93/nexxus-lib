@@ -150,8 +150,9 @@ export class NexxusRedis extends NexxusBaseService<NexxusRedisConfig, RedisEvent
       this.emit('disconnect');
     }).on('error', (err) => {
       NexxusRedis.logger.error(`Redis connection error: ${err.message}`, NexxusRedis.loggerLabel);
-      this.emit('error', err);
       this.emit('disconnect');
+    }).on('reconnecting', () => {
+      NexxusRedis.logger.info('Reconnecting to redis', NexxusRedis.loggerLabel);
     }).on('ready', () => {
       NexxusRedis.logger.info('Connected to redis', NexxusRedis.loggerLabel);
       this.emit('connect');
