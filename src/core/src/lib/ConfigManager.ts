@@ -1,18 +1,21 @@
-import { FatalErrorException, InvalidConfigException } from "./Exceptions";
+import { FatalErrorException, InvalidConfigException } from './Exceptions';
 import { NexxusServiceClass } from './BaseService';
 import {
   CliArgType,
   NexxusConfig,
   INexxusConfigProvider,
+  NexxusConfigProvider,
+  NexxusAsyncConfigProvider,
   NexxusFileConfigProvider,
   NexxusEnvVarsConfigProvider,
   NexxusCliArgConfigProvider
-} from "./ConfigProvider";
+} from './ConfigProvider';
+import { loadPackage } from './ServiceResolver';
 
-import { Ajv, ErrorObject } from "ajv";
-import * as Dot from "dot-prop";
-import deepMerge from "deepmerge";
-import type { JSONSchema7, JSONSchema7Definition } from "json-schema";
+import { Ajv, ErrorObject } from 'ajv';
+import * as Dot from 'dot-prop';
+import deepMerge from 'deepmerge';
+import type { JSONSchema7, JSONSchema7Definition } from 'json-schema';
 
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -53,9 +56,38 @@ type RegisteredSpecs<S> = {
   specs: S;
 };
 
+/**
+ * One entry in the `NXX_CONFIG_PROVIDERS` env var — a custom config provider
+ * to load out-of-band, before the rest of the config resolves. Deliberately
+ * mirrors the shape of `WinstonNexxusLogger`'s custom-transport config:
+ *   - `provider` — npm package specifier of the provider, resolved against the
+ *                  app's install tree.
+ *   - `export`  — optional named export to pick from the package; when absent
+ *                 the default export (or the module-as-class for legacy CJS)
+ *                 is used.
+ *   - `options` — passthrough object handed to the provider's constructor.
+ *                 This is the "extraneous config" a provider needs (e.g. an
+ *                 AWS region + secret id) that CAN'T live in the Nexxus config
+ *                 itself, because this provider is one of the things that
+ *                 produces that config.
+ */
+export type CustomConfigProviderSpec = {
+  provider: string;
+  export?: string;
+  options?: Record<string, unknown>;
+};
+
 export class NexxusConfigManager {
   private static CONF_FILE_NAME : Readonly<string> = 'nexxus.conf.json';
   private static DEFAULT_CONF_PATH : Readonly<string> = '/etc/nexxus';
+  /**
+   * Special out-of-band env var carrying the JSON array of custom config
+   * providers to load. Read directly (like `NXX_CONF_PATH`), NOT through
+   * the regular env-var pipeline — the providers it names are part of what
+   * produces the config, so their list must be available before config
+   * resolution has run.
+   */
+  private static CONFIG_PROVIDERS_ENV_VAR : Readonly<string> = 'NXX_CONFIG_PROVIDERS';
 
   private jsonSchema: JSONSchema7;
   private envVarsSpecs: Array<RegisteredSpecs<ConfigEnvVars>> = [];
@@ -89,7 +121,7 @@ export class NexxusConfigManager {
   private hasNewRegistrations: boolean = false;
 
   constructor(configFilePath? : string) {
-    const schemaPath = path.join(__dirname, "../../src/schemas/root.schema.json");
+    const schemaPath = path.join(__dirname, '../../src/schemas/root.schema.json');
     const resolvedConfPath = path.resolve(configFilePath || process.env.NXX_CONF_PATH || path.join(
       NexxusConfigManager.DEFAULT_CONF_PATH, NexxusConfigManager.CONF_FILE_NAME
     ));
@@ -98,10 +130,6 @@ export class NexxusConfigManager {
     this.configProviders.push(new NexxusFileConfigProvider(resolvedConfPath));
     this.configProviders.push(new NexxusEnvVarsConfigProvider());
     this.configProviders.push(new NexxusCliArgConfigProvider());
-  }
-
-  public addCustomProvider(provider: INexxusConfigProvider): void {
-    this.configProviders.splice(1, 0, provider);
   }
 
   private addJsonSchemaDef(def: AddJsonSchemaDefFuncArg): void {
@@ -236,6 +264,110 @@ export class NexxusConfigManager {
     });
   }
 
+  /**
+   * Resolves the custom config providers declared out-of-band via the
+   * `NXX_CONFIG_PROVIDERS` env var and appends them to `customProviders` so
+   * `populateFromCustomProviders` runs them. No-op when the var is unset.
+   *
+   * The list can't come from the config file — custom providers are one of
+   * the things that PRODUCE the config, so what to load has to arrive from
+   * somewhere available before config resolution runs. Malformed JSON or a
+   * shape violation is fatal: a mis-declared provider means config can't be
+   * trusted, so failing fast beats booting with a half-populated config.
+   */
+  private async resolveCustomProviders(): Promise<void> {
+    const raw = process.env[NexxusConfigManager.CONFIG_PROVIDERS_ENV_VAR];
+
+    if (!raw) {
+      return;
+    }
+
+    let specs: Array<CustomConfigProviderSpec>;
+
+    try {
+      specs = JSON.parse(raw);
+    } catch (e) {
+      throw new FatalErrorException(
+        `${NexxusConfigManager.CONFIG_PROVIDERS_ENV_VAR} is not valid JSON: ${(e as Error).message}`
+      );
+    }
+
+    if (!Array.isArray(specs)) {
+      throw new FatalErrorException(
+        `${NexxusConfigManager.CONFIG_PROVIDERS_ENV_VAR} must be a JSON array of config-provider specs.`
+      );
+    }
+
+    for (const spec of specs) {
+      if (!spec || typeof spec.provider !== 'string') {
+        throw new FatalErrorException(
+          `Each entry in ${NexxusConfigManager.CONFIG_PROVIDERS_ENV_VAR} must be an object with a string "type" (the provider package name).`
+        );
+      }
+
+      this.customProviders.push(await this.loadCustomProvider(spec));
+    }
+  }
+
+  /**
+   * Dynamically imports the package named by `spec.provider` and instantiates its
+   * config-provider class with `spec.options`. Export resolution mirrors
+   * `WinstonNexxusLogger.loadCustomTransport`'s priority order:
+   *   1. `mod[spec.export]` when `spec.export` is set
+   *   2. `mod.default` if it's a class/function (ESM default export)
+   *   3. the module itself if it's a class/function (CJS `module.exports = Cls`)
+   *
+   * Resolution goes through the shared `loadPackage` so it's anchored to the
+   * app's install tree, not the library's own location (matters under
+   * non-hoisted node_modules layouts like pnpm).
+   *
+   * Unlike Winston transports — third-party classes with no shared base — a
+   * config provider extends one of our own abstract bases, so we can cheaply
+   * assert the loaded class really is one before trusting it.
+   */
+  private async loadCustomProvider(spec: CustomConfigProviderSpec): Promise<INexxusConfigProvider> {
+    const mod = await loadPackage(spec.provider);
+
+    let ProviderCtor: any;
+
+    if (spec.export) {
+      ProviderCtor = mod[spec.export];
+
+      if (typeof ProviderCtor !== 'function') {
+        throw new InvalidConfigException(
+          `Config provider package "${spec.provider}" has no export named "${spec.export}" (or it isn't a class).`
+        );
+      }
+    } else if (typeof mod.default === 'function') {
+      // ESM `export default class`, or CJS `module.exports = Cls` seen through
+      // import()'s synthetic default.
+      ProviderCtor = mod.default;
+    } else if (typeof mod.default?.default === 'function') {
+      // CJS/ESM interop "double default": a TSC/Babel-compiled `export default
+      // class` becomes `exports.default = Cls` with `__esModule` set. import()
+      // makes the synthetic ESM default the WHOLE module.exports object, so the
+      // real class sits one level down at `.default.default`.
+      ProviderCtor = mod.default.default;
+    } else if (typeof mod === 'function') {
+      // Bare CJS `module.exports = Cls` exposed directly on the namespace.
+      ProviderCtor = mod;
+    } else {
+      throw new InvalidConfigException(
+        `Could not find a config provider class in package "${spec.provider}". Specify "export" to name the class.`
+      );
+    }
+
+    const provider = new ProviderCtor(spec.options ?? {});
+
+    if (!(provider instanceof NexxusConfigProvider || provider instanceof NexxusAsyncConfigProvider)) {
+      throw new InvalidConfigException(
+        `Class resolved from "${spec.provider}" must extend NexxusConfigProvider or NexxusAsyncConfigProvider.`
+      );
+    }
+
+    return provider;
+  }
+
   private async populateFromCustomProviders(): Promise<void> {
     for (const provider of this.customProviders) {
       const result = await provider.getConfig();
@@ -274,6 +406,7 @@ export class NexxusConfigManager {
         }
       }
 
+      await this.resolveCustomProviders();
       await this.populateFromCustomProviders();
       this.dataInitialized = true;
     }

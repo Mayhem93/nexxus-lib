@@ -1,25 +1,31 @@
-import { FatalErrorException } from "./Exceptions";
+import { FatalErrorException } from './Exceptions';
 
 import * as fs from "fs";
 
-import { ArgumentParser, SUPPRESS } from "argparse";
+import { ArgumentParser, SUPPRESS } from 'argparse';
 
 export type NexxusConfig = Record<string, any>;
-export type CliArgType = "int" | "str" | "boolean" | "float";
+export type CliArgType = 'int' | 'str' | 'boolean' | 'float';
 
 export interface INexxusConfigProvider {
   getConfig(): NexxusConfig | Promise<NexxusConfig>
 }
 
 export abstract class NexxusConfigProvider implements INexxusConfigProvider {
+  public abstract readonly name: string;
+
   abstract getConfig(): NexxusConfig
 }
 
 export abstract class NexxusAsyncConfigProvider implements INexxusConfigProvider {
+  public abstract readonly name: string;
+
   abstract getConfig(): Promise<NexxusConfig>
 }
 
 export class NexxusFileConfigProvider extends NexxusConfigProvider {
+  public readonly name: string = 'NexxusFileConfigProvider';
+
   constructor(private filePath: string) {
     super();
   }
@@ -42,7 +48,9 @@ export class NexxusFileConfigProvider extends NexxusConfigProvider {
 }
 
 export class NexxusEnvVarsConfigProvider extends NexxusConfigProvider {
-  static ENV_VAR_PREFIX : Readonly<string> = "NXX_";
+  public readonly name: string = 'NexxusEnvVarsConfigProvider';
+
+  public static readonly ENV_VAR_PREFIX : Readonly<string> = 'NXX_';
 
   public getConfig(): NexxusConfig {
     const result : NexxusConfig = {};
@@ -58,6 +66,8 @@ export class NexxusEnvVarsConfigProvider extends NexxusConfigProvider {
 }
 
 export class NexxusCliArgConfigProvider extends NexxusConfigProvider {
+  public readonly name: string = 'NexxusCliArgConfigProvider';
+
   private argParser: ArgumentParser;
   private originalExit: (status: number, message: string) => void;
   private addedArgs: Set<string> = new Set();
@@ -68,7 +78,7 @@ export class NexxusCliArgConfigProvider extends NexxusConfigProvider {
     this.argParser = new ArgumentParser({ add_help: false, usage: SUPPRESS });
     this.originalExit = this.argParser.exit.bind(this.argParser);
     this.argParser.exit = (status: number, message: string) => {
-      if (message.search("unrecognized arguments: ") === -1) {
+      if (message.search('unrecognized arguments: ') === -1) {
         this.originalExit(status, message);
       }
     }
