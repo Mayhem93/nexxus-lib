@@ -62,7 +62,7 @@ export interface INexxusAsyncLogger {
   log(level: NexxusLoggerLevels, message: string, attributes?: LogAttributes, label?: string): Promise<void>
 }
 
-interface NexxusLoggerServices extends Omit<INexxusBaseServices, 'logger'> {}
+export interface NexxusLoggerServices extends Omit<INexxusBaseServices, 'logger'> {}
 
 export abstract class NexxusBaseLogger<
   T extends NexxusConfig,
@@ -71,8 +71,8 @@ export abstract class NexxusBaseLogger<
 
   protected static configRootKey: string = 'logger';
 
-  constructor(services: NexxusLoggerServices) {
-    super(services.configManager.getConfig('logger') as T);
+  constructor(config: T) {
+    super(config);
   }
 
   public abstract log(level: NexxusLoggerLevels, message: string, attributes?: LogAttributes, label?: string): void;
@@ -190,8 +190,8 @@ export class WinstonNexxusLogger extends NexxusBaseLogger<WinstonNexxusLoggerCon
    * must be resolved (async, since custom ones are dynamically imported) before
    * the Winston logger can be constructed; the factory owns that step.
    */
-  private constructor(services: NexxusLoggerServices, resolvedTransports: Array<Winston.transport>) {
-    super(services);
+  private constructor(config: WinstonNexxusLoggerConfig, resolvedTransports: Array<Winston.transport>) {
+    super(config);
 
     let format: Winston.Logform.Format;
 
@@ -275,7 +275,33 @@ export class WinstonNexxusLogger extends NexxusBaseLogger<WinstonNexxusLoggerCon
     const config = services.configManager.getConfig('logger') as WinstonNexxusLoggerConfig;
     const resolvedTransports = await WinstonNexxusLogger.resolveTransports(config);
 
-    return new WinstonNexxusLogger(services, resolvedTransports);
+    return new WinstonNexxusLogger(config, resolvedTransports);
+  }
+
+  /**
+   * Fixed config for the fallback/bootstrap logger. NOT driven by the config
+   * manager — this logger exists precisely to log config problems, so it can't
+   * depend on config having resolved. A future out-of-band env var (à la
+   * `NXX_CONF_PATH`) can override these defaults.
+   */
+  private static readonly FALLBACK_CONFIG: WinstonNexxusLoggerConfig = {
+    level: NexxusLoggerLevels.DEBUG,
+    logType: 'json',
+    timestamps: true,
+    colors: false,
+  };
+
+  /**
+   * Synchronous fallback factory used by `NexxusConfigManager`. Stdout only,
+   * so there's no async transport resolution to await — safe to call from a
+   * constructor. Unlike `create()`, it does NOT read the config manager: the
+   * fallback logger must exist before config resolution has run.
+   */
+  public static createFallback(): WinstonNexxusLogger {
+    return new WinstonNexxusLogger(
+      WinstonNexxusLogger.FALLBACK_CONFIG,
+      [new Winston.transports.Console()]
+    );
   }
 
   /**

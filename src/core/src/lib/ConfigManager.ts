@@ -11,6 +11,7 @@ import {
   NexxusCliArgConfigProvider
 } from './ConfigProvider';
 import { loadPackage } from './ServiceResolver';
+import { WinstonNexxusLogger } from './Logger';
 
 import { Ajv, ErrorObject } from 'ajv';
 import * as Dot from 'dot-prop';
@@ -80,6 +81,7 @@ export type CustomConfigProviderSpec = {
 export class NexxusConfigManager {
   private static CONF_FILE_NAME : Readonly<string> = 'nexxus.conf.json';
   private static DEFAULT_CONF_PATH : Readonly<string> = '/etc/nexxus';
+  private static loggerLabel : Readonly<string> = 'NexxusConfigManager';
   /**
    * Special out-of-band env var carrying the JSON array of custom config
    * providers to load. Read directly (like `NXX_CONF_PATH`), NOT through
@@ -88,6 +90,14 @@ export class NexxusConfigManager {
    * resolution has run.
    */
   private static CONFIG_PROVIDERS_ENV_VAR : Readonly<string> = 'NXX_CONFIG_PROVIDERS';
+
+  /**
+   * Fallback/bootstrap logger — stdout, debug, json. Available immediately,
+   * before any config resolves, so config-related issues can be logged.
+   * Consumers (api/workers) may also use it for early bootstrap logging
+   * before their real configured logger is resolved.
+   */
+  public readonly fallbackLogger: WinstonNexxusLogger;
 
   private jsonSchema: JSONSchema7;
   private envVarsSpecs: Array<RegisteredSpecs<ConfigEnvVars>> = [];
@@ -121,6 +131,8 @@ export class NexxusConfigManager {
   private hasNewRegistrations: boolean = false;
 
   constructor(configFilePath? : string) {
+    this.fallbackLogger = WinstonNexxusLogger.createFallback();
+
     const schemaPath = path.join(__dirname, '../../src/schemas/root.schema.json');
     const resolvedConfPath = path.resolve(configFilePath || process.env.NXX_CONF_PATH || path.join(
       NexxusConfigManager.DEFAULT_CONF_PATH, NexxusConfigManager.CONF_FILE_NAME
@@ -301,11 +313,15 @@ export class NexxusConfigManager {
     for (const spec of specs) {
       if (!spec || typeof spec.provider !== 'string') {
         throw new FatalErrorException(
-          `Each entry in ${NexxusConfigManager.CONFIG_PROVIDERS_ENV_VAR} must be an object with a string "type" (the provider package name).`
+          `Each entry in ${NexxusConfigManager.CONFIG_PROVIDERS_ENV_VAR} must be an object with a string "provider" (the provider package name).`
         );
       }
 
       this.customProviders.push(await this.loadCustomProvider(spec));
+      this.fallbackLogger.debug(
+        `Loaded custom config provider "${spec.provider}"`,
+        NexxusConfigManager.loggerLabel
+      );
     }
   }
 
@@ -396,10 +412,13 @@ export class NexxusConfigManager {
         if (e instanceof FatalErrorException) {
           if (e.subcode === FatalErrorException.SUBCODES.CONFIG_FILE_NOT_FOUND) {
             // If the config file doesn't exist, we treat it as an empty config
-            // and let other providers populate the config.
-            // if the config is not valid it will throw eventually when validate is called and the schema is checked.
-            // TODO: log a warning that the config file was not found
+            // and let other providers populate the config. If the resulting
+            // config is invalid it throws below when the schema is checked.
             this.data = {};
+            this.fallbackLogger.warn(
+              'Config file not found — proceeding with empty base config; other providers may still populate it',
+              NexxusConfigManager.loggerLabel
+            );
           } else {
             throw e;
           }
