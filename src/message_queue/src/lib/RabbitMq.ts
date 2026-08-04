@@ -54,10 +54,10 @@ export class NexxusRabbitMq extends NexxusMessageQueueAdapter<RabbitMQConfig, Ne
   protected static loggerLabel: Readonly<string> = 'NxxRabbitMq';
   protected static schemaPath: string = path.join(__dirname, '../../src/schemas/rabbitmq.schema.json');
   protected static envVars: ConfigEnvVars = [
-    { name: 'MQ_HOST',     location: 'host' },
-    { name: 'MQ_PORT',     location: 'port' },
-    { name: 'MQ_USER',     location: 'user' },
-    { name: 'MQ_PASSWORD', location: 'password' }
+    { name: 'MQ_HOST',     location: 'host',     type: 'string' },
+    { name: 'MQ_PORT',     location: 'port',     type: 'int' },
+    { name: 'MQ_USER',     location: 'user',     type: 'string' },
+    { name: 'MQ_PASSWORD', location: 'password', type: 'string' }
   ];
 
   protected static cliArgs: ConfigCliArgs = [];

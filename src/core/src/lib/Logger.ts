@@ -180,10 +180,16 @@ export class WinstonNexxusLogger extends NexxusBaseLogger<WinstonNexxusLoggerCon
   private winston : Winston.Logger;
   protected static schemaPath: string = path.join(__dirname, '../../src/schemas/winston-logger.schema.json');
   protected static envVars: ConfigEnvVars = [
-    { name: 'LOG_LEVEL', location: 'level' }
+    { name: 'LOG_LEVEL', location: 'level', type: 'string' },
+    // JSON string that REPLACES the transports array, e.g.
+    // NXX_LOG_TRANSPORTS='[{"type":"stdout"},{"type":"file","filename":"/var/log/nxx.log"}]'.
+    // The shape is validated by the logger schema; we only require valid JSON here.
+    { name: 'LOG_TRANSPORTS', location: 'transports', type: 'json' }
   ];
 
-  protected static cliArgs: ConfigCliArgs = [];
+  protected static cliArgs: ConfigCliArgs = [
+    { name: 'transports', location: 'transports', type: 'json' }
+  ];
 
   /**
    * Private — use `WinstonNexxusLogger.create(...)` instead. Transport instances
@@ -402,13 +408,13 @@ export class WinstonNexxusLogger extends NexxusBaseLogger<WinstonNexxusLoggerCon
    * constructor name when the transport doesn't set a `name` (custom ones
    * loaded via `loadCustomTransport` often don't).
    */
-  public async getStats(): Promise<WinstonNexxusLoggerStats> {
-    return {
+  public getStats(): Promise<WinstonNexxusLoggerStats> {
+    return Promise.resolve({
       level: this.config.level,
       logType: this.config.logType,
       transports: this.winston.transports.map(
         t => (t as { name?: string }).name ?? t.constructor.name
       ),
-    };
+    });
   }
 }

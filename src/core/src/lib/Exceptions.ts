@@ -19,7 +19,8 @@ export class NexxusException extends Error {
   }
 }
 
-enum FatalErrorSubcodes {
+export const enum FatalErrorSubcodes {
+  FATAL_ERROR = "FATAL_ERROR",
   CONFIG_FILE_NOT_FOUND = "CONFIG_FILE_NOT_FOUND",
   CONFIG_FILE_INVALID_JSON = "CONFIG_FILE_INVALID_JSON",
   CONFIG_FILE_INVALID_SCHEMA = "CONFIG_FILE_INVALID_SCHEMA",
@@ -27,9 +28,7 @@ enum FatalErrorSubcodes {
 };
 
 export class FatalErrorException extends NexxusException {
-  public static SUBCODES : Readonly<typeof FatalErrorSubcodes> = FatalErrorSubcodes;
-
-  constructor(message: string, subcode?: FatalErrorSubcodes) {
+  constructor(message: string, subcode: FatalErrorSubcodes = FatalErrorSubcodes.FATAL_ERROR) {
     super(NexxusExceptions.FATAL_ERROR, message, subcode);
   }
 }

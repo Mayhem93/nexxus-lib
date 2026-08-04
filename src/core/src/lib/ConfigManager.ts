@@ -1,4 +1,4 @@
-import { FatalErrorException, InvalidConfigException } from './Exceptions';
+import { FatalErrorException, InvalidConfigException, FatalErrorSubcodes } from './Exceptions';
 import { NexxusServiceClass } from './BaseService';
 import {
   CliArgType,
@@ -34,6 +34,7 @@ type EnvVarsSpec = {
   name: string;
   /** Dot-notation path relative to the service's configRootKey (e.g. "host", "auth.jwtSecret"). */
   location: string;
+  type: CliArgType;
 };
 
 export type ConfigEnvVars = Array<EnvVarsSpec>;
@@ -233,7 +234,7 @@ export class NexxusConfigManager {
 
         collectedNames.set(arg.name, spec.className);
 
-        cliArgProvider.addArgument(arg.name, arg.type);
+        cliArgProvider.addArgument(arg.name);
       });
     });
 
@@ -241,8 +242,12 @@ export class NexxusConfigManager {
 
     this.cliArgsSpecs.forEach(spec => {
       spec.specs.forEach(arg => {
-        if (parsed[arg.name] !== undefined && parsed[arg.name] !== null) {
-          Dot.setProperty(this.data, `${spec.configRootKey}.${arg.location}`, parsed[arg.name]);
+        const raw = parsed[arg.name];
+
+        if (raw !== undefined && raw !== null) {
+          const value = cliArgProvider.coerce(String(raw), arg.type, `--${arg.name}`);
+
+          Dot.setProperty(this.data, `${spec.configRootKey}.${arg.location}`, value);
         }
       });
     });
@@ -265,9 +270,11 @@ export class NexxusConfigManager {
             Defined first by class "${collectedNames.get(envVar.name)}" and now by class "${spec.className}"`);
         }
 
-        const value = envResult?.[`${prefix}${envVar.name}`];
+        const raw = envResult?.[`${prefix}${envVar.name}`];
 
-        if (value !== undefined) {
+        if (raw !== undefined) {
+          const value = envVarProvider.coerce(raw, envVar.type, `${prefix}${envVar.name}`);
+
           Dot.setProperty(this.data, `${spec.configRootKey}.${envVar.location}`, value);
         }
 
@@ -299,20 +306,20 @@ export class NexxusConfigManager {
     try {
       specs = JSON.parse(raw);
     } catch (e) {
-      throw new FatalErrorException(
+      throw new InvalidConfigException(
         `${NexxusConfigManager.CONFIG_PROVIDERS_ENV_VAR} is not valid JSON: ${(e as Error).message}`
       );
     }
 
     if (!Array.isArray(specs)) {
-      throw new FatalErrorException(
+      throw new InvalidConfigException(
         `${NexxusConfigManager.CONFIG_PROVIDERS_ENV_VAR} must be a JSON array of config-provider specs.`
       );
     }
 
     for (const spec of specs) {
       if (!spec || typeof spec.provider !== 'string') {
-        throw new FatalErrorException(
+        throw new InvalidConfigException(
           `Each entry in ${NexxusConfigManager.CONFIG_PROVIDERS_ENV_VAR} must be an object with a string "provider" (the provider package name).`
         );
       }
@@ -410,7 +417,7 @@ export class NexxusConfigManager {
         this.data = fileConfigProvider.getConfig();
       } catch (e) {
         if (e instanceof FatalErrorException) {
-          if (e.subcode === FatalErrorException.SUBCODES.CONFIG_FILE_NOT_FOUND) {
+          if (e.subcode === FatalErrorSubcodes.CONFIG_FILE_NOT_FOUND) {
             // If the config file doesn't exist, we treat it as an empty config
             // and let other providers populate the config. If the resulting
             // config is invalid it throws below when the schema is checked.

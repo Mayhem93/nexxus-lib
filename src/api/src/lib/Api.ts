@@ -201,15 +201,18 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig, {}, NexxusApiS
   protected static envVars: ConfigEnvVars = [
     {
       name: 'API_PORT',
-      location: 'port'
+      location: 'port',
+      type: 'int'
     },
     {
       name: 'API_MANAGEMENT_PORT',
-      location: 'management.port'
+      location: 'management.port',
+      type: 'int'
     },
     {
       name: 'API_MANAGEMENT_TOKEN',
-      location: 'management.token'
+      location: 'management.token',
+      type: 'string'
     }
   ];
 

@@ -104,10 +104,10 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
 
   protected static schemaPath: string = path.join(__dirname, '../../src/schemas/elasticsearch.schema.json');
   protected static envVars: ConfigEnvVars = [
-    { name: 'DB_HOST',     location: 'host' },
-    { name: 'DB_PORT',     location: 'port' },
-    { name: 'DB_USERNAME', location: 'user' },
-    { name: 'DB_PASSWORD', location: 'password' }
+    { name: 'DB_HOST',     location: 'host',     type: 'string' },
+    { name: 'DB_PORT',     location: 'port',     type: 'int' },
+    { name: 'DB_USERNAME', location: 'user',     type: 'string' },
+    { name: 'DB_PASSWORD', location: 'password', type: 'string' }
   ];
 
   protected static cliArgs: ConfigCliArgs = [];
