@@ -115,6 +115,36 @@ export abstract class NexxusBaseWorker<
   protected hubClient: NexxusHubClient | null = null;
 
   /**
+   * Per-service connection state. Kept up-to-date by the `'connect'`/
+   * `'disconnect'` listeners wired in the constructor. `isAvailable`
+   * derives from the AND across all three; the MQ pause/resume gate
+   * (follow-up) will read the same signal to stop pulling messages
+   * we can't fully process.
+   */
+  private serviceState: { db: boolean; mq: boolean; redis: boolean } = {
+    db: false,
+    mq: false,
+    redis: false,
+  };
+
+  /**
+   * Callers awaiting the first "all services connected" transition.
+   * Resolved and cleared the moment `isAvailable` flips true. `init()`
+   * uses this to block until every upstream is up before starting
+   * message consumption.
+   */
+  private allConnectedResolvers: Array<() => void> = [];
+
+  /**
+   * True from `close()` onwards. Suppresses the "service disconnected"
+   * warn in `markServiceDown` during expected teardown — SIGINT walks
+   * through db.disconnect / mq.disconnect / redis.close which each fire
+   * a `'disconnect'` event, and without this the log falsely implies
+   * the worker is failing when it's shutting down cleanly.
+   */
+  private closing: boolean = false;
+
+  /**
    * Adapter classes this deployment ships as static dependencies. Config
    * values matching a key here are resolved directly to the class; other
    * values are treated as npm package names and dynamic-imported by the
@@ -191,6 +221,17 @@ export abstract class NexxusBaseWorker<
     NexxusBaseWorker.messageQueue = services.messageQueue;
     NexxusBaseWorker.redis = services.redis;
 
+    // Wire connect/disconnect listeners BEFORE anything calls the services'
+    // connect() — so no first-connect event gets fired-and-missed. From here
+    // on, `this.serviceState` mirrors the upstream reality; the init() gate
+    // and (follow-up task) the MQ pause/resume both read it.
+    services.database.on('connect',    () => this.markServiceUp('db'));
+    services.database.on('disconnect', () => this.markServiceDown('db'));
+    services.messageQueue.on('connect',    () => this.markServiceUp('mq'));
+    services.messageQueue.on('disconnect', () => this.markServiceDown('mq'));
+    services.redis.on('connect',    () => this.markServiceUp('redis'));
+    services.redis.on('disconnect', () => this.markServiceDown('redis'));
+
     // Construct the Hub client eagerly so subclasses that need Hub access
     // earlier than `init()` (e.g. NexxusVolatileTransportWorker's
     // `beforeConsume()` for slot picking) can use it. No side effects at
@@ -201,7 +242,104 @@ export abstract class NexxusBaseWorker<
     }
   }
 
+  /**
+   * `true` when all upstream services (DB, MQ, Redis) are currently
+   * reporting connected. The follow-up MQ pause/resume gate will read
+   * this to stop consumption while any dep is down.
+   */
+  public get isAvailable(): boolean {
+    return this.serviceState.db && this.serviceState.mq && this.serviceState.redis;
+  }
+
+  private markServiceUp(name: 'db' | 'mq' | 'redis'): void {
+    if (this.serviceState[name]) {
+      return;
+    }
+
+    this.serviceState[name] = true;
+    NexxusBaseWorker.logger.info(`Upstream service "${name}" connected`, NexxusBaseWorker.loggerLabel);
+
+    if (this.isAvailable) {
+      const resolvers = this.allConnectedResolvers;
+
+      this.allConnectedResolvers = [];
+
+      for (const resolve of resolvers) resolve();
+
+      // Resume MQ consumption after any prior pauseConsuming. Idempotent
+      // if we were never paused, so the initial connect wave flows
+      // through here safely as a no-op.
+      void NexxusBaseWorker.messageQueue.resumeConsuming().catch((err: Error) => {
+        NexxusBaseWorker.logger.warn(
+          `resumeConsuming failed: ${err.message}`,
+          NexxusBaseWorker.loggerLabel,
+        );
+      });
+    }
+  }
+
+  private markServiceDown(name: 'db' | 'mq' | 'redis'): void {
+    if (!this.serviceState[name]) {
+      return;
+    }
+
+    const wasAvailable = this.isAvailable;
+
+    this.serviceState[name] = false;
+
+    if (!this.closing) {
+      NexxusBaseWorker.logger.warn(
+        `Upstream service "${name}" disconnected — worker will pause consuming until it reconnects`,
+        NexxusBaseWorker.loggerLabel,
+      );
+    }
+
+    // Pause on the availability→unavailability edge only. Second+
+    // disconnect (e.g. MQ drops after DB already dropped) finds
+    // wasAvailable=false and skips — pause is already in effect.
+    if (wasAvailable && !this.closing) {
+      void NexxusBaseWorker.messageQueue.pauseConsuming().catch((err: Error) => {
+        NexxusBaseWorker.logger.warn(
+          `pauseConsuming failed: ${err.message}`,
+          NexxusBaseWorker.loggerLabel,
+        );
+      });
+    }
+  }
+
+  /**
+   * Returns once every upstream service has emitted `'connect'`. Resolves
+   * immediately if we're already fully connected. No timeout — callers who
+   * want one should wrap this in `Promise.race`.
+   */
+  private waitUntilAllConnected(): Promise<void> {
+    if (this.isAvailable) {
+      return Promise.resolve();
+    }
+
+    return new Promise<void>((resolve) => {
+      this.allConnectedResolvers.push(resolve);
+    });
+  }
+
   public async init() : Promise<void> {
+    NexxusBaseWorker.logger.info('Initializing worker service...', NexxusBaseWorker.loggerLabel);
+
+    // Fire off every upstream service's connect() in parallel. The listeners
+    // wired in the constructor pick up each `'connect'` event and update
+    // state; `waitUntilAllConnected()` returns once all three are up. Only
+    // after every dep is up do we call consumeMessages — otherwise the
+    // consumer callback could fire against a not-yet-connected DB/Redis.
+    const connectPromises = [
+      NexxusBaseWorker.database.connect(),
+      NexxusBaseWorker.messageQueue.connect(),
+      NexxusBaseWorker.redis.init(),
+    ];
+
+    await Promise.all([Promise.all(connectPromises), this.waitUntilAllConnected()]);
+
+    NexxusBaseWorker.logger.info('All upstream services connected', NexxusBaseWorker.loggerLabel);
+
     await NexxusBaseWorker.loadApps();
     await NexxusBaseWorker.messageQueue.consumeMessages(this.queueName, this.processMessage.bind(this) as any);
 
@@ -228,6 +366,9 @@ export abstract class NexxusBaseWorker<
    * websocket connections, etc.) should override and call `super.close()`.
    */
   public async close(): Promise<void> {
+    this.closing = true;
+    NexxusBaseWorker.logger.info('Closing worker service...', NexxusBaseWorker.loggerLabel);
+
     // Halt any still-in-flight register retry. dispose() flips a flag the
     // retry loop checks at each iteration; the pending register promise
     // rejects (caught in registerWithHub). No effect if register already
@@ -242,6 +383,29 @@ export abstract class NexxusBaseWorker<
 
     this.managementServer?.close();
     this.managementServer = null;
+
+    // Upstream service shutdown happens after Hub deregistration + local
+    // ports go away, so any in-flight `processMessage` has had a chance
+    // to finish (concrete workers that need graceful message drain
+    // should override this method, drain, then call `super.close()`).
+    // `allSettled` so one broker's sticky close doesn't block the
+    // others.
+    const results = await Promise.allSettled([
+      NexxusBaseWorker.database.disconnect(),
+      NexxusBaseWorker.messageQueue.disconnect(),
+      NexxusBaseWorker.redis.close(),
+    ]);
+
+    for (const [i, r] of results.entries()) {
+      if (r.status === 'rejected') {
+        const name = ['database', 'messageQueue', 'redis'][i];
+
+        NexxusBaseWorker.logger.warn(
+          `Upstream service "${name}" failed to close cleanly: ${(r.reason as Error)?.message ?? r.reason}`,
+          NexxusBaseWorker.loggerLabel,
+        );
+      }
+    }
 
     return Promise.resolve();
   }
@@ -281,7 +445,7 @@ export abstract class NexxusBaseWorker<
    * Default returns an empty object — right for subclasses that don't
    * widen `TStats`.
    */
-  protected async getOwnStats(): Promise<Omit<TStats, keyof NexxusBaseWorkerStats>> {
+  protected getOwnStats(): Promise<Omit<TStats, keyof NexxusBaseWorkerStats>> {
     return Promise.resolve({} as Omit<TStats, keyof NexxusBaseWorkerStats>);
   }
 

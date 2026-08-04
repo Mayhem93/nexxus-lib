@@ -62,7 +62,7 @@ export interface INexxusAsyncLogger {
   log(level: NexxusLoggerLevels, message: string, attributes?: LogAttributes, label?: string): Promise<void>
 }
 
-interface NexxusLoggerServices extends Omit<INexxusBaseServices, 'logger'> {}
+export interface NexxusLoggerServices extends Omit<INexxusBaseServices, 'logger'> {}
 
 export abstract class NexxusBaseLogger<
   T extends NexxusConfig,
@@ -71,8 +71,8 @@ export abstract class NexxusBaseLogger<
 
   protected static configRootKey: string = 'logger';
 
-  constructor(services: NexxusLoggerServices) {
-    super(services.configManager.getConfig('logger') as T);
+  constructor(config: T) {
+    super(config);
   }
 
   public abstract log(level: NexxusLoggerLevels, message: string, attributes?: LogAttributes, label?: string): void;
@@ -180,18 +180,24 @@ export class WinstonNexxusLogger extends NexxusBaseLogger<WinstonNexxusLoggerCon
   private winston : Winston.Logger;
   protected static schemaPath: string = path.join(__dirname, '../../src/schemas/winston-logger.schema.json');
   protected static envVars: ConfigEnvVars = [
-    { name: 'LOG_LEVEL', location: 'level' }
+    { name: 'LOG_LEVEL', location: 'level', type: 'string' },
+    // JSON string that REPLACES the transports array, e.g.
+    // NXX_LOG_TRANSPORTS='[{"type":"stdout"},{"type":"file","filename":"/var/log/nxx.log"}]'.
+    // The shape is validated by the logger schema; we only require valid JSON here.
+    { name: 'LOG_TRANSPORTS', location: 'transports', type: 'json' }
   ];
 
-  protected static cliArgs: ConfigCliArgs = [];
+  protected static cliArgs: ConfigCliArgs = [
+    { name: 'transports', location: 'transports', type: 'json' }
+  ];
 
   /**
    * Private — use `WinstonNexxusLogger.create(...)` instead. Transport instances
    * must be resolved (async, since custom ones are dynamically imported) before
    * the Winston logger can be constructed; the factory owns that step.
    */
-  private constructor(services: NexxusLoggerServices, resolvedTransports: Array<Winston.transport>) {
-    super(services);
+  private constructor(config: WinstonNexxusLoggerConfig, resolvedTransports: Array<Winston.transport>) {
+    super(config);
 
     let format: Winston.Logform.Format;
 
@@ -275,7 +281,33 @@ export class WinstonNexxusLogger extends NexxusBaseLogger<WinstonNexxusLoggerCon
     const config = services.configManager.getConfig('logger') as WinstonNexxusLoggerConfig;
     const resolvedTransports = await WinstonNexxusLogger.resolveTransports(config);
 
-    return new WinstonNexxusLogger(services, resolvedTransports);
+    return new WinstonNexxusLogger(config, resolvedTransports);
+  }
+
+  /**
+   * Fixed config for the fallback/bootstrap logger. NOT driven by the config
+   * manager — this logger exists precisely to log config problems, so it can't
+   * depend on config having resolved. A future out-of-band env var (à la
+   * `NXX_CONF_PATH`) can override these defaults.
+   */
+  private static readonly FALLBACK_CONFIG: WinstonNexxusLoggerConfig = {
+    level: NexxusLoggerLevels.DEBUG,
+    logType: 'json',
+    timestamps: true,
+    colors: false,
+  };
+
+  /**
+   * Synchronous fallback factory used by `NexxusConfigManager`. Stdout only,
+   * so there's no async transport resolution to await — safe to call from a
+   * constructor. Unlike `create()`, it does NOT read the config manager: the
+   * fallback logger must exist before config resolution has run.
+   */
+  public static createFallback(): WinstonNexxusLogger {
+    return new WinstonNexxusLogger(
+      WinstonNexxusLogger.FALLBACK_CONFIG,
+      [new Winston.transports.Console()]
+    );
   }
 
   /**
@@ -376,13 +408,13 @@ export class WinstonNexxusLogger extends NexxusBaseLogger<WinstonNexxusLoggerCon
    * constructor name when the transport doesn't set a `name` (custom ones
    * loaded via `loadCustomTransport` often don't).
    */
-  public async getStats(): Promise<WinstonNexxusLoggerStats> {
-    return {
+  public getStats(): Promise<WinstonNexxusLoggerStats> {
+    return Promise.resolve({
       level: this.config.level,
       logType: this.config.logType,
       transports: this.winston.transports.map(
         t => (t as { name?: string }).name ?? t.constructor.name
       ),
-    };
+    });
   }
 }

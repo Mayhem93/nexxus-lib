@@ -60,24 +60,23 @@ export abstract class NexxusDatabaseAdapter<
 >
   extends NexxusBaseService<T, Ev extends NexxusDatabaseAdapterEvents ? Ev : NexxusDatabaseAdapterEvents, TStats> {
 
-  protected static configRootKey: string = "database";
+  protected static configRootKey: string = 'database';
   public static logger: NexxusBaseLogger<any>;
 
   constructor(services: INexxusBaseServices) {
     super(services.configManager.getConfig('database') as T);
 
     if (!(services.logger instanceof NexxusBaseLogger)) {
-      throw new Error("Logger service is not properly initialized in Database");
+      throw new Error('Logger service is not properly initialized in Database');
     }
 
     NexxusDatabaseAdapter.logger = services.logger;
   }
 
-  protected static loggerLabel : Readonly<string> = "NxxDatabase";
+  protected static loggerLabel : Readonly<string> = 'NxxDatabase';
 
-  abstract connect(): Promise<void>;
-  abstract reConnect(): Promise<void>;
-  abstract disconnect(): Promise<void>;
+  public abstract connect(): Promise<void>;
+  public abstract disconnect(): Promise<void>;
 
   /**
    * Returns a bootstrapper wired to this adapter's already-connected
@@ -85,21 +84,21 @@ export abstract class NexxusDatabaseAdapter<
    * by the Hub API on application-lifecycle events (v1: creation only).
    * See `NexxusDatabaseBootstrapper` for the full contract.
    */
-  abstract getBootstrapper(): NexxusDatabaseBootstrapper;
+  public abstract getBootstrapper(): NexxusDatabaseBootstrapper;
 
-  abstract createItems(collection: Array<AnyNexxusModel>): Promise<void>;
-  // abstract getItems(options: NexxusDbGetOptions): Promise<Array<NexxusBaseModel | null>>;
-  abstract getItems(options: NexxusDbGetOptions<'application'>): Promise<Array<NexxusApplication | null>>;
-  abstract getItems(options: NexxusDbGetOptions<'user'>): Promise<Array<NexxusUser | null>>;
-  abstract getItems(options: NexxusDbGetOptions<'setting'>): Promise<Array<NexxusSetting | null>>;
-  abstract getItems(options: NexxusDbGetOptions<string>): Promise<Array<NexxusAppModel | null>>;
-  abstract searchItems(options: NexxusDbSearchOptions<'application'>): Promise<NexxusApplication[]>;
-  abstract searchItems(options: NexxusDbSearchOptions<'user'>): Promise<NexxusUser[]>;
-  abstract searchItems(options: NexxusDbSearchOptions<'setting'>): Promise<NexxusSetting[]>;
-  abstract searchItems(options: NexxusDbSearchOptions<string>): Promise<NexxusAppModel[]>;
-  abstract updateItems(collection: Array<NexxusJsonPatch>, options?: NexxusDbUpdateOptions): Promise<Array<Partial<AnyNexxusModelData>> | void>;
-  abstract deleteItems(collection: Array<NexxusBaseModel>): Promise<void>;
-  abstract countItems(options: NexxusDbCountOptions): Promise<number>;
+  public abstract createItems(collection: Array<AnyNexxusModel>): Promise<void>;
+  // public abstract getItems(options: NexxusDbGetOptions): Promise<Array<NexxusBaseModel | null>>;
+  public abstract getItems(options: NexxusDbGetOptions<'application'>): Promise<Array<NexxusApplication | null>>;
+  public abstract getItems(options: NexxusDbGetOptions<'user'>): Promise<Array<NexxusUser | null>>;
+  public abstract getItems(options: NexxusDbGetOptions<'setting'>): Promise<Array<NexxusSetting | null>>;
+  public abstract getItems(options: NexxusDbGetOptions<string>): Promise<Array<NexxusAppModel | null>>;
+  public abstract searchItems(options: NexxusDbSearchOptions<'application'>): Promise<NexxusApplication[]>;
+  public abstract searchItems(options: NexxusDbSearchOptions<'user'>): Promise<NexxusUser[]>;
+  public abstract searchItems(options: NexxusDbSearchOptions<'setting'>): Promise<NexxusSetting[]>;
+  public abstract searchItems(options: NexxusDbSearchOptions<string>): Promise<NexxusAppModel[]>;
+  public abstract updateItems(collection: Array<NexxusJsonPatch>, options?: NexxusDbUpdateOptions): Promise<Array<Partial<AnyNexxusModelData>> | void>;
+  public abstract deleteItems(collection: Array<NexxusBaseModel>): Promise<void>;
+  public abstract countItems(options: NexxusDbCountOptions): Promise<number>;
 
   protected abstract buildQuery(options: NexxusDbSearchOptions<string>): string | object;
 }

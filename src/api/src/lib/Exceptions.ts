@@ -4,6 +4,7 @@ enum ApiExceptions {
   INVALID_PARAMETERS = "InvalidParametersException",
   NOT_FOUND = "NotFoundException",
   SERVER_ERROR = "ServerErrorException",
+  SERVICE_UNAVAILABLE = "ServiceUnavailableException",
   APPLICATION_NOT_FOUND = "ApplicationNotFoundException",
   MODEL_NOT_FOUND = "ModelNotFoundException",
   DEVICE_NOT_CONNECTED = "DeviceNotConnectedException",
@@ -35,6 +36,20 @@ export class ServerErrorException extends NexxusApiException {
 
   constructor(message: string) {
     super(ApiExceptions.SERVER_ERROR, message);
+  }
+}
+
+/**
+ * Thrown by the availability middleware when one or more of the API's
+ * upstream services (DB, MQ, Redis) is currently disconnected. Message is
+ * deliberately opaque — clients don't need to know WHICH service is down,
+ * only that the API cannot serve their request and they should retry.
+ */
+export class ServiceUnavailableException extends NexxusApiException {
+  public readonly statusCode = 503;
+
+  constructor(message: string = 'Service temporarily unavailable, please retry') {
+    super(ApiExceptions.SERVICE_UNAVAILABLE, message);
   }
 }
 export class NotFoundException extends NexxusApiException {

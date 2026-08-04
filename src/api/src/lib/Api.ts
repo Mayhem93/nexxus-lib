@@ -45,7 +45,8 @@ import {
   ErrorMiddleware,
   RequestLoggerMiddleware,
   RequiredHeadersMiddleware,
-  AppExistsMiddleware
+  AppExistsMiddleware,
+  AvailabilityMiddleware
 } from './middlewares';
 import {
   NexxusAuthStrategy,
@@ -200,15 +201,18 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig, {}, NexxusApiS
   protected static envVars: ConfigEnvVars = [
     {
       name: 'API_PORT',
-      location: 'port'
+      location: 'port',
+      type: 'int'
     },
     {
       name: 'API_MANAGEMENT_PORT',
-      location: 'management.port'
+      location: 'management.port',
+      type: 'int'
     },
     {
       name: 'API_MANAGEMENT_TOKEN',
-      location: 'management.token'
+      location: 'management.token',
+      type: 'string'
     }
   ];
 
@@ -270,6 +274,32 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig, {}, NexxusApiS
   private static readonly loadedApps: Map<string, NexxusApplication> = new Map();
   private static loggerLabel: Readonly<string> = 'NxxApi';
 
+  /**
+   * Per-service connection state. Kept up-to-date by the `'connect'`/
+   * `'disconnect'` listeners wired in the constructor. `isAvailable`
+   * derives from the AND across all three — the availability middleware
+   * reads that on every incoming request and 503s when it's false.
+   */
+  private serviceState: { db: boolean; mq: boolean; redis: boolean } = {
+    db: false,
+    mq: false,
+    redis: false,
+  };
+
+  /**
+   * Callers awaiting the first "all services connected" transition. Resolved
+   * and cleared the moment `isAvailable` flips true. `init()` uses this to
+   * block until every upstream is up — after that, availability is a live
+   * state read on each request, not a one-shot promise.
+   */
+  private allConnectedResolvers: Array<() => void> = [];
+
+  /**
+   * Used to determine whether the services have been closed due to API close()
+   * being called.
+   */
+  private closing: boolean = false;
+
   constructor(services: ApiServices) {
     super(services.configManager.getConfig('app') as NexxusApiConfig);
 
@@ -294,6 +324,17 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig, {}, NexxusApiS
     NexxusApi.messageQueue = services.messageQueue;
     NexxusApi.redis = services.redis;
 
+    // Wire connect/disconnect listeners BEFORE anything calls the services'
+    // connect() — so no first-connect event gets fired-and-missed. From here
+    // on, `this.serviceState` mirrors the upstream reality; the availability
+    // middleware and `init()`'s wait-for-all-connected both read it.
+    services.database.on('connect',    () => this.markServiceUp('db'));
+    services.database.on('disconnect', () => this.markServiceDown('db'));
+    services.messageQueue.on('connect',    () => this.markServiceUp('mq'));
+    services.messageQueue.on('disconnect', () => this.markServiceDown('mq'));
+    services.redis.on('connect',    () => this.markServiceUp('redis'));
+    services.redis.on('disconnect', () => this.markServiceDown('redis'));
+
     this.express = Express();
     this.express.disable("x-powered-by");
 
@@ -307,8 +348,80 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig, {}, NexxusApiS
     NexxusApi.instance = this;
   }
 
+  /**
+   * `true` when all upstream services (DB, MQ, Redis) are currently
+   * reporting connected. Middleware reads this at request time so the
+   * check reflects live state, not the state at request-wiring time.
+   */
+  public get isAvailable(): boolean {
+    return this.serviceState.db && this.serviceState.mq && this.serviceState.redis;
+  }
+
+  private markServiceUp(name: 'db' | 'mq' | 'redis'): void {
+    if (this.serviceState[name]) {
+      return;
+    }
+
+    this.serviceState[name] = true;
+    NexxusApi.logger.info(`Upstream service "${name}" connected`, NexxusApi.loggerLabel);
+
+    if (this.isAvailable) {
+      const resolvers = this.allConnectedResolvers;
+
+      this.allConnectedResolvers = [];
+
+      for (const resolve of resolvers) resolve();
+    }
+  }
+
+  private markServiceDown(name: 'db' | 'mq' | 'redis'): void {
+    if (!this.serviceState[name]) {
+      return;
+    }
+
+    this.serviceState[name] = false;
+
+    if (!this.closing) {
+      NexxusApi.logger.warn(
+        `Upstream service "${name}" disconnected — API is now unavailable until it reconnects`,
+        NexxusApi.loggerLabel,
+      );
+    }
+  }
+
+  /**
+   * Returns once every upstream service has emitted `'connect'`. Resolves
+   * immediately if we're already fully connected. No timeout — callers who
+   * want one should wrap this in `Promise.race`.
+   */
+  private waitUntilAllConnected(): Promise<void> {
+    if (this.isAvailable) {
+      return Promise.resolve();
+    }
+
+    return new Promise<void>((resolve) => {
+      this.allConnectedResolvers.push(resolve);
+    });
+  }
+
   public async init(): Promise<void> {
     NexxusApi.logger.info('Initializing API service...', NexxusApi.loggerLabel);
+
+    // Fire off every upstream service's connect() in parallel. The listeners
+    // wired in the constructor pick up each `'connect'` event and update
+    // state; `waitUntilAllConnected()` returns once all three are up. We
+    // catch each promise so a service that rejects (e.g. MQ fatal auth
+    // failure) surfaces via Promise.all's error rather than an unhandled
+    // rejection while another service is still connecting.
+    const connectPromises = [
+      NexxusApi.database.connect(),
+      NexxusApi.messageQueue.connect(),
+      NexxusApi.redis.init(),
+    ];
+
+    await Promise.all([Promise.all(connectPromises), this.waitUntilAllConnected()]);
+
+    NexxusApi.logger.info('All upstream services connected', NexxusApi.loggerLabel);
 
     this.express.use(RequestLoggerMiddleware as Express.RequestHandler);
     this.express.use(helmet({
@@ -326,6 +439,14 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig, {}, NexxusApiS
     }));
     this.express.use(Express.json());
     this.express.use(Express.urlencoded({ extended: true }));
+
+    // Availability gate — runs AFTER helmet + body parsers so every 503
+    // response still carries the standard security headers and any code
+    // downstream (including the error middleware) sees a parsed body.
+    // Reads `isAvailable` live on every request; short-circuits via
+    // next(err) → ErrorMiddleware when any upstream is currently down,
+    // skipping the routes.
+    this.express.use(AvailabilityMiddleware(() => this.isAvailable) as Express.RequestHandler);
 
     await this.loadAvailableStrategies();
     await this.loadApps();
@@ -442,6 +563,9 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig, {}, NexxusApiS
   }
 
   public async close(): Promise<void> {
+    this.closing = true;
+    NexxusApi.logger.info('Closing API service...', NexxusApi.loggerLabel);
+
     // Halt any still-in-flight register retry. dispose() flips a flag the
     // retry loop checks at each iteration; the pending register promise
     // rejects (caught in registerWithHub). No effect if register already
@@ -467,9 +591,31 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig, {}, NexxusApiS
           }
         });
       });
-
-      NexxusApi.logger.info('API service has been closed', NexxusApi.loggerLabel);
     }
+
+    // Upstream service shutdown happens AFTER the HTTP server has stopped
+    // accepting + drained in-flight requests — closing them earlier would
+    // yank the rug out from under handlers still finishing. Runs the three
+    // closes in parallel via `allSettled` so one broker being sticky
+    // doesn't block the others from shutting down cleanly.
+    const results = await Promise.allSettled([
+      NexxusApi.database.disconnect(),
+      NexxusApi.messageQueue.disconnect(),
+      NexxusApi.redis.close(),
+    ]);
+
+    for (const [i, r] of results.entries()) {
+      if (r.status === 'rejected') {
+        const name = ['database', 'messageQueue', 'redis'][i];
+
+        NexxusApi.logger.warn(
+          `Upstream service "${name}" failed to close cleanly: ${(r.reason as Error)?.message ?? r.reason}`,
+          NexxusApi.loggerLabel,
+        );
+      }
+    }
+
+    NexxusApi.logger.info('API service has been closed', NexxusApi.loggerLabel);
 
     return Promise.resolve();
   }

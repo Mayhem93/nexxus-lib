@@ -28,7 +28,6 @@ import {
   NexxusJsonPatch,
   NexxusFilterQuery,
   NexxusLogicalOperator,
-  ConnectionException,
   NEXXUS_PREFIX_LC,
   NEXXUS_BUILTIN_MODEL_SCHEMAS,
   isBuiltinModel
@@ -82,15 +81,33 @@ type ESBulkRequest = {
 
 export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchConfig, ElasticSearchEvents, NexxusElasticsearchDbStats> {
   private client: ElasticSearch.Client;
-  private collectedIndices: Set<string> = new Set();
   private lastRefreshTimes: Map<string, number> = new Map();
+
+  /**
+   * Ping cadence in the two states. Aggressive (1s) while marked
+   * disconnected so a recovered ES gets picked up fast; relaxed (10s)
+   * while marked connected so we're not spraying pings for no reason.
+   */
+  private static readonly PING_INTERVAL_CONNECTED_MS = 10_000;
+  private static readonly PING_INTERVAL_DISCONNECTED_MS = 5_000;
+
+  /** Current live-ness state. Drives the availability signal the API listens on. */
+  private connected: boolean = false;
+  /** Timer for the background liveness ping. Non-null between `connect()` and `disconnect()`. */
+  private pingTimer: NodeJS.Timeout | null = null;
+  /**
+   * Set true by `disconnect()`. Guards `startPingLoop` so a stray tick
+   * that arrives after shutdown can't restart the loop indirectly (via
+   * markDisconnected → startPingLoop).
+   */
+  private stopped: boolean = false;
 
   protected static schemaPath: string = path.join(__dirname, '../../src/schemas/elasticsearch.schema.json');
   protected static envVars: ConfigEnvVars = [
-    { name: 'DB_HOST',     location: 'host' },
-    { name: 'DB_PORT',     location: 'port' },
-    { name: 'DB_USERNAME', location: 'user' },
-    { name: 'DB_PASSWORD', location: 'password' }
+    { name: 'DB_HOST',     location: 'host',     type: 'string' },
+    { name: 'DB_PORT',     location: 'port',     type: 'int' },
+    { name: 'DB_USERNAME', location: 'user',     type: 'string' },
+    { name: 'DB_PASSWORD', location: 'password', type: 'string' }
   ];
 
   protected static cliArgs: ConfigCliArgs = [];
@@ -107,39 +124,165 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
     });
   }
 
-  async connect(): Promise<void> {
+  /**
+   * Returns a Promise that resolves on the FIRST successful ping. Retry
+   * happens inside the ping loop — matches the MQ adapter's
+   * retry-until-connected contract. No fail-fast on initial
+   * unreachability: the loop pings every second until ES answers, then
+   * `markConnected()` fires the `'connect'` event which resolves the
+   * returned Promise via the one-shot listener attached below.
+   *
+   * Non-connection failures from the ping (bad auth, permission errors,
+   * broker returning 4xx / 5xx) are swallowed by the ping loop's error
+   * filter — so those cases keep retrying indefinitely rather than fail-
+   * fast at boot. Callers who need a timeout should wrap this in
+   * `Promise.race`.
+   */
+  public connect(): Promise<void> {
+    if (this.connected) {
+      return Promise.resolve();
+    }
+
+    return new Promise<void>((resolve) => {
+      this.once('connect', () => resolve());
+      this.startPingLoop(NexxusElasticsearchDb.PING_INTERVAL_DISCONNECTED_MS);
+    });
+  }
+
+  public disconnect(): Promise<void> {
+    this.stopped = true;
+    this.stopPingLoop();
+
+    return this.client.close();
+  }
+
+  /**
+   * Which `@elastic/elasticsearch` error types mean "ES is unreachable"
+   * versus "ES answered but the request was bad". `ResponseError`
+   * (bad query, missing doc, 4xx / 5xx) is intentionally excluded —
+   * those are request-level failures the caller handles, not adapter-
+   * level disconnects.
+   */
+  private static isConnectionError(err: unknown): boolean {
+    return err instanceof ElasticSearch.errors.ConnectionError
+      || err instanceof ElasticSearch.errors.TimeoutError
+      || err instanceof ElasticSearch.errors.NoLivingConnectionsError;
+  }
+
+  /**
+   * Wraps every ES-touching operation so success/failure feeds the
+   * liveness state machine. On success we `markConnected` (idempotent —
+   * no-op if already connected). On connection-class failure we
+   * `markDisconnected` and re-throw so the caller still sees the
+   * original error. Non-connection errors bypass the state machine
+   * entirely and just propagate.
+   */
+  private async esRequestWrapper<T>(op: () => Promise<T>, label: string): Promise<T> {
     try {
-      await this.client.ping({}, { requestTimeout: 2000, maxRetries: 5});
+      const result = await op();
 
-      NexxusElasticsearchDb.logger.debug('Connection established with Elasticsearch database', NexxusDatabaseAdapter.loggerLabel);
+      this.markConnected();
 
-      const indices: ElasticSearch.estypes.CatIndicesResponse = await this.client.cat.indices({
-        format: 'json',
-        h: ['index'],
-        index: `${NEXXUS_PREFIX_LC}-*`,
-        expand_wildcards: 'open'
-      });
-
-      NexxusElasticsearchDb.logger.debug(`Found ${indices.length} indices in Elasticsearch database`, NexxusDatabaseAdapter.loggerLabel);
-
-      indices.forEach(indexInfo => {
-        this.collectedIndices.add(indexInfo.index as string);
-      });
-    } catch (e : Error | unknown) {
-      if (e instanceof ElasticSearch.errors.ConnectionError) {
-        throw new ConnectionException('Failed to connect to Elasticsearch database');
-      } else {
-        throw e;
+      return result;
+    } catch (err) {
+      if (NexxusElasticsearchDb.isConnectionError(err)) {
+        NexxusElasticsearchDb.logger.warn(
+          `Elasticsearch connection error in ${label}: ${(err as Error).message}`,
+          NexxusDatabaseAdapter.loggerLabel,
+        );
+        this.markDisconnected();
       }
+      
+      return Promise.reject(err);
     }
   }
 
-  async reConnect(): Promise<void> {
-    // TODO: Implement reconnection logic if needed
+  private markConnected(): void {
+    if (this.connected) {
+      return;
+    }
+
+    this.connected = true;
+    NexxusElasticsearchDb.logger.info('Elasticsearch is reachable', NexxusDatabaseAdapter.loggerLabel);
+    this.emit('connect');
+    this.startPingLoop(NexxusElasticsearchDb.PING_INTERVAL_CONNECTED_MS);
   }
 
-  async disconnect(): Promise<void> {
-    return this.client.close();
+  private markDisconnected(): void {
+    if (!this.connected) {
+      return;
+    }
+
+    this.connected = false;
+    NexxusElasticsearchDb.logger.warn(
+      'Elasticsearch became unreachable — requests will fail until reconnection',
+      NexxusDatabaseAdapter.loggerLabel,
+    );
+    this.emit('disconnect');
+    this.startPingLoop(NexxusElasticsearchDb.PING_INTERVAL_DISCONNECTED_MS);
+  }
+
+  /**
+   * Background liveness ping. Runs every 10s while connected, every 1s
+   * while disconnected (aggressive recovery detection). Restarts on
+   * every state transition — `markConnected` / `markDisconnected` both
+   * call this with the new interval. `unref()` on the timer so it
+   * never keeps the process alive on its own.
+   *
+   * Fires the tick ONCE immediately (zero-delay first attempt), then
+   * schedules subsequent ticks on the interval. Fires-immediately +
+   * `inFlight` guard together give us "start now, don't stack" without
+   * the pathological `setInterval(0)` behaviour of firing every event-
+   * loop tick until state transitions.
+   */
+  private startPingLoop(intervalMs: number): void {
+    if (this.stopped) {
+      return;
+    }
+
+    this.stopPingLoop();
+
+    let inFlight = false;
+
+    const tick = async (): Promise<void> => {
+      // Skip if the previous tick's ping is still outstanding — prevents
+      // stacked requests when ES is slow or the timer fires faster than
+      // the request completes.
+      if (inFlight || this.stopped) {
+        return;
+      }
+
+      inFlight = true;
+
+      try {
+        await this.client.ping({}, { requestTimeout: 900, maxRetries: 0 });
+        this.markConnected();
+      } catch (err) {
+        if (NexxusElasticsearchDb.isConnectionError(err)) {
+          this.markDisconnected();
+
+          NexxusElasticsearchDb.logger.error(
+            `Elasticsearch connection failure: ${(err as Error).message}`,
+            NexxusDatabaseAdapter.loggerLabel
+          );
+        } else {
+          throw err;
+        }
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    void tick();
+    this.pingTimer = setInterval(() => { void tick(); }, intervalMs);
+    this.pingTimer.unref();
+  }
+
+  private stopPingLoop(): void {
+    if (this.pingTimer) {
+      clearInterval(this.pingTimer);
+      this.pingTimer = null;
+    }
   }
 
   /**
@@ -163,264 +306,265 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
    * `connect()` — non-nexxus indices in the same cluster don't show up in
    * the stats snapshot.
    */
-  async getStats(): Promise<NexxusElasticsearchDbStats> {
+  public async getStats(): Promise<NexxusElasticsearchDbStats> {
     try {
-      const health = await this.client.cluster.health();
-      const indices = await this.client.cat.indices({
-        format: 'json',
-        bytes: 'b',
-        index: `${NEXXUS_PREFIX_LC}-*`,
-        expand_wildcards: 'open',
-      });
+      return await this.esRequestWrapper(async () => {
+        const health = await this.client.cluster.health();
+        const indices = await this.client.cat.indices({
+          format: 'json',
+          bytes: 'b',
+          index: `${NEXXUS_PREFIX_LC}-*`,
+          expand_wildcards: 'open',
+        });
 
-      return {
-        id: health.cluster_name,
-        connected: true,
-        clusterName: health.cluster_name,
-        clusterStatus: health.status as 'green' | 'yellow' | 'red',
-        numberOfNodes: health.number_of_nodes,
-        indices: indices.map(idx => ({
-          name: (idx.index as string) ?? '<unknown>',
-          docCount: parseInt((idx as any)['docs.count'] ?? '0', 10),
-          sizeBytes: parseInt((idx as any)['store.size'] ?? '0', 10),
-          health: ((idx.health as string) ?? 'red') as 'green' | 'yellow' | 'red',
-        })),
-      };
+        return {
+          id: health.cluster_name,
+          connected: true,
+          clusterName: health.cluster_name,
+          clusterStatus: health.status as 'green' | 'yellow' | 'red',
+          numberOfNodes: health.number_of_nodes,
+          indices: indices.map(idx => ({
+            name: (idx.index as string) ?? '<unknown>',
+            docCount: parseInt((idx as any)['docs.count'] ?? '0', 10),
+            sizeBytes: parseInt((idx as any)['store.size'] ?? '0', 10),
+            health: ((idx.health as string) ?? 'red') as 'green' | 'yellow' | 'red',
+          })),
+        };
+      }, 'getStats');
     } catch {
+      // Outer fallback preserves the existing "return {connected: false}
+      // on ANY error" contract getStats has always had; the wrapper still
+      // gets to update the state machine before we swallow.
       return { id: 'unknown', connected: false };
     }
   }
 
-  private async createIndexIfNotExists(indexName: string): Promise<void> {
-    if (!this.collectedIndices.has(indexName)) {
-      NexxusElasticsearchDb.logger.debug(`Creating index ${indexName} in Elasticsearch database`, NexxusDatabaseAdapter.loggerLabel);
+  public createItems(collection: Array<AnyNexxusModel>): Promise<void> {
+    return this.esRequestWrapper(async () => {
+      const bulkReq : ESBulkRequest = { body: [] };
+      let waitForRefresh = true;
 
-      await this.client.indices.create({ index: indexName });
+      for (const item of collection) {
+        let itemData : AnyNexxusModelData;
+        let index;
 
-      NexxusElasticsearchDb.logger.debug(`Index ${indexName} created in Elasticsearch database`, NexxusDatabaseAdapter.loggerLabel);
-      this.collectedIndices.add(indexName);
-    }
+        switch (item.constructor) {
+          case NexxusApplication:
+            itemData = item.getData();
+            index = `${NEXXUS_PREFIX_LC}-application`;
+
+            break;
+
+          case NexxusSetting:
+            itemData = item.getData();
+            index = `${NEXXUS_PREFIX_LC}-setting`;
+
+            break;
+
+          case NexxusUser:
+            itemData = (item as NexxusUser).getData();
+            index = `${NEXXUS_PREFIX_LC}-app-${itemData.appId}-${itemData.type}`;
+
+            break;
+
+          case NexxusAppModel:
+            itemData = (item as NexxusAppModel).getData();
+            index = `${NEXXUS_PREFIX_LC}-app-${itemData.appId}-${itemData.type}`;
+
+            waitForRefresh = false;
+
+            break;
+          default:
+            throw new Error(`ElasticsearchDb.createItems: Unsupported model type: ${(item as NexxusBaseModel).getData().type}`);
+        }
+
+        bulkReq.body.push(
+          { index: { _index: index, _id: itemData.id as string } },
+          itemData
+        );
+      }
+
+      NexxusElasticsearchDb.logger.debug('Executing Elasticsearch bulk create', { request: bulkReq }, NexxusDatabaseAdapter.loggerLabel);
+
+      const dbResult = await this.client.bulk({ operations: bulkReq.body, refresh: waitForRefresh ? 'wait_for' : false });
+
+      if (dbResult.errors) {
+        const erroredItems = dbResult.items.filter(item => {
+          const action = item.index || item.update || item.delete || item.create;
+
+          return action && action.error;
+        });
+
+        NexxusElasticsearchDb.logger.error(
+          `Failed to create items in Elasticsearch database`,
+          { errors: erroredItems },
+          NexxusDatabaseAdapter.loggerLabel
+        );
+      }
+
+      // Back-fill the adapter-assigned version onto each successfully-written AppModel.
+      // Built-in models (Application, User) do not carry a version field.
+      collection.forEach((item, i) => {
+        const indexResult = dbResult.items[i]?.index;
+
+        if (item instanceof NexxusAppModel && indexResult?._version !== undefined) {
+          (item.getData() as INexxusAppModel).version = indexResult._version;
+        }
+      });
+    }, 'createItems');
   }
 
-  async createItems(collection: Array<AnyNexxusModel>): Promise<void> {
-    const bulkReq : ESBulkRequest = { body: [] };
-    let waitForRefresh = true;
+  public searchItems(options: NexxusDbSearchOptions<'application'>): Promise<NexxusApplication[]>;
+  public searchItems(options: NexxusDbSearchOptions<'user'>): Promise<NexxusUser[]>;
+  public searchItems(options: NexxusDbSearchOptions<'setting'>): Promise<NexxusSetting[]>;
+  public searchItems(options: NexxusDbSearchOptions<string>): Promise<NexxusAppModel[]>;
 
-    for (const item of collection) {
-      let itemData : AnyNexxusModelData;
-      let index;
+  public searchItems(options: NexxusDbSearchOptions<string>): Promise<Array<AnyNexxusModel>> {
+    return this.esRequestWrapper(async () => {
+      const esSearchRequest = this.buildQuery(options);
 
-      switch (item.constructor) {
-        case NexxusApplication:
-          itemData = item.getData();
+      // forceRefresh is a side effect on ES state, not part of query composition,
+      // so it stays in searchItems. Only meaningful for app models — built-ins
+      // always go through `wait_for` on write.
+      if (!isBuiltinModel(options.type) && options.databaseSpecific?.forceRefresh === true) {
+        const indexName = esSearchRequest.index as string;
+        const lastRefresh = this.lastRefreshTimes.get(indexName);
+        const timeSinceRefresh = lastRefresh ? Date.now() - lastRefresh : Infinity;
+
+        // Only refresh if > 500ms since last refresh
+        if (timeSinceRefresh > 500) {
+          await this.client.indices.refresh({ index: indexName });
+
+          this.lastRefreshTimes.set(indexName, Date.now());
+
+          NexxusElasticsearchDb.logger.debug(
+            `Forced refresh of index ${indexName} (last refresh was ${timeSinceRefresh}ms ago)`,
+            NexxusDatabaseAdapter.loggerLabel
+          );
+        }
+      }
+
+      NexxusElasticsearchDb.logger.debug('Executing Elasticsearch search', { request: esSearchRequest }, NexxusDatabaseAdapter.loggerLabel);
+
+      const searchResults = await this.client.search(esSearchRequest);
+
+      const models: Array<AnyNexxusModel> = searchResults.hits.hits.map(res => {
+        switch (options.type) {
+          case 'application':
+            return new NexxusApplication(res._source as INexxusApplication);
+
+          case 'user':
+            return new NexxusUser(res._source as INexxusUser);
+
+          case 'setting':
+            return new NexxusSetting(res._source as INexxusSetting);
+
+          default:
+            // Inject the ES-side _version into the model data before construction.
+            // Only app models carry a version; built-ins above intentionally don't.
+            return NexxusAppModel.fromStorage({
+              ...(res._source as INexxusAppModel),
+              version: res._version
+            });
+        }
+      });
+
+      return models;
+    }, 'searchItems');
+  }
+
+  public getItems(options: NexxusDbGetOptions<'application'>): Promise<Array<NexxusApplication | null>>;
+  public getItems(options: NexxusDbGetOptions<'user'>): Promise<Array<NexxusUser | null>>;
+  public getItems(options: NexxusDbGetOptions<'setting'>): Promise<Array<NexxusSetting | null>>;
+  public getItems(options: NexxusDbGetOptions<string>): Promise<Array<NexxusAppModel | null>>;
+
+  public getItems(options: NexxusDbGetOptions<string>): Promise<Array<NexxusBaseModel | null>> {
+    return this.esRequestWrapper(async () => {
+      let index : string;
+
+      switch(options.type) {
+        case 'application':
           index = `${NEXXUS_PREFIX_LC}-application`;
 
           break;
 
-        case NexxusSetting:
-          itemData = item.getData();
+        case 'setting':
           index = `${NEXXUS_PREFIX_LC}-setting`;
 
           break;
 
-        case NexxusUser:
-          itemData = (item as NexxusUser).getData();
-          index = `${NEXXUS_PREFIX_LC}-app-${itemData.appId}-${itemData.type}`;
-
-          break;
-
-        case NexxusAppModel:
-
-          itemData = (item as NexxusAppModel).getData();
-          index = `${NEXXUS_PREFIX_LC}-app-${itemData.appId}-${itemData.type}`;
-
-          waitForRefresh = false;
-
-          break;
-        default:
-          throw new Error(`ElasticsearchDb.createItems: Unsupported model type: ${(item as NexxusBaseModel).getData().type}`);
-      }
-
-      await this.createIndexIfNotExists(index);
-
-      bulkReq.body.push(
-        { index: { _index: index, _id: itemData.id as string } },
-        itemData
-      );
-    }
-
-    NexxusElasticsearchDb.logger.debug('Executing Elasticsearch bulk create', { request: bulkReq }, NexxusDatabaseAdapter.loggerLabel);
-
-    const dbResult = await this.client.bulk({ operations: bulkReq.body, refresh: waitForRefresh ? 'wait_for' : false });
-
-    if (dbResult.errors) {
-      const erroredItems = dbResult.items.filter(item => {
-        const action = item.index || item.update || item.delete || item.create;
-
-        return action && action.error;
-      });
-
-      NexxusElasticsearchDb.logger.error(
-        `Failed to create items in Elasticsearch database`,
-        { errors: erroredItems },
-        NexxusDatabaseAdapter.loggerLabel
-      );
-    }
-
-    // Back-fill the adapter-assigned version onto each successfully-written AppModel.
-    // Built-in models (Application, User) do not carry a version field.
-    collection.forEach((item, i) => {
-      const indexResult = dbResult.items[i]?.index;
-
-      if (item instanceof NexxusAppModel && indexResult?._version !== undefined) {
-        (item.getData() as INexxusAppModel).version = indexResult._version;
-      }
-    });
-  }
-
-  async searchItems(options: NexxusDbSearchOptions<'application'>): Promise<NexxusApplication[]>;
-  async searchItems(options: NexxusDbSearchOptions<'user'>): Promise<NexxusUser[]>;
-  async searchItems(options: NexxusDbSearchOptions<'setting'>): Promise<NexxusSetting[]>;
-  async searchItems(options: NexxusDbSearchOptions<string>): Promise<NexxusAppModel[]>;
-
-  async searchItems(options: NexxusDbSearchOptions<string>): Promise<Array<AnyNexxusModel>> {
-    const esSearchRequest = this.buildQuery(options);
-
-    // forceRefresh is a side effect on ES state, not part of query composition,
-    // so it stays in searchItems. Only meaningful for app models — built-ins
-    // always go through `wait_for` on write.
-    if (!isBuiltinModel(options.type) && options.databaseSpecific?.forceRefresh === true) {
-      const indexName = esSearchRequest.index as string;
-      const lastRefresh = this.lastRefreshTimes.get(indexName);
-      const timeSinceRefresh = lastRefresh ? Date.now() - lastRefresh : Infinity;
-
-      // Only refresh if > 500ms since last refresh
-      if (timeSinceRefresh > 500) {
-        await this.client.indices.refresh({ index: indexName });
-
-        this.lastRefreshTimes.set(indexName, Date.now());
-
-        NexxusElasticsearchDb.logger.debug(
-          `Forced refresh of index ${indexName} (last refresh was ${timeSinceRefresh}ms ago)`,
-          NexxusDatabaseAdapter.loggerLabel
-        );
-      }
-    }
-
-    NexxusElasticsearchDb.logger.debug('Executing Elasticsearch search', { request: esSearchRequest }, NexxusDatabaseAdapter.loggerLabel);
-
-    const searchResults = await this.client.search(esSearchRequest);
-
-    const models: Array<AnyNexxusModel> = searchResults.hits.hits.map(res => {
-      switch (options.type) {
-        case 'application':
-          return new NexxusApplication(res._source as INexxusApplication);
-
         case 'user':
-          return new NexxusUser(res._source as INexxusUser);
+          if (!options.appId) {
+            throw new Error("App ID is required for getting user models");
+          }
 
-        case 'setting':
-          return new NexxusSetting(res._source as INexxusSetting);
+          index = `${NEXXUS_PREFIX_LC}-app-${options.appId}-${options.type}`;
+
+          break;
 
         default:
-          // Inject the ES-side _version into the model data before construction.
-          // Only app models carry a version; built-ins above intentionally don't.
-          return NexxusAppModel.fromStorage({
-            ...(res._source as INexxusAppModel),
-            version: res._version
-          });
+          if (!options.appId) {
+            throw new Error("App ID is required for getting app-specific models");
+          }
+
+          index = `${NEXXUS_PREFIX_LC}-app-${options.appId}-${options.type}`;
       }
-    });
 
-    return models;
-  }
+      try {
+        const esMgetResponse = await this.client.mget({
+          index: index,
+          ids: options.ids,
+          _source: true,
+          realtime: true
+        });
 
-  async getItems(options: NexxusDbGetOptions<'application'>): Promise<Array<NexxusApplication | null>>;
-  async getItems(options: NexxusDbGetOptions<'user'>): Promise<Array<NexxusUser | null>>;
-  async getItems(options: NexxusDbGetOptions<'setting'>): Promise<Array<NexxusSetting | null>>;
-  async getItems(options: NexxusDbGetOptions<string>): Promise<Array<NexxusAppModel | null>>;
+        return esMgetResponse.docs.map(doc => {
+          if ('error' in doc) {
+            NexxusElasticsearchDb.logger.warn(`Error retrieving document ID ${doc._id} from Elasticsearch`, { error: doc.error }, NexxusDatabaseAdapter.loggerLabel);
 
-  async getItems(options: NexxusDbGetOptions<string>): Promise<Array<NexxusBaseModel | null>> {
-    let index : string;
+            return null;
+          }
 
-    switch(options.type) {
-      case 'application':
-        index = `${NEXXUS_PREFIX_LC}-application`;
+          if (!doc.found) {
+            return null;
+          }
 
-        break;
+          switch(options.type) {
+            case 'application':
+              return new NexxusApplication(doc._source as INexxusApplication);
 
-      case 'setting':
-        index = `${NEXXUS_PREFIX_LC}-setting`;
+            case 'user':
+              return new NexxusUser(doc._source as INexxusUser);
 
-        break;
+            case 'setting':
+              return new NexxusSetting(doc._source as INexxusSetting);
 
-      case 'user':
-        if (!options.appId) {
-          throw new Error("App ID is required for getting user models");
+            default:
+              // Inject the ES-side _version into the model data before construction.
+              return NexxusAppModel.fromStorage({
+                ...(doc._source as INexxusAppModel),
+                version: doc._version
+              });
+          }
+        }).filter(doc => doc !== null);
+      } catch (e: Error | unknown) {
+        // 404 = the whole index doesn't exist yet; that's a legitimate
+        // "no documents" outcome, not an ES-down signal — swallow and
+        // return empty. Any other error propagates to the wrapper.
+        if (e instanceof ElasticSearch.errors.ResponseError && e.statusCode === 404) {
+          return [];
         }
 
-        index = `${NEXXUS_PREFIX_LC}-app-${options.appId}-${options.type}`;
-
-        break;
-
-      default:
-        if (!options.appId) {
-          throw new Error("App ID is required for getting app-specific models");
-        }
-
-        index = `${NEXXUS_PREFIX_LC}-app-${options.appId}-${options.type}`;
-    }
-
-    try {
-      const esMgetResponse = await this.client.mget({
-        index: index,
-        ids: options.ids,
-        _source: true,
-        realtime: true
-      });
-
-      return esMgetResponse.docs.map(doc => {
-        if ('error' in doc) {
-          NexxusElasticsearchDb.logger.warn(`Error retrieving document ID ${doc._id} from Elasticsearch`, { error: doc.error }, NexxusDatabaseAdapter.loggerLabel);
-
-          return null;
-        }
-
-        if (!doc.found) {
-          return null;
-        }
-
-        switch(options.type) {
-          case 'application':
-            return new NexxusApplication(doc._source as INexxusApplication);
-
-          case 'user':
-            return new NexxusUser(doc._source as INexxusUser);
-
-          case 'setting':
-            return new NexxusSetting(doc._source as INexxusSetting);
-
-          default:
-            // Inject the ES-side _version into the model data before construction.
-            return NexxusAppModel.fromStorage({
-              ...(doc._source as INexxusAppModel),
-              version: doc._version
-            });
-        }
-      }).filter(doc => doc !== null);
-    } catch (e: Error | unknown) {
-      if (e instanceof ElasticSearch.errors.ResponseError && e.statusCode === 404) {
-        return [];
-      } else {
         throw e;
       }
-    }
+    }, 'getItems');
   }
 
-  async updateItems(collection: Array<NexxusJsonPatch>, options?: NexxusDbUpdateOptions): Promise<Array<Partial<AnyNexxusModelData>>> {
-    const bulkBody: Array<BulkOperationContainer | BulkUpdateAction> = [];
-    const collectedModelFields = new Set<string>();
-    let waitForRefresh = true;
+  public updateItems(collection: Array<NexxusJsonPatch>, options?: NexxusDbUpdateOptions): Promise<Array<Partial<AnyNexxusModelData>>> {
+    return this.esRequestWrapper(async () => {
+      const bulkBody: Array<BulkOperationContainer | BulkUpdateAction> = [];
+      const collectedModelFields = new Set<string>();
+      let waitForRefresh = true;
 
     if (!(collection[0].get().metadata.type in Object.keys(NEXXUS_BUILTIN_MODEL_SCHEMAS))) {
       waitForRefresh = false;
@@ -567,64 +711,69 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
 
     NexxusElasticsearchDb.logger.debug('Bulk update result', { result }, NexxusDatabaseAdapter.loggerLabel);
 
-    result.items.forEach(item => {
-      if (item.update && item.update.status >= 200 && item.update.status < 300) {
-        collectedPartialModels.push({
-          id: item.update._id,
-          ...(item.update.get!._source),
-          // Adapter-assigned post-write version. Meaningful only for app models;
-          // for built-in updates the field is technically populated too but
-          // ignored downstream (built-ins don't participate in version-based sync).
-          version: item.update._version
-        } as Partial<AnyNexxusModelData>);
-      } else {
-        NexxusElasticsearchDb.logger.warn(`Failed to update item ID ${item.update?._id} in Elasticsearch`, { error: item.update?.error }, NexxusDatabaseAdapter.loggerLabel);
-      }
-    });
+      result.items.forEach(item => {
+        if (item.update && item.update.status >= 200 && item.update.status < 300) {
+          collectedPartialModels.push({
+            id: item.update._id,
+            ...(item.update.get!._source),
+            // Adapter-assigned post-write version. Meaningful only for app models;
+            // for built-in updates the field is technically populated too but
+            // ignored downstream (built-ins don't participate in version-based sync).
+            version: item.update._version
+          } as Partial<AnyNexxusModelData>);
+        } else {
+          NexxusElasticsearchDb.logger.warn(`Failed to update item ID ${item.update?._id} in Elasticsearch`, { error: item.update?.error }, NexxusDatabaseAdapter.loggerLabel);
+        }
+      });
 
-    return collectedPartialModels;
+      return collectedPartialModels;
+    }, 'updateItems');
   }
 
-  async deleteItems(collection: Array<NexxusBaseModel>): Promise<void> {
-    const bulkBody : Array<BulkOperationContainer> = [];
+  public deleteItems(collection: Array<NexxusBaseModel>): Promise<void> {
+    return this.esRequestWrapper(async () => {
+      const bulkBody : Array<BulkOperationContainer> = [];
 
-    for (const item of collection) {
-      let index;
-      let itemData;
+      for (const item of collection) {
+        let index;
+        let itemData;
 
-      if (item instanceof NexxusApplication) {
-        itemData = item.getData();
-        index = `${NEXXUS_PREFIX_LC}-application`;
-      } else if (item instanceof NexxusSetting) {
-        itemData = item.getData();
-        index = `${NEXXUS_PREFIX_LC}-setting`;
-      } else if (item instanceof NexxusUser) {
-        itemData = item.getData();
-        index = `${NEXXUS_PREFIX_LC}-app-${itemData.appId}-user`;
-      } else {
-        itemData = (item as NexxusAppModel).getData();
-        index = `${NEXXUS_PREFIX_LC}-app-${itemData.appId}-${itemData.type}`;
+        if (item instanceof NexxusApplication) {
+          itemData = item.getData();
+          index = `${NEXXUS_PREFIX_LC}-application`;
+        } else if (item instanceof NexxusSetting) {
+          itemData = item.getData();
+          index = `${NEXXUS_PREFIX_LC}-setting`;
+        } else if (item instanceof NexxusUser) {
+          itemData = item.getData();
+          index = `${NEXXUS_PREFIX_LC}-app-${itemData.appId}-user`;
+        } else {
+          itemData = (item as NexxusAppModel).getData();
+          index = `${NEXXUS_PREFIX_LC}-app-${itemData.appId}-${itemData.type}`;
+        }
+
+        bulkBody.push(
+          { delete: { _index: index, _id: itemData.id as string } }
+        );
       }
 
-      bulkBody.push(
-        { delete: { _index: index, _id: itemData.id as string } }
-      );
-    }
-
-    await this.client.bulk({ operations: bulkBody });
+      await this.client.bulk({ operations: bulkBody });
+    }, 'deleteItems');
   }
 
-  async countItems(options: NexxusDbCountOptions): Promise<number> {
-    const esSearchRequest = this.buildQuery(options);
+  public countItems(options: NexxusDbCountOptions): Promise<number> {
+    return this.esRequestWrapper(async () => {
+      const esSearchRequest = this.buildQuery(options);
 
-    NexxusElasticsearchDb.logger.debug('Executing Elasticsearch count', { request: esSearchRequest }, NexxusDatabaseAdapter.loggerLabel);
+      NexxusElasticsearchDb.logger.debug('Executing Elasticsearch count', { request: esSearchRequest }, NexxusDatabaseAdapter.loggerLabel);
 
-    const countResult = await this.client.count({
-      index: esSearchRequest.index,
-      query: esSearchRequest.query
-    });
+      const countResult = await this.client.count({
+        index: esSearchRequest.index,
+        query: esSearchRequest.query
+      });
 
-    return countResult.count;
+      return countResult.count;
+    }, 'countItems');
   }
 
   protected buildQuery(options: NexxusDbSearchOptions<string>): ElasticSearch.estypes.SearchRequest {

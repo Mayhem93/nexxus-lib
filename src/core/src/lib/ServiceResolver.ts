@@ -19,23 +19,43 @@ import * as path from 'node:path';
 const requireFromApp = createRequire(path.join(process.cwd(), 'package.json'));
 
 /**
+ * A genuine dynamic `import()` that survives TypeScript's CommonJS emit.
+ *
+ * Compiled with `module: commonjs`, a plain `import(x)` expression is rewritten
+ * to `Promise.resolve(x).then(s => require(s))` — and `require()` can't take the
+ * `file://` URL we hand it below, so it throws "Cannot find module 'file:///…'".
+ * Routing the call through the Function constructor hides the `import` from the
+ * compiler, so the emitted CJS keeps a real `import()`. Real `import()` works
+ * from inside CommonJS in Node and accepts file URLs for BOTH CJS and ESM
+ * targets — which is what `pathToFileURL` produces (and what a Windows absolute
+ * path REQUIRES, since a bare `D:\…` path isn't a valid import specifier).
+ */
+const dynamicImport = new Function('specifier', 'return import(specifier);') as (
+  specifier: string
+) => Promise<any>;
+
+/**
  * Loads the module for `configuredName` (a bare package specifier) from the
  * app's install tree, then hands back the module object. Works for both
  * CJS and ESM packages: `require.resolve` gives us the absolute path, and
  * dynamic `import()` accepts file URLs for both formats.
+ *
+ * Shared by the service resolvers below and by ConfigManager's custom
+ * config-provider loading — both need resolution anchored to the app's
+ * install tree rather than the library's own location.
  */
-function loadPackage(configuredName: string): Promise<any> {
+export function loadPackage(configuredName: string): Promise<any> {
   let resolvedPath: string;
 
   try {
     resolvedPath = requireFromApp.resolve(configuredName);
   } catch (e) {
     throw new InvalidConfigException(
-      `Service package "${configuredName}" could not be resolved — make sure it's installed in your deployment. Underlying error: ${(e as Error).message}`
+      `Package "${configuredName}" could not be resolved — make sure it's installed in your deployment. Underlying error: ${(e as Error).message}`
     );
   }
 
-  return import(pathToFileURL(resolvedPath).href);
+  return dynamicImport(pathToFileURL(resolvedPath).href);
 }
 
 /**
@@ -61,6 +81,14 @@ function assertNexxusService(cls: unknown, configuredName: string): void {
 function pickDefaultExport(mod: any, configuredName: string): unknown {
   if (typeof mod.default === 'function') {
     return mod.default;
+  }
+
+  // CJS/ESM interop "double default": a TSC/Babel-compiled `export default
+  // class` becomes `exports.default = Cls` with `__esModule` set. import()
+  // makes the synthetic ESM default the whole module.exports object, so the
+  // real class sits one level down at `.default.default`.
+  if (typeof mod.default?.default === 'function') {
+    return mod.default.default;
   }
 
   if (typeof mod === 'function') {
