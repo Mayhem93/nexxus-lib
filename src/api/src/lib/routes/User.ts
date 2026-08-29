@@ -80,6 +80,17 @@ export default class UserRoute extends NexxusApiBaseRoute {
   private async register(req: UserRegisterRequest, res: NexxusApiResponse): Promise<void> {
     const appId = req.headers['nxx-app-id'] as string;
     const { username, password, ...additionalFields } = req.body;
+    const app = NexxusApi.getStoredApp(appId);
+
+    if (!app?.hasAuthEnabled()) {
+      throw new InvalidAuthMethodException('Authentication is not enabled for this application');
+    }
+
+    const userType = req.body.userType || 'default';
+
+    if (!app.getUserTypes()?.[userType]) {
+      throw new InvalidParametersException(`Invalid user type "${userType}"`);
+    }
 
     // Validate required fields
     if (!username || !password || typeof username !== 'string' || typeof password !== 'string') {

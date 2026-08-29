@@ -157,6 +157,8 @@ export class NexxusDevice extends NexxusRedisBaseModel<NexxusDeviceProps> {
       return;
     }
 
+    NexxusRedis.logger.debug(`Updating device with id "${id}"`, { id, updates: jsonUpdates }, 'NxxRedis');
+
     const res = await redis.json.mSet(jsonUpdates);
 
     if (!res) {

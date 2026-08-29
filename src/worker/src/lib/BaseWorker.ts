@@ -12,6 +12,10 @@ import {
   NexxusManagementServer,
   FatalErrorException,
   NexxusApplication,
+  NexxusAclManager,
+  NexxusAclRole,
+  DEFAULT_ACL_ROLE,
+  DEFAULT_ACL_ROLE_ID,
   MODEL_REGISTRY,
   WinstonNexxusLogger,
   resolveConstructableServiceClass,
@@ -551,5 +555,65 @@ export abstract class NexxusBaseWorker<
     }
 
     NexxusBaseWorker.logger.info(`Loaded ${NexxusBaseWorker.loadedApps.size} applications into Worker service`, NexxusBaseWorker.loggerLabel);
+
+    await NexxusBaseWorker.loadAclRoles();
+  }
+
+  /**
+   * Load each ACL-enabled app's roles from its `acl` index and attach one
+   * `NexxusAclManager` per role to the app (keyed by role name). The framework
+   * default role is always created in-memory; a persisted role reusing the
+   * default id is ignored (the default is not overridable). Finally, validate
+   * that every `userTypes[*].roles` reference resolves to a loaded role.
+   *
+   * Runs one query per ACL-enabled app, in parallel.
+   */
+  protected static async loadAclRoles(): Promise<void> {
+    const aclApps = [...NexxusBaseWorker.loadedApps.values()].filter(app => app.isAclEnabled());
+
+    await Promise.all(aclApps.map(async app => {
+      const appId = app.getData().id as string;
+      const dbRoles = await NexxusBaseWorker.database.searchItems({ appId, type: MODEL_REGISTRY.acl });
+
+      const defaultRole = new NexxusAclRole({ ...DEFAULT_ACL_ROLE, appId });
+
+      defaultRole.validateAgainstSchema(app);
+
+      const managers: NexxusAclManager[] = [ new NexxusAclManager(defaultRole) ];
+
+      for (const role of dbRoles) {
+        if (role.getName() === DEFAULT_ACL_ROLE_ID) {
+          NexxusBaseWorker.logger.warn(
+            `Ignoring role "${DEFAULT_ACL_ROLE_ID}" persisted for app "${appId}" — the default role cannot be overridden`,
+            NexxusBaseWorker.loggerLabel,
+          );
+
+          continue;
+        }
+
+        role.validateAgainstSchema(app);
+        managers.push(new NexxusAclManager(role));
+      }
+
+      app.setRoleManagers(managers);
+
+      // Fail fast on dangling role references so a typo surfaces at boot.
+      const userTypes = app.getUserTypes() ?? {};
+
+      for (const [userType, cfg] of Object.entries(userTypes)) {
+        for (const roleName of cfg.roles ?? []) {
+          if (!app.getRoleManager(roleName)) {
+            throw new FatalErrorException(
+              `Application "${appId}" user type "${userType}" references unknown ACL role "${roleName}"`
+            );
+          }
+        }
+      }
+
+      NexxusBaseWorker.logger.info(
+        `Loaded ${managers.length} ACL role(s) for app "${appId}"`,
+        NexxusBaseWorker.loggerLabel,
+      );
+    }));
   }
 }

@@ -122,18 +122,27 @@ export function validateModelQueryParams(
 export function buildDatabaseFilter(
   validated: ValidatedModelQuery,
   rawFilter: NexxusFilterQueryType | undefined,
+  aclConstraint?: NexxusFilterQueryType,
 ): NexxusFilterQuery | undefined {
   const { app, model, id, userId } = validated;
 
-  if (rawFilter === undefined && id === undefined && userId === undefined) {
+  if (rawFilter === undefined && id === undefined && userId === undefined && aclConstraint === undefined) {
     return undefined;
   }
 
-  const dbFilterInput: NexxusFilterQueryType = {
+  const baseInput: NexxusFilterQueryType = {
     ...structuredClone(rawFilter ?? {}),
     ...(id && { id }),
     ...(userId && { userId }),
   };
+
+  // AND the ACL row constraint (if any) with the caller's filter. Kept as a
+  // conjunction so the client's filter can never widen the row scope the ACL
+  // grants — only narrow it further.
+  const hasBase = Object.keys(baseInput).length > 0;
+  const dbFilterInput: NexxusFilterQueryType = aclConstraint
+    ? (hasBase ? { $and: [ baseInput, aclConstraint ] } : aclConstraint)
+    : baseInput;
 
   try {
     return new NexxusFilterQuery(dbFilterInput, app.getAppModelSchema(model));

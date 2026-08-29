@@ -11,9 +11,13 @@ import {
 import { InferModel } from '../common/InferModel';
 import {
   NEXXUS_BUILTIN_MODEL_SCHEMAS,
-  NEXXUS_RESERVED_FIELD_NAMES
+  NEXXUS_RESERVED_FIELD_NAMES,
+  isAppScopedBuiltinModel
 } from '../common/BuiltinSchemas';
 import { NexxusUserDetailSchema } from './User';
+import { DEFAULT_ACL_ROLE_ID } from './AclRole';
+
+import type { NexxusAclManager } from '../lib/Acl';
 
 import * as Dot from 'dot-prop';
 
@@ -43,6 +47,13 @@ export interface NexxusApplicationSchema {
 
 export interface NexxusUserTypeConfig {
   private?: boolean; // if true users can only be created through the nexxus hub API; defaults to false if not specified
+  /**
+   * ACL role names granted to users of this type. Each name must resolve to a
+   * role loaded for the app (a persisted `acl` document or the framework
+   * default). The constructor grants the `default` user type the framework
+   * default role automatically.
+   */
+  roles?: string[];
 }
 
 /**
@@ -77,6 +88,12 @@ export interface NexxusApplicationAuthConfig {
    * stores no extra user details.
    */
   userDetailSchema?: { [userType: string]: NexxusUserDetailSchema };
+  /**
+   * Deployment-wide ACL switch for this app. Defaults to false in the
+   * constructor. When false, the field cache is never populated and ACL
+   * checks are skipped — a guard so apps that don't use ACLs pay nothing.
+   */
+  acl?: boolean
 }
 
 export type INexxusApplication =
@@ -92,6 +109,13 @@ export type INexxusApplication =
   };
 
 export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
+  /**
+   * ACL role managers for this app, keyed by role name. Populated at boot by
+   * the API/worker after construction (roles are separate `acl` documents,
+   * not part of the Application document). Empty until `setRoleManagers` runs.
+   */
+  private roleManagers: Map<string, NexxusAclManager> = new Map();
+
   constructor(data: INexxusApplication) {
     super({ ...data, type: MODEL_REGISTRY.application });
 
@@ -103,6 +127,16 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
     // flags, reserved-name check on declared fields, and the invalid flag
     // combo (subscribable=false + transient=true).
     for (const [modelName, modelDef] of Object.entries(data.schema)) {
+      // App schemas may not redeclare an app-scoped built-in model name
+      // (`user`, `acl`) — those names map to framework-managed per-app
+      // indices (`nxx-app-{appId}-user` / `-acl`) and would collide.
+      if (isAppScopedBuiltinModel(modelName)) {
+        throw new Error(
+          `Application schema: model "${modelName}" uses a reserved app-scoped built-in ` +
+          `name and cannot be declared by an application`
+        );
+      }
+
       if (!modelDef || typeof modelDef !== 'object') {
         throw new Error(`Application schema: model "${modelName}" must be an object`);
       }
@@ -186,7 +220,7 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
         || typeof data.auth.strategies !== 'object'
         || Object.keys(data.auth.strategies).length === 0
       ) {
-        throw new Error('Application "auth.strategies" must be a non-empty object when auth is enabled');
+        throw new Error('Application "auth.strategies" must be a non-empty object when auth is enabled, ');
       }
 
       if (!data.auth.userDetailSchema || typeof data.auth.userDetailSchema !== 'object') {
@@ -197,6 +231,12 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
         throw new Error('Application "auth.userTypes" must be an object when provided');
       }
 
+      if (data.auth.acl !== undefined && typeof data.auth.acl !== 'boolean') {
+        throw new Error('Application "auth.acl" must be a boolean if provided');
+      }
+
+      data.auth.acl = data.auth.acl ?? false;
+
       // Rebuild auth with the default user type force-injected. Fresh object
       // so the caller's `data.auth` isn't mutated. `default` always wins
       // over an operator-supplied `default` key, matching the previous
@@ -204,8 +244,8 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
       this.data.auth = {
         ...data.auth,
         userTypes: data.auth.userTypes
-          ? { ...data.auth.userTypes, default: {} }
-          : { default: {} }
+          ? { ...data.auth.userTypes, default: { roles: [DEFAULT_ACL_ROLE_ID] } }
+          : { default: { roles: [DEFAULT_ACL_ROLE_ID] } }
       };
     }
 
@@ -237,6 +277,57 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
 
   public hasAuthEnabled(): boolean {
     return !!this.data.auth;
+  }
+
+  /**
+   * Whether this app has ACLs enabled. When false, the Writer skips field-cache
+   * maintenance and the API skips ACL checks.
+   */
+  public isAclEnabled(): boolean {
+    return this.data.auth?.acl === true;
+  }
+
+  /**
+   * Replace this app's ACL role managers. Called at boot by the API/worker
+   * with one manager per role loaded for the app (the framework default plus
+   * any persisted `acl` documents). Keyed by role name for lookup.
+   */
+  public setRoleManagers(managers: NexxusAclManager[]): void {
+    this.roleManagers = new Map(managers.map(manager => [manager.getRoleName(), manager]));
+  }
+
+  /** The manager for a single role by name, or undefined if not loaded. */
+  public getRoleManager(name: string): NexxusAclManager | undefined {
+    return this.roleManagers.get(name);
+  }
+
+  /** All loaded role managers, keyed by role name. */
+  public getRoleManagers(): Map<string, NexxusAclManager> {
+    return this.roleManagers;
+  }
+
+  /**
+   * Top-level field names in `modelType` flagged `acl: true` — the app-declared
+   * fields the Writer mirrors into the Redis field cache (on top of the
+   * always-cached builtin fields: id, userId, createdAt). Empty set for an
+   * unknown model type. Nested acl flags are not resolved here (a later
+   * extension); an object/array field flagged `acl` is cached whole.
+   */
+  public getAclFields(modelType: string): Set<string> {
+    const appModelDef = this.data.schema[modelType];
+    const aclFields = new Set<string>();
+
+    if (!appModelDef) {
+      return aclFields;
+    }
+
+    for (const [fieldName, fieldDef] of Object.entries(appModelDef.fields)) {
+      if (fieldDef.acl === true) {
+        aclFields.add(fieldName);
+      }
+    }
+
+    return aclFields;
   }
 
   /**

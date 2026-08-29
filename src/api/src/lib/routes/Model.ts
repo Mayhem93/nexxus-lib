@@ -3,11 +3,11 @@ import { NexxusApiBaseRoute } from '../BaseRoute';
 import { type NexxusApiRequest, type NexxusApiResponse, NexxusApi } from '../Api';
 import { RequiredHeadersMiddleware, AppExistsMiddleware, AuthMiddleware } from '../middlewares';
 import { validateModelQueryParams, buildDatabaseFilter } from '../ModelQueryValidation';
+import { authorizeAcl, enforceRowConstraint, loadObjectAttributes } from '../Acl';
 import {
   NexxusAppModel,
   NexxusJsonPatch,
   type INexxusAppModel,
-  type NexxusApplicationSchema,
   InvalidJsonPatchException,
   NexxusJsonPatchInternal,
   NexxusFilterQueryType,
@@ -85,16 +85,20 @@ export default class ModelRoute extends NexxusApiBaseRoute {
 
   protected registerRoutes(): void {
     this.router.use(RequiredHeadersMiddleware('nxx-app-id') as RequestHandler);
-    this.router.use(RequiredHeadersMiddleware('nxx-device-id') as RequestHandler);
+    // this.router.use(RequiredHeadersMiddleware('nxx-device-id') as RequestHandler);
     this.router.use(AppExistsMiddleware() as RequestHandler);
     this.router.use(AuthMiddleware as RequestHandler);
 
     this.router.post('/', this.createModel.bind(this) as RequestHandler);
-    this.router.get('/:id', this.getModel.bind(this) as RequestHandler<GetModelRequest['params'], any, any, GetModelRequest['query']>);
+    this.router.get('/:id',
+      this.getModel.bind(this) as RequestHandler<GetModelRequest['params'], any, any, GetModelRequest['query']>
+    );
     this.router.put('/:id',
       this.updateModel.bind(this) as RequestHandler<UpdateAppModelRequest['params'], any, UpdateAppModelRequest['body']>
     );
-    this.router.delete('/:id', this.deleteModel.bind(this) as RequestHandler<DeleteAppModelRequest['params']>);
+    this.router.delete('/:id',
+      this.deleteModel.bind(this) as RequestHandler<DeleteAppModelRequest['params']>
+    );
     this.router.post('/count',
       this.countModel.bind(this) as RequestHandler<any, any, CountModelRequestBody>
     );
@@ -112,6 +116,8 @@ export default class ModelRoute extends NexxusApiBaseRoute {
   private async searchModel(req: SearchModelRequest, res: NexxusApiResponse): Promise<void> {
     const validated = validateModelQueryParams(req, req.body, req.params.type);
     const { appId, app, model } = validated;
+
+    const aclConstraint = authorizeAcl(app, req, 'search', model);
 
     // Pagination — kept inline because only this route uses it.
     let limit = req.body.limit;
@@ -134,7 +140,7 @@ export default class ModelRoute extends NexxusApiBaseRoute {
       throw new InvalidParametersException('Invalid offset parameter');
     }
 
-    const databaseFilter = buildDatabaseFilter(validated, req.body.filter);
+    const databaseFilter = buildDatabaseFilter(validated, req.body.filter, aclConstraint ?? undefined);
 
     const results = (await NexxusApi.database.searchItems({
       appId,
@@ -149,7 +155,8 @@ export default class ModelRoute extends NexxusApiBaseRoute {
 
   private async getModel(req: GetModelRequest, res: NexxusApiResponse): Promise<void> {
     const appId = req.headers['nxx-app-id'] as string;
-    const appSchema = NexxusApi.getStoredApp(appId)?.getSchema() as NexxusApplicationSchema;
+    const app = NexxusApi.getStoredApp(appId)!;
+    const appSchema = app.getSchema();
 
     if (!req.query.type) {
       throw new InvalidParametersException('Query parameter "type" is required');
@@ -158,6 +165,8 @@ export default class ModelRoute extends NexxusApiBaseRoute {
     if (!appSchema[req.query.type]) {
       throw new ModelNotFoundException(`Model "${req.query.type}" not found in schema for the application "${appId}"`);
     }
+
+    const aclConstraint = authorizeAcl(app, req, 'get', req.query.type);
 
     const items = await NexxusApi.database.getItems({
       ids: [ req.params.id ],
@@ -168,6 +177,8 @@ export default class ModelRoute extends NexxusApiBaseRoute {
     if (items.length === 0 || !items[0]) {
       throw new ModelNotFoundException(`Model instance with ID "${req.params.id}" not found`);
     }
+
+    enforceRowConstraint(app, req, 'get', req.query.type, aclConstraint, items[0].getData() as Record<string, unknown>);
 
     res.status(200).send({ data: items[0].getData() });
   }
@@ -181,11 +192,17 @@ export default class ModelRoute extends NexxusApiBaseRoute {
       throw new ModelNotFoundException(`Model "${req.body.type}" not found in schema for the application "${appId}"`);
     }
 
+    const aclConstraint = authorizeAcl(app, req, 'create', req.body.type);
+
     const newModel = new NexxusAppModel({
       ...req.body,
       appId: appId,
       userId: req.user?.id
     }, appSchema);
+
+    // The created object must itself satisfy the row condition (e.g. a role
+    // that may only create objects it owns) — checked against the new data.
+    enforceRowConstraint(app, req, 'create', req.body.type, aclConstraint, newModel.getData() as Record<string, unknown>);
 
     // Transient models bypass the writer entirely — their records are
     // notification-shaped, existing only long enough to fan out to
@@ -220,6 +237,14 @@ export default class ModelRoute extends NexxusApiBaseRoute {
       throw new InvalidParametersException(
         `Model "${req.body.type}" is transient (create-only) and cannot be updated`
       );
+    }
+
+    const aclConstraint = authorizeAcl(app, req, 'update', req.body.type);
+
+    if (aclConstraint) {
+      const attrs = await loadObjectAttributes(appId, req.body.type, req.params.id);
+
+      enforceRowConstraint(app, req, 'update', req.body.type, aclConstraint, attrs);
     }
 
     try {
@@ -262,6 +287,14 @@ export default class ModelRoute extends NexxusApiBaseRoute {
       );
     }
 
+    const aclConstraint = authorizeAcl(app, req, 'delete', req.body.type);
+
+    if (aclConstraint) {
+      const attrs = await loadObjectAttributes(appId, req.body.type, req.params.id);
+
+      enforceRowConstraint(app, req, 'delete', req.body.type, aclConstraint, attrs);
+    }
+
     await NexxusApi.messageQueue.publishMessage('writer', { event: 'model_deleted', data: {
       appId,
       id: req.params.id,
@@ -274,11 +307,16 @@ export default class ModelRoute extends NexxusApiBaseRoute {
 
   private async countModel(req: CountModelRequest, res: NexxusApiResponse): Promise<void> {
     const appId = req.headers['nxx-app-id'] as string;
-    const appSchema = NexxusApi.getStoredApp(appId)?.getSchema() as NexxusApplicationSchema;
+    const app = NexxusApi.getStoredApp(appId)!;
+    const appSchema = app.getSchema();
 
     if (!appSchema[req.body.type]) {
       throw new ModelNotFoundException(`Model "${req.body.type}" not found in schema for the application "${appId}"`);
     }
+
+    // Count is gated at the action level only — row conditions don't apply
+    // (a full count, per the ACL design).
+    authorizeAcl(app, req, 'count', req.body.type);
 
     let databaseFilter: NexxusFilterQuery | undefined;
 

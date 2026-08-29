@@ -170,6 +170,16 @@ export class NexxusElasticsearchDbBootstrapper extends NexxusDatabaseBootstrappe
         this.buildMapping(userSchema, false),
       );
     }
+
+    // Per-app ACL roles index — only when ACLs are enabled (which implies
+    // auth). One document per role; app-scoped like `user`, so it's a
+    // built-in mapping (no version field).
+    if (app.isAclEnabled()) {
+      await this.createIndexIfMissing(
+        `${NEXXUS_PREFIX_LC}-app-${appId}-acl`,
+        this.buildMapping(NEXXUS_BUILTIN_MODEL_SCHEMAS.acl as NexxusModelDef, false),
+      );
+    }
   }
 
   /**

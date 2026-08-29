@@ -1,6 +1,7 @@
 import type { NexxusApplication, INexxusApplication } from "./Application";
 import type { NexxusUser, INexxusUser } from "./User";
 import type { NexxusSetting, INexxusSetting } from "./Setting";
+import type { NexxusAclRole, INexxusAclRole } from "./AclRole";
 import type { NexxusAppModel, INexxusAppModel } from "./AppModel";
 
 import { randomUUID } from "node:crypto"
@@ -8,7 +9,8 @@ import { randomUUID } from "node:crypto"
 export const MODEL_REGISTRY = {
   application: 'application',
   user: 'user',
-  setting: 'setting'
+  setting: 'setting',
+  acl: 'acl'
 } as const;
 
 export type NexxusBuiltinTypeName = typeof MODEL_REGISTRY[keyof typeof MODEL_REGISTRY];
@@ -53,7 +55,7 @@ export abstract class NexxusBaseModel<T extends INexxusBaseModel = INexxusBaseMo
   }
 }
 
-export type AnyNexxusBuiltinModel     = NexxusApplication | NexxusUser | NexxusSetting;
-export type AnyNexxusBuiltinModelData = INexxusApplication | INexxusUser | INexxusSetting;
+export type AnyNexxusBuiltinModel     = NexxusApplication | NexxusUser | NexxusSetting | NexxusAclRole;
+export type AnyNexxusBuiltinModelData = INexxusApplication | INexxusUser | INexxusSetting | INexxusAclRole;
 export type AnyNexxusModel            = AnyNexxusBuiltinModel | NexxusAppModel;
 export type AnyNexxusModelData        = AnyNexxusBuiltinModelData | INexxusAppModel;

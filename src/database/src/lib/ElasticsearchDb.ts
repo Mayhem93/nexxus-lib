@@ -25,6 +25,8 @@ import {
   INexxusUser,
   NexxusSetting,
   INexxusSetting,
+  NexxusAclRole,
+  INexxusAclRole,
   NexxusJsonPatch,
   NexxusFilterQuery,
   NexxusLogicalOperator,
@@ -192,7 +194,7 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
         );
         this.markDisconnected();
       }
-      
+
       return Promise.reject(err);
     }
   }
@@ -367,6 +369,12 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
 
             break;
 
+          case NexxusAclRole:
+            itemData = (item as NexxusAclRole).getData();
+            index = `${NEXXUS_PREFIX_LC}-app-${itemData.appId}-${itemData.type}`;
+
+            break;
+
           case NexxusAppModel:
             itemData = (item as NexxusAppModel).getData();
             index = `${NEXXUS_PREFIX_LC}-app-${itemData.appId}-${itemData.type}`;
@@ -417,6 +425,7 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
   public searchItems(options: NexxusDbSearchOptions<'application'>): Promise<NexxusApplication[]>;
   public searchItems(options: NexxusDbSearchOptions<'user'>): Promise<NexxusUser[]>;
   public searchItems(options: NexxusDbSearchOptions<'setting'>): Promise<NexxusSetting[]>;
+  public searchItems(options: NexxusDbSearchOptions<'acl'>): Promise<NexxusAclRole[]>;
   public searchItems(options: NexxusDbSearchOptions<string>): Promise<NexxusAppModel[]>;
 
   public searchItems(options: NexxusDbSearchOptions<string>): Promise<Array<AnyNexxusModel>> {
@@ -459,6 +468,9 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
           case 'setting':
             return new NexxusSetting(res._source as INexxusSetting);
 
+          case 'acl':
+            return new NexxusAclRole(res._source as INexxusAclRole);
+
           default:
             // Inject the ES-side _version into the model data before construction.
             // Only app models carry a version; built-ins above intentionally don't.
@@ -476,6 +488,7 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
   public getItems(options: NexxusDbGetOptions<'application'>): Promise<Array<NexxusApplication | null>>;
   public getItems(options: NexxusDbGetOptions<'user'>): Promise<Array<NexxusUser | null>>;
   public getItems(options: NexxusDbGetOptions<'setting'>): Promise<Array<NexxusSetting | null>>;
+  public getItems(options: NexxusDbGetOptions<'acl'>): Promise<Array<NexxusAclRole | null>>;
   public getItems(options: NexxusDbGetOptions<string>): Promise<Array<NexxusAppModel | null>>;
 
   public getItems(options: NexxusDbGetOptions<string>): Promise<Array<NexxusBaseModel | null>> {
@@ -539,6 +552,9 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
             case 'setting':
               return new NexxusSetting(doc._source as INexxusSetting);
 
+            case 'acl':
+              return new NexxusAclRole(doc._source as INexxusAclRole);
+
             default:
               // Inject the ES-side _version into the model data before construction.
               return NexxusAppModel.fromStorage({
@@ -566,150 +582,150 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
       const collectedModelFields = new Set<string>();
       let waitForRefresh = true;
 
-    if (!(collection[0].get().metadata.type in Object.keys(NEXXUS_BUILTIN_MODEL_SCHEMAS))) {
-      waitForRefresh = false;
-    }
-
-    // Group all patches targeting the same doc into a single bulk update with one
-    // merged painless script. ES bumps `_version` exactly once per `update` action,
-    // so emitting separate actions for (e.g.) the field patch and the implicit
-    // `updatedAt` patch would double-bump and create phantom gaps on the client.
-    type DocBucket = {
-      index: string;
-      id: string;
-      scriptLines: Array<string>;
-      scriptParams: Record<string, any>;
-      paramCount: number;
-    };
-    const docBuckets: Map<string, DocBucket> = new Map();
-
-    for (const patch of collection) {
-      const patchData = patch.get();
-      let index = `${NEXXUS_PREFIX_LC}-`;
-
-      if (patchData.metadata.type === 'application' || patchData.metadata.type === 'setting') {
-        index += patchData.metadata.type;
-      } else {
-        if (!patchData.metadata.appId) {
-          throw new Error("App ID is required for updating user or app-specific models");
-        }
-
-        index += `app-${patchData.metadata.appId}-${patchData.metadata.type}`;
+      if (!(collection[0].get().metadata.type in Object.keys(NEXXUS_BUILTIN_MODEL_SCHEMAS))) {
+        waitForRefresh = false;
       }
 
-      const docKey = `${index}|${patchData.metadata.id}`;
-      let bucket = docBuckets.get(docKey);
+      // Group all patches targeting the same doc into a single bulk update with one
+      // merged painless script. ES bumps `_version` exactly once per `update` action,
+      // so emitting separate actions for (e.g.) the field patch and the implicit
+      // `updatedAt` patch would double-bump and create phantom gaps on the client.
+      type DocBucket = {
+        index: string;
+        id: string;
+        scriptLines: Array<string>;
+        scriptParams: Record<string, any>;
+        paramCount: number;
+      };
+      const docBuckets: Map<string, DocBucket> = new Map();
 
-      if (!bucket) {
-        bucket = { index, id: patchData.metadata.id, scriptLines: [], scriptParams: {}, paramCount: 0 };
-        docBuckets.set(docKey, bucket);
-      }
+      for (const patch of collection) {
+        const patchData = patch.get();
+        let index = `${NEXXUS_PREFIX_LC}-`;
 
-      for (let idx = 0; idx < patchData.path.length; idx++) {
-        const path = patchData.path[idx];
-        const fieldType = patchData.metadata.pathFieldTypes![idx];
-        const paramName = `value${bucket.paramCount}`;
-        let scriptLine: string | undefined;
+        if (patchData.metadata.type === 'application' || patchData.metadata.type === 'setting') {
+          index += patchData.metadata.type;
+        } else {
+          if (!patchData.metadata.appId) {
+            throw new Error("App ID is required for updating user or app-specific models");
+          }
 
-        switch (patchData.op) {
-          case 'replace':
-            scriptLine = `ctx._source.${path} = params.${paramName}`;
-
-            break;
-
-          case 'append':
-            if (fieldType === 'array') {
-              scriptLine = `if (ctx._source.${path} == null) { ctx._source.${path} = []; } ctx._source.${path}.add(params.${paramName})`;
-            } else if (fieldType === 'string') {
-              scriptLine = `if (ctx._source.${path} == null) { ctx._source.${path} = ''; } ctx._source.${path} += params.${paramName}`;
-            } else {
-              NexxusElasticsearchDb.logger.warn(`Append operation not supported for field type: ${fieldType}`, NexxusDatabaseAdapter.loggerLabel);
-            }
-
-            break;
-
-          case 'prepend':
-            if (fieldType === 'array') {
-              scriptLine = `if (ctx._source.${path} == null) { ctx._source.${path} = []; } ctx._source.${path}.add(0, params.${paramName})`;
-            } else if (fieldType === 'string') {
-              scriptLine = `if (ctx._source.${path} == null) { ctx._source.${path} = ''; } ctx._source.${path} = params.${paramName} + ctx._source.${path}`;
-            } else {
-              NexxusElasticsearchDb.logger.warn(`Prepend operation not supported for field type: ${fieldType}`, NexxusDatabaseAdapter.loggerLabel);
-            }
-
-            break;
-
-          case 'incr':
-            if (fieldType === 'int' || fieldType === 'float' || fieldType === 'date') {
-              scriptLine = `if (ctx._source.${path} == null) { ctx._source.${path} = ${patchData.value[idx]}; } ctx._source.${path} += params.${paramName}`;
-            } else {
-              NexxusElasticsearchDb.logger.warn(`Incr operation not supported for field type: ${fieldType}`, NexxusDatabaseAdapter.loggerLabel);
-            }
-
-            break;
-
-          case 'decr':
-            if (fieldType === 'int' || fieldType === 'float' || fieldType === 'date') {
-              scriptLine = `if (ctx._source.${path} == null) { ctx._source.${path} = ${patchData.value[idx]}; } ctx._source.${path} -= params.${paramName}`;
-            } else {
-              NexxusElasticsearchDb.logger.warn(`Decr operation not supported for field type: ${fieldType}`, NexxusDatabaseAdapter.loggerLabel);
-            }
-
-            break;
-          default:
-            NexxusElasticsearchDb.logger.warn(`Unsupported JSON Patch operation: ${patchData.op}`, NexxusDatabaseAdapter.loggerLabel);
-
-            break;
+          index += `app-${patchData.metadata.appId}-${patchData.metadata.type}`;
         }
 
-        if (scriptLine === undefined) {
+        const docKey = `${index}|${patchData.metadata.id}`;
+        let bucket = docBuckets.get(docKey);
+
+        if (!bucket) {
+          bucket = { index, id: patchData.metadata.id, scriptLines: [], scriptParams: {}, paramCount: 0 };
+          docBuckets.set(docKey, bucket);
+        }
+
+        for (let idx = 0; idx < patchData.path.length; idx++) {
+          const path = patchData.path[idx];
+          const fieldType = patchData.metadata.pathFieldTypes![idx];
+          const paramName = `value${bucket.paramCount}`;
+          let scriptLine: string | undefined;
+
+          switch (patchData.op) {
+            case 'replace':
+              scriptLine = `ctx._source.${path} = params.${paramName}`;
+
+              break;
+
+            case 'append':
+              if (fieldType === 'array') {
+                scriptLine = `if (ctx._source.${path} == null) { ctx._source.${path} = []; } ctx._source.${path}.add(params.${paramName})`;
+              } else if (fieldType === 'string') {
+                scriptLine = `if (ctx._source.${path} == null) { ctx._source.${path} = ''; } ctx._source.${path} += params.${paramName}`;
+              } else {
+                NexxusElasticsearchDb.logger.warn(`Append operation not supported for field type: ${fieldType}`, NexxusDatabaseAdapter.loggerLabel);
+              }
+
+              break;
+
+            case 'prepend':
+              if (fieldType === 'array') {
+                scriptLine = `if (ctx._source.${path} == null) { ctx._source.${path} = []; } ctx._source.${path}.add(0, params.${paramName})`;
+              } else if (fieldType === 'string') {
+                scriptLine = `if (ctx._source.${path} == null) { ctx._source.${path} = ''; } ctx._source.${path} = params.${paramName} + ctx._source.${path}`;
+              } else {
+                NexxusElasticsearchDb.logger.warn(`Prepend operation not supported for field type: ${fieldType}`, NexxusDatabaseAdapter.loggerLabel);
+              }
+
+              break;
+
+            case 'incr':
+              if (fieldType === 'int' || fieldType === 'float' || fieldType === 'date') {
+                scriptLine = `if (ctx._source.${path} == null) { ctx._source.${path} = ${patchData.value[idx]}; } ctx._source.${path} += params.${paramName}`;
+              } else {
+                NexxusElasticsearchDb.logger.warn(`Incr operation not supported for field type: ${fieldType}`, NexxusDatabaseAdapter.loggerLabel);
+              }
+
+              break;
+
+            case 'decr':
+              if (fieldType === 'int' || fieldType === 'float' || fieldType === 'date') {
+                scriptLine = `if (ctx._source.${path} == null) { ctx._source.${path} = ${patchData.value[idx]}; } ctx._source.${path} -= params.${paramName}`;
+              } else {
+                NexxusElasticsearchDb.logger.warn(`Decr operation not supported for field type: ${fieldType}`, NexxusDatabaseAdapter.loggerLabel);
+              }
+
+              break;
+            default:
+              NexxusElasticsearchDb.logger.warn(`Unsupported JSON Patch operation: ${patchData.op}`, NexxusDatabaseAdapter.loggerLabel);
+
+              break;
+          }
+
+          if (scriptLine === undefined) {
+            continue;
+          }
+
+          bucket.scriptLines.push(scriptLine);
+          bucket.scriptParams[paramName] = patchData.value[idx];
+          bucket.paramCount++;
+          collectedModelFields.add(path);
+        }
+      }
+
+      // One update action per doc — single merged script, single `_version` bump.
+      for (const bucket of docBuckets.values()) {
+        if (bucket.scriptLines.length === 0) {
+          NexxusElasticsearchDb.logger.warn(`No valid script lines generated for ID ${bucket.id}`, NexxusDatabaseAdapter.loggerLabel);
+
           continue;
         }
 
-        bucket.scriptLines.push(scriptLine);
-        bucket.scriptParams[paramName] = patchData.value[idx];
-        bucket.paramCount++;
-        collectedModelFields.add(path);
-      }
-    }
-
-    // One update action per doc — single merged script, single `_version` bump.
-    for (const bucket of docBuckets.values()) {
-      if (bucket.scriptLines.length === 0) {
-        NexxusElasticsearchDb.logger.warn(`No valid script lines generated for ID ${bucket.id}`, NexxusDatabaseAdapter.loggerLabel);
-
-        continue;
-      }
-
-      bulkBody.push(
-        { update: { _index: bucket.index, _id: bucket.id, retry_on_conflict: 3 } },
-        {
-          script: {
-            source: bucket.scriptLines.join(';\n'),
-            lang: 'painless',
-            params: bucket.scriptParams
+        bulkBody.push(
+          { update: { _index: bucket.index, _id: bucket.id, retry_on_conflict: 3 } },
+          {
+            script: {
+              source: bucket.scriptLines.join(';\n'),
+              lang: 'painless',
+              params: bucket.scriptParams
+            }
           }
-        }
-      );
-    }
+        );
+      }
 
-    if (bulkBody.length === 0) {
-      NexxusElasticsearchDb.logger.warn('No items to update in Elasticsearch database', NexxusDatabaseAdapter.loggerLabel);
+      if (bulkBody.length === 0) {
+        NexxusElasticsearchDb.logger.warn('No items to update in Elasticsearch database', NexxusDatabaseAdapter.loggerLabel);
 
-      return [];
-    }
+        return [];
+      }
 
-    NexxusElasticsearchDb.logger.debug('Executing bulk update in Elasticsearch', { bulkBody }, NexxusDatabaseAdapter.loggerLabel);
+      NexxusElasticsearchDb.logger.debug('Executing bulk update in Elasticsearch', { bulkBody }, NexxusDatabaseAdapter.loggerLabel);
 
-    const returnFields = options?.returnFields ? collectedModelFields.union(options.returnFields) : collectedModelFields;
-    const result = await this.client.bulk({
-      operations: bulkBody,
-      _source: Array.from(returnFields),
-      refresh: waitForRefresh ? 'wait_for' : false
-    });
-    const collectedPartialModels: Array<Partial<AnyNexxusModelData>> = [];
+      const returnFields = options?.returnFields ? collectedModelFields.union(options.returnFields) : collectedModelFields;
+      const result = await this.client.bulk({
+        operations: bulkBody,
+        _source: Array.from(returnFields),
+        refresh: waitForRefresh ? 'wait_for' : false
+      });
+      const collectedPartialModels: Array<Partial<AnyNexxusModelData>> = [];
 
-    NexxusElasticsearchDb.logger.debug('Bulk update result', { result }, NexxusDatabaseAdapter.loggerLabel);
+      NexxusElasticsearchDb.logger.debug('Bulk update result', { result }, NexxusDatabaseAdapter.loggerLabel);
 
       result.items.forEach(item => {
         if (item.update && item.update.status >= 200 && item.update.status < 300) {
@@ -888,10 +904,16 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
 
         // Add to current bool based on parent operator
         if (currentOperator === '$or') {
-          if (!currentBool.should) currentBool.should = [];
+          if (!currentBool.should) {
+            currentBool.should = [];
+          }
+
           (currentBool!.should as QueryDslQueryContainer[]).push(fieldQuery);
         } else {
-          if (!currentBool.must) currentBool.must = [];
+          if (!currentBool.must) {
+            currentBool.must = [];
+          }
+          
           (currentBool!.must as QueryDslQueryContainer[]).push(fieldQuery);
         }
       }

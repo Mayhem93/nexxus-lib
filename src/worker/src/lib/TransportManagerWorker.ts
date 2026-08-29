@@ -5,7 +5,6 @@ import {
   NexxusTransportManagerPayload,
   NexxusModelCreatedPayload,
   NexxusTransportManagerModelUpdatedPayload,
-  NexxusTransportManagerJsonPatch,
   NexxusModelDeletedPayload,
   NexxusBaseQueuePayload,
   NexxusFilterQuery,
@@ -111,7 +110,7 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<
       userId: data.userId,
       model: data.type,
       modelId: data.id
-    }, data);
+    }, [ data ]);
     const transportToDeviceChannelsMap: Map<NexxusQueueName, Map<string, string[]>> = new Map();
 
     for (const [deviceTransport, channelKeys] of deviceToChannelsMap.entries()) {
@@ -161,8 +160,12 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<
       modelId: data[0].metadata.id
     };
 
-    // Get map of devices -> matching channel keys
-    const deviceToChannelsMap = await this.getDevicesFromGeneratedChannels(channel, data);
+    // Get map of devices -> matching channel keys. Updates match filters
+    // against each patch's post-update partial model.
+    const deviceToChannelsMap = await this.getDevicesFromGeneratedChannels(
+      channel,
+      data.map(patch => patch.metadata.partialModel)
+    );
 
     // Group by transport
     const transportToDeviceChannelsMap: Map<NexxusQueueName, Map<string, string[]>> = new Map();
@@ -223,12 +226,15 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<
   }
 
   private async handleModelDeleted(data: NexxusModelDeletedPayload['data']): Promise<void> {
+    // Deletes carry only identity fields (id/type/appId/userId), which is
+    // enough to match ownership-style filters (e.g. userId == me) so filtered
+    // subscribers are notified; filters on other fields can't be tested here.
     const deviceToChannelsMap = await this.getDevicesFromGeneratedChannels({
       appId: data.appId,
       userId: data.userId,
       model: data.type,
       modelId: data.id
-    });
+    }, [ data ]);
     const transportToDeviceChannelsMap: Map<NexxusQueueName, Map<string, string[]>> = new Map();
 
     for (const [deviceTransport, channelKeys] of deviceToChannelsMap.entries()) {
@@ -270,7 +276,10 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<
     }
   }
 
-  private async getDevicesFromGeneratedChannels<T>(channel: NexxusBaseSubscriptionChannel, change?: T | T[]): Promise<Map<NexxusDeviceTransportString, Set<string>>> {
+  private async getDevicesFromGeneratedChannels(
+    channel: NexxusBaseSubscriptionChannel,
+    filterTargets: Array<Partial<INexxusAppModel>> = []
+  ): Promise<Map<NexxusDeviceTransportString, Set<string>>> {
     const deviceToChannelsMap = new Map<NexxusDeviceTransportString, Set<string>>();
 
     const app = NexxusTransportManagerWorker.loadedApps.get(channel.appId);
@@ -284,10 +293,11 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<
       return deviceToChannelsMap;
     }
 
-    // Normalize change to array for consistent processing
-    const changes = change !== undefined
-      ? (Array.isArray(change) ? change : [change])
-      : [];
+    // The model-shaped objects filtered subscriptions are tested against
+    // (empty for events that carry none). Callers normalize each event's shape:
+    // creates pass the new model, updates the per-patch post-update partial
+    // model, deletes the deleted model's identity fields.
+    const changes = filterTargets;
 
     // Fetch the scope registry ONCE per event. This tells us which
     // (modelId/userId) combinations have any subscriber at all — patterns
@@ -336,24 +346,16 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<
         );
       }
 
-      // If no changes (e.g., model deleted), skip filtered subscriptions
-      if (changes) {
+      // Filtered subscriptions match only when there's an object to test the
+      // filter against. Creates/updates/deletes all supply one (see callers);
+      // `changes` is empty only for events that carry none.
+      if (changes.length > 0) {
         const filters = await NexxusRedisSubscription.getAllFilters(channelPattern);
 
         // For each filter, test if ANY change matches
         for (const [filterId, filterQuery] of Object.entries(filters)) {
           const filter = new NexxusFilterQuery(filterQuery, app.getAppModelSchema(channelPattern.model));
-          let matchesFilter = false;
-
-          if (Array.isArray(changes)) {
-            matchesFilter = (changes as Array<NexxusTransportManagerJsonPatch>).some(singleChange => {
-              return filter.test(singleChange.metadata.partialModel);
-            });
-          } else {
-            matchesFilter = filter.test(changes as Partial<INexxusAppModel>);
-          }
-
-          // Test if ANY change matches
+          const matchesFilter = changes.some(change => filter.test(change));
 
           if (matchesFilter) {
             const filteredSub = new NexxusRedisSubscription(channelPattern, filterId);

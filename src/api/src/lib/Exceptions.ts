@@ -7,6 +7,7 @@ enum ApiExceptions {
   SERVICE_UNAVAILABLE = "ServiceUnavailableException",
   APPLICATION_NOT_FOUND = "ApplicationNotFoundException",
   MODEL_NOT_FOUND = "ModelNotFoundException",
+  ACCESS_DENIED = "AccessDeniedException",
   DEVICE_NOT_CONNECTED = "DeviceNotConnectedException",
   INVALID_AUTH_METHOD = "InvalidAuthMethodException",
   NO_AUTH_PRESENT = "NoAuthPresentException",
@@ -73,6 +74,19 @@ export class ModelNotFoundException extends NexxusApiException {
 
   constructor(message: string) {
     super(ApiExceptions.MODEL_NOT_FOUND, message);
+  }
+}
+
+/**
+ * Thrown by the ACL middleware when the app has ACLs enabled and the request
+ * isn't permitted. Message is deliberately generic so a denial doesn't leak
+ * which policy/condition failed (or whether the target even exists).
+ */
+export class AccessDeniedException extends NexxusApiException {
+  public readonly statusCode = 403;
+
+  constructor(message: string = 'Access denied') {
+    super(ApiExceptions.ACCESS_DENIED, message);
   }
 }
 
