@@ -1,10 +1,10 @@
-import type { NexxusApplication, INexxusApplication } from "./Application";
-import type { NexxusUser, INexxusUser } from "./User";
-import type { NexxusSetting, INexxusSetting } from "./Setting";
-import type { NexxusAclRole, INexxusAclRole } from "./AclRole";
-import type { NexxusAppModel, INexxusAppModel } from "./AppModel";
+import type { NexxusApplication, INexxusApplication } from './Application';
+import type { NexxusUser, INexxusUser } from './User';
+import type { NexxusSetting, INexxusSetting } from './Setting';
+import type { NexxusAclRole, INexxusAclRole } from './AclRole';
+import type { NexxusAppModel, INexxusAppModel } from './AppModel';
 
-import { randomUUID } from "node:crypto"
+import { randomUUID } from 'node:crypto'
 
 export const MODEL_REGISTRY = {
   application: 'application',
@@ -32,7 +32,7 @@ export abstract class NexxusBaseModel<T extends INexxusBaseModel = INexxusBaseMo
     this.data = data;
 
     if (!this.data.type) {
-      throw new Error("Model 'type' is required");
+      throw new Error('Model \'type\' is required');
     }
 
     const now = Math.floor(Date.now()/1000);
@@ -54,6 +54,16 @@ export abstract class NexxusBaseModel<T extends INexxusBaseModel = INexxusBaseMo
     return this.data;
   }
 }
+
+/**
+ * Base class for the framework's built-in models (application, user, setting,
+ * acl). It adds nothing over NexxusBaseModel beyond pinning the type parameter
+ * to the built-in type names — it exists purely to distinguish built-in models
+ * from app-defined ones (NexxusAppModel) at the type level.
+ */
+export abstract class NexxusBuiltinModel<
+  T extends INexxusBaseModel<NexxusBuiltinTypeName>
+> extends NexxusBaseModel<T> {}
 
 export type AnyNexxusBuiltinModel     = NexxusApplication | NexxusUser | NexxusSetting | NexxusAclRole;
 export type AnyNexxusBuiltinModelData = INexxusApplication | INexxusUser | INexxusSetting | INexxusAclRole;

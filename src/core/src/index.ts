@@ -20,7 +20,6 @@ export * from './common/AclStatement';
 export * from './common/AclStatementValidator';
 
 export * from './models/BaseModel';
-export * from './models/BuiltinModel';
 export * from './models/AppModel';
 export * from './models/Application';
 export * from './models/User';

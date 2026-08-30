@@ -23,6 +23,11 @@ export interface NexxusArrayFieldDef extends BaseFieldDef {
   type: 'array';
   arrayType: NexxusModelPrimitiveType | 'object';
   properties?: Record<string, NexxusFieldDef>;
+  /**
+   * Whether membership queries (equality = "contains", `in` = "contains any")
+   * may target this array field. Only valid for primitive `arrayType`s.
+   */
+  filterable?: boolean;
 }
 
 export interface NexxusObjectFieldDef extends BaseFieldDef {

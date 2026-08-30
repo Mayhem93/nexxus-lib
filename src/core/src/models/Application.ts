@@ -2,11 +2,10 @@ import {
   INexxusBaseModel,
   MODEL_REGISTRY
 } from './BaseModel';
-import { NexxusBuiltinModel } from './BuiltinModel';
+import { NexxusBuiltinModel } from './BaseModel';
 import {
   NexxusFieldDef,
-  NexxusModelDef,
-  PrimitiveFieldDef
+  NexxusModelDef
 } from '../common/ModelTypes';
 import { InferModel } from '../common/InferModel';
 import {
@@ -189,13 +188,16 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
       throw new Error('Application "defaultLimit" must be a greater than 10 if provided');
     }
 
-    data.defaultLimit = data.defaultLimit ?? 10;
+    // Assign resolved defaults onto `this.data` — `super()` already shallow-copied
+    // `data` into `this.data`, so mutating `data` here would not persist to the
+    // stored model (unlike the nested `schema` flags, which share a reference).
+    this.data.defaultLimit = data.defaultLimit ?? 10;
 
-    if (data.maxLimit !== undefined && (typeof data.maxLimit !== 'number' || data.maxLimit <= 0 || data.maxLimit < data.defaultLimit!)) {
+    if (data.maxLimit !== undefined && (typeof data.maxLimit !== 'number' || data.maxLimit <= 0 || data.maxLimit < this.data.defaultLimit!)) {
       throw new Error('Application "maxLimit" must be a positive number if provided and must be greater than or equal to "defaultLimit"');
     }
 
-    data.maxLimit = data.maxLimit ?? 100;
+    this.data.maxLimit = data.maxLimit ?? 100;
 
     if (data.auth) {
       // Per-app auth block. Per-strategy config shapes are NOT validated here —
@@ -335,11 +337,11 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
    * application's `schema` field. Built-in models (user, application) have
    * their own static `getModelSchema` and are not resolved here.
    *
-   * When the model is `subscribable: false`, every primitive field is
-   * force-marked `filterable: true` recursively — that's how the
-   * "traditional-DB, all-fields-filterable" behaviour lands in downstream
-   * FilterQuery validation without those callers needing to know about
-   * the flag.
+   * When the model is `subscribable: false`, every queryable field (primitives
+   * and primitive-element arrays) is force-marked `filterable: true`
+   * recursively — that's how the "traditional-DB, all-fields-filterable"
+   * behaviour lands in downstream FilterQuery validation without those callers
+   * needing to know about the flag.
    */
   public getAppModelSchema(modelType: string): NexxusModelDef {
     const appModelDef = this.data.schema[modelType];
@@ -355,23 +357,29 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
     }
 
     if (appModelDef.subscribable === false) {
-      NexxusApplication.markAllPrimitivesFilterable(fields);
+      NexxusApplication.markAllFilterable(fields);
     }
 
     return fields;
   }
 
   /**
-   * Recursively set `filterable: true` on every primitive field def in the
-   * given schema. Arrays are skipped (the query DSL doesn't filter into
-   * arrays). Mutates in place — callers pass a clone.
+   * Recursively force `filterable: true` on every queryable field def: every
+   * primitive, and every primitive-element array (membership-queryable via
+   * eq/ne/in). Object fields recurse into their properties; arrays of objects
+   * are left alone (they can't be membership-queried). Mutates in place —
+   * callers pass a clone.
    */
-  private static markAllPrimitivesFilterable(fields: Record<string, NexxusFieldDef>): void {
+  private static markAllFilterable(fields: Record<string, NexxusFieldDef>): void {
     for (const def of Object.values(fields)) {
       if (def.type === 'object') {
-        NexxusApplication.markAllPrimitivesFilterable(def.properties);
-      } else if (def.type !== 'array') {
-        (def as PrimitiveFieldDef).filterable = true;
+        NexxusApplication.markAllFilterable(def.properties);
+      } else if (def.type === 'array') {
+        if (def.arrayType !== 'object') {
+          def.filterable = true;
+        }
+      } else {
+        def.filterable = true;
       }
     }
   }
@@ -441,13 +449,11 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
 
         if (fieldDef.type === 'object') {
           collectFilterableFields(fieldDef.properties, fieldPath);
-        } else if (fieldDef.type === 'array') {
-          // Skip arrays entirely (not filterable)
-          continue;
-        } else {
-          if (fieldDef.filterable) {
-            filterableFields.add(fieldPath);
-          }
+        } else if (fieldDef.filterable) {
+          // Primitive or primitive-element array marked filterable. The array's
+          // own path is collected (membership is matched against the whole
+          // array), not traversed into.
+          filterableFields.add(fieldPath);
         }
       }
     };

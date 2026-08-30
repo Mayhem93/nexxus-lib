@@ -5,9 +5,9 @@ import type { NexxusModelDef } from "./ModelTypes";
  * 'type' and 'appId' are excluded as they are handled separately in queries.
  */
 export const NEXXUS_UNIVERSAL_FIELDS = {
-  id:        { type: 'string', required: true },
-  createdAt: { type: 'date',   required: true },
-  updatedAt: { type: 'date',   required: true }
+  id:        { type: 'string', required: true, filterable: true },
+  createdAt: { type: 'date',   required: true, filterable: true },
+  updatedAt: { type: 'date',   required: true, filterable: true }
 } as const satisfies NexxusModelDef;
 
 /**

@@ -329,18 +329,10 @@ export class NexxusJsonPatch {
         const objDef = fieldDef as NexxusObjectFieldDef;
 
         current = objDef.properties;
-      } else if (fieldDef.type === 'array') {
-        const arrDef = fieldDef as NexxusArrayFieldDef;
-
-        // For arrays of objects, traverse into the object properties
-        if (arrDef.arrayType === 'object' && 'properties' in arrDef) {
-          current = arrDef.properties!;
-        } else {
-          // Can't traverse further into primitive arrays
-          return null;
-        }
       } else {
-        // Can't traverse into primitive types
+        // Arrays and primitives are leaves. You can replace/append/prepend a
+        // whole array, but there is no path syntax to address an element (no
+        // index notation), so we never descend into an array's element fields.
         return null;
       }
     }

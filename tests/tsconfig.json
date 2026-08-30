@@ -1,0 +1,16 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "paths": {
+      "@mayhem93/nexxus-core-lib":          ["../src/core/src/index.ts"],
+      "@mayhem93/nexxus-database-lib":      ["../src/database/src/index.ts"],
+      "@mayhem93/nexxus-redis":             ["../src/redis/src/index.ts"],
+      "@mayhem93/nexxus-message-queue-lib": ["../src/message_queue/src/index.ts"],
+      "@mayhem93/nexxus-api-lib":           ["../src/api/src/index.ts"],
+      "@mayhem93/nexxus-worker-lib":        ["../src/worker/src/index.ts"]
+    },
+    "types": ["node"],
+    "noEmit": true
+  },
+  "include": ["**/*.ts"]
+}
