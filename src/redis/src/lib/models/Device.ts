@@ -5,7 +5,6 @@ import {
   RedisDeviceInvalidParamsException,
   RedisDeviceNotConnectedException
 } from '../Exceptions'
-import { NexxusRedisBaseModel, RedisKeyType } from './BaseModel';
 import { NexxusRedisSubscription } from './Subscription';
 import { NEXXUS_PREFIX_LC } from '@mayhem93/nexxus-core-lib';
 
@@ -65,9 +64,11 @@ type NexxusDeviceRedisProps = Omit<NexxusDeviceProps, 'lastSeen' | 'subscription
   subscriptions: string[];
 }
 
-export class NexxusDevice extends NexxusRedisBaseModel<NexxusDeviceProps> {
+export class NexxusDevice {
+  private data: NexxusDeviceProps;
+
   constructor(props: NexxusDeviceConstructorProps) {
-    super(RedisKeyType.Json, {
+    this.data = {
       id: props.id || crypto.randomUUID(),
       appId: props.appId,
       name: props.name || 'Unnamed Device',
@@ -77,15 +78,19 @@ export class NexxusDevice extends NexxusRedisBaseModel<NexxusDeviceProps> {
       transport: props.transport,
       lastSeen: props.lastSeen ? new Date(props.lastSeen) : undefined,
       subscriptions: props.subscriptions || []
-    });
+    };
 
     if (!props.appId) {
       throw new RedisDeviceInvalidParamsException('appId is required to create a Device instance');
     }
   }
 
+  public getValue(): NexxusDeviceProps {
+    return this.data;
+  }
+
   public getKey(): string {
-    return NexxusDevice.getKey(this.val.id);
+    return NexxusDevice.getKey(this.data.id);
   }
 
   public static getKey(id: string): string {
@@ -173,9 +178,9 @@ export class NexxusDevice extends NexxusRedisBaseModel<NexxusDeviceProps> {
     const device = await NexxusDevice.get(deviceId, true);
     const promises : Promise<boolean>[] = [];
 
-    for (const subInstance of device.val.subscriptions) {
-      if (device.val.transport) {
-        promises.push(subInstance.removeDevice(deviceId, device.val.transport));
+    for (const subInstance of device.data.subscriptions) {
+      if (device.data.transport) {
+        promises.push(subInstance.removeDevice(deviceId, device.data.transport));
       } else {
         NexxusRedis.logger.warn(`Device with id "${deviceId}" is not connected to any transport, cannot remove subscriptions`);
       }
@@ -190,44 +195,44 @@ export class NexxusDevice extends NexxusRedisBaseModel<NexxusDeviceProps> {
   }
 
   public async addSubscription(subscription: NexxusRedisSubscription): Promise<boolean> {
-    if (!this.val.transport) {
-      throw new RedisDeviceNotConnectedException(`Device with id "${this.val.id}" is not connected to any transport`);
+    if (!this.data.transport) {
+      throw new RedisDeviceNotConnectedException(`Device with id "${this.data.id}" is not connected to any transport`);
     }
 
     const redis = NexxusRedis.instance.getClient();
 
-    subscription.setAppId(this.val.appId);
+    subscription.setAppId(this.data.appId);
 
     const index = await this.hasSubscription(subscription);
 
     if (index !== null) {
-      NexxusRedis.logger.debug(`Subscription "${subscription.getKey()}" already exists on device with id "${this.val.id}"`);
+      NexxusRedis.logger.debug(`Subscription "${subscription.getKey()}" already exists on device with id "${this.data.id}"`);
 
       return false;
     }
 
     const res = await redis.json.arrAppend(
-      `${NEXXUS_PREFIX_LC}:device:${this.val.id}`,
+      `${NEXXUS_PREFIX_LC}:device:${this.data.id}`,
       '$.subscriptions',
       subscription.getKey()
     );
 
     if (res === null) {
-      throw new RedisCommandErrorException(`Failed to add subscription to device with id "${this.val.id}"`);
+      throw new RedisCommandErrorException(`Failed to add subscription to device with id "${this.data.id}"`);
     }
 
-    this.val.subscriptions.push(subscription);
-    await subscription.addDevice(this.val.id, this.val.transport);
+    this.data.subscriptions.push(subscription);
+    await subscription.addDevice(this.data.id, this.data.transport);
 
-    NexxusRedis.logger.debug(`Added subscription to device with id "${this.val.id}"`);
+    NexxusRedis.logger.debug(`Added subscription to device with id "${this.data.id}"`);
 
     return true;
   }
 
   public async hasSubscription(subscription: NexxusRedisSubscription): Promise<number | null> {
-    subscription.setAppId(this.val.appId);
+    subscription.setAppId(this.data.appId);
 
-    const localSearchIndex = this.val.subscriptions.findIndex(sub => {
+    const localSearchIndex = this.data.subscriptions.findIndex(sub => {
       return sub.getKey() === subscription.getKey();
     });
 
@@ -236,12 +241,12 @@ export class NexxusDevice extends NexxusRedisBaseModel<NexxusDeviceProps> {
     }
 
     const subs = await NexxusRedis.instance.getClient().json.get(
-      `${NEXXUS_PREFIX_LC}:device:${this.val.id}`,
+      `${NEXXUS_PREFIX_LC}:device:${this.data.id}`,
       { path: '$.subscriptions' }
     ) as string[] | null;
 
     if (subs === null) {
-      throw new RedisKeyNotFoundException(`Device with id "${this.val.id}" not found`);
+      throw new RedisKeyNotFoundException(`Device with id "${this.data.id}" not found`);
     }
 
     const index = subs.indexOf(subscription.getKey());
@@ -250,22 +255,22 @@ export class NexxusDevice extends NexxusRedisBaseModel<NexxusDeviceProps> {
   }
 
   public async removeSubscription(subscription: NexxusRedisSubscription): Promise<boolean> {
-    if (!this.val.transport) {
-      throw new RedisDeviceNotConnectedException(`Device with id "${this.val.id}" is not registered with any transport`);
+    if (!this.data.transport) {
+      throw new RedisDeviceNotConnectedException(`Device with id "${this.data.id}" is not registered with any transport`);
     }
 
-    subscription.setAppId(this.val.appId);
+    subscription.setAppId(this.data.appId);
 
     const index = await this.hasSubscription(subscription);
 
     if (index === null) {
-      NexxusRedis.logger.debug(`Subscription "${subscription.getKey()}" not found on device with id "${this.val.id}"`, { subscriptionKey: subscription.getKey(), deviceId: this.val.id });
+      NexxusRedis.logger.debug(`Subscription "${subscription.getKey()}" not found on device with id "${this.data.id}"`, { subscriptionKey: subscription.getKey(), deviceId: this.data.id });
 
       return false;
     }
 
     const res = await NexxusRedis.instance.getClient().json.arrPop(
-      `${NEXXUS_PREFIX_LC}:device:${this.val.id}`,
+      `${NEXXUS_PREFIX_LC}:device:${this.data.id}`,
       {
         path: `$.subscriptions`,
         index: index
@@ -273,38 +278,38 @@ export class NexxusDevice extends NexxusRedisBaseModel<NexxusDeviceProps> {
     );
 
     if (res === null) {
-      throw new RedisCommandErrorException(`Failed to remove subscription from device with id "${this.val.id}"`);
+      throw new RedisCommandErrorException(`Failed to remove subscription from device with id "${this.data.id}"`);
     }
 
-    await subscription.removeDevice(this.val.id, this.val.transport);
+    await subscription.removeDevice(this.data.id, this.data.transport);
 
-    this.val.subscriptions.splice(index, 1);
+    this.data.subscriptions.splice(index, 1);
 
-    NexxusRedis.logger.debug(`Removed subscription from device with id "${this.val.id}"`);
+    NexxusRedis.logger.debug(`Removed subscription from device with id "${this.data.id}"`);
 
     return true;
   }
 
   public async save(): Promise<void> {
-    if (this.val.subscriptions.length > 0 && !this.val.transport) {
-      throw new RedisDeviceNotConnectedException(`Device with id "${this.val.id}" must be connected to a transport to have subscriptions`);
+    if (this.data.subscriptions.length > 0 && !this.data.transport) {
+      throw new RedisDeviceNotConnectedException(`Device with id "${this.data.id}" must be connected to a transport to have subscriptions`);
     }
 
-    const subscriptionKeys : string[] = this.val.subscriptions.map(sub => sub.getKey());
+    const subscriptionKeys : string[] = this.data.subscriptions.map(sub => sub.getKey());
     const res = await NexxusRedis.instance.getClient().json.set(this.getKey(), '$', {
-      ...this.val,
-      ...(this.val.lastSeen ? { lastSeen: this.val.lastSeen.toISOString() } : {}),
+      ...this.data,
+      ...(this.data.lastSeen ? { lastSeen: this.data.lastSeen.toISOString() } : {}),
       subscriptions: subscriptionKeys
     });
 
     if (!res) {
-      throw new RedisCommandErrorException(`Failed to save device with id "${this.val.id}"`);
+      throw new RedisCommandErrorException(`Failed to save device with id "${this.data.id}"`);
     }
 
-    for (const subInstance of this.val.subscriptions) {
-      await subInstance.addDevice(this.val.id, this.val.transport!);
+    for (const subInstance of this.data.subscriptions) {
+      await subInstance.addDevice(this.data.id, this.data.transport!);
     }
 
-    NexxusRedis.logger.debug(`Saved device with id "${this.val.id}"`);
+    NexxusRedis.logger.debug(`Saved device with id "${this.data.id}"`);
   }
 }
