@@ -31,7 +31,6 @@ import {
   NexxusFilterQuery,
   NexxusLogicalOperator,
   NEXXUS_PREFIX_LC,
-  NEXXUS_BUILTIN_MODEL_SCHEMAS,
   isBuiltinModel
 } from '@mayhem93/nexxus-core-lib';
 
@@ -350,40 +349,26 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
         let itemData : AnyNexxusModelData;
         let index;
 
-        switch (item.constructor) {
-          case NexxusApplication:
-            itemData = item.getData();
-            index = `${NEXXUS_PREFIX_LC}-application`;
+        if (item instanceof NexxusApplication) {
+          itemData = item.getData();
+          index = `${NEXXUS_PREFIX_LC}-application`;
+        } else if (item instanceof NexxusSetting) {
+          itemData = item.getData();
+          index = `${NEXXUS_PREFIX_LC}-setting`;
+        } else if (item instanceof NexxusUser) {
+          itemData = item.getData();
+          index = `${NEXXUS_PREFIX_LC}-app-${itemData.appId}-${itemData.type}`;
+        } else if (item instanceof NexxusAclRole) {
+          itemData = item.getData();
+          index = `${NEXXUS_PREFIX_LC}-app-${itemData.appId}-${itemData.type}`;
+        } else if (item instanceof NexxusAppModel) {
+          itemData = item.getData();
+          index = `${NEXXUS_PREFIX_LC}-app-${itemData.appId}-${itemData.type}`;
 
-            break;
-
-          case NexxusSetting:
-            itemData = item.getData();
-            index = `${NEXXUS_PREFIX_LC}-setting`;
-
-            break;
-
-          case NexxusUser:
-            itemData = (item as NexxusUser).getData();
-            index = `${NEXXUS_PREFIX_LC}-app-${itemData.appId}-${itemData.type}`;
-
-            break;
-
-          case NexxusAclRole:
-            itemData = (item as NexxusAclRole).getData();
-            index = `${NEXXUS_PREFIX_LC}-app-${itemData.appId}-${itemData.type}`;
-
-            break;
-
-          case NexxusAppModel:
-            itemData = (item as NexxusAppModel).getData();
-            index = `${NEXXUS_PREFIX_LC}-app-${itemData.appId}-${itemData.type}`;
-
-            waitForRefresh = false;
-
-            break;
-          default:
-            throw new Error(`ElasticsearchDb.createItems: Unsupported model type: ${(item as NexxusBaseModel).getData().type}`);
+          // App-model writes skip wait_for (see the ES-consistency design).
+          waitForRefresh = false;
+        } else {
+          throw new Error(`ElasticsearchDb.createItems: Unsupported model type: ${(item as NexxusBaseModel).getData().type}`);
         }
 
         bulkReq.body.push(
@@ -582,7 +567,9 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
       const collectedModelFields = new Set<string>();
       let waitForRefresh = true;
 
-      if (!(collection[0].get().metadata.type in Object.keys(NEXXUS_BUILTIN_MODEL_SCHEMAS))) {
+      // App-model writes skip wait_for (see the ES-consistency design); built-in
+      // config updates keep it so their reads are immediately consistent.
+      if (!isBuiltinModel(collection[0].get().metadata.type)) {
         waitForRefresh = false;
       }
 
@@ -891,15 +878,27 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
         // Build field query
         let fieldQuery: any;
 
-        if (node.operator === 'eq') {
-          fieldQuery = { term: { [node.field]: node.value } };
-        } else if (node.operator === 'in') {
-          fieldQuery = { terms: { [node.field]: node.value } };
-        } else if (node.operator === 'ne') {
-          fieldQuery = { bool: { must_not: { term: { [node.field]: node.value } } } };
-        } else {
-          // Range operators (gte, lte, gt, lt).
-          fieldQuery = { range: { [node.field]: { [node.operator]: node.value } } };
+        switch (node.operator) {
+          case 'eq':
+            fieldQuery = { term: { [node.field]: node.value } };
+
+            break;
+
+          case 'in':
+            fieldQuery = { terms: { [node.field]: node.value } };
+
+            break;
+
+          case 'ne':
+            fieldQuery = { bool: { must_not: { term: { [node.field]: node.value } } } };
+
+            break;
+
+          default:
+            // Range operators (gte, lte, gt, lt).
+            fieldQuery = { range: { [node.field]: { [node.operator]: node.value } } };
+
+            break;
         }
 
         // Add to current bool based on parent operator
@@ -913,7 +912,7 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
           if (!currentBool.must) {
             currentBool.must = [];
           }
-          
+
           (currentBool!.must as QueryDslQueryContainer[]).push(fieldQuery);
         }
       }
