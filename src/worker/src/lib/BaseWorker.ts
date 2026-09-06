@@ -537,12 +537,28 @@ export abstract class NexxusBaseWorker<
     }
   }
 
+  /**
+   * Publish to another pipeline queue. Best-effort by design: by the time a
+   * worker publishes a downstream notification its own authoritative write has
+   * already succeeded, so letting a broker hiccup reject the message would only
+   * redeliver it and repeat that write. A failure is therefore logged and
+   * swallowed rather than propagated — which also keeps callers from turning a
+   * forgotten `await` into an unhandled rejection.
+   */
   protected async publish<Q extends NexxusQueueName>(
     queueName: Q,
     message: NexxusQueuePayload<Q>,
     metadata?: Record<string, any>
   ): Promise<void> {
-    return await NexxusBaseWorker.messageQueue.publishMessage(queueName, message, metadata);
+    try {
+      await NexxusBaseWorker.messageQueue.publishMessage(queueName, message, metadata);
+    } catch (e) {
+      NexxusBaseWorker.logger.warn(
+        `Publish to "${queueName}" failed for event "${(message as NexxusBaseQueuePayload).event}" ` +
+        `; non-fatal: ${(e as Error).message}`,
+        NexxusBaseWorker.loggerLabel
+      );
+    }
   }
 
   protected abstract processMessage(payload: NexxusQueueMessage<TPayload>) : Promise<void>;

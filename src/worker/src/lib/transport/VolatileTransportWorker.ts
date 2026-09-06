@@ -122,7 +122,7 @@ export abstract class NexxusVolatileTransportWorker<
     try {
       await NexxusBaseWorker.messageQueue.deleteQueue(this.queueName);
     } catch (err) {
-      NexxusVolatileTransportWorker.logger.warn(
+      NexxusVolatileTransportWorker.logger.error(
         `Failed to delete slot queue ${this.queueName} on shutdown: ${(err as Error).message}`,
         NexxusVolatileTransportWorker.loggerLabel,
       );

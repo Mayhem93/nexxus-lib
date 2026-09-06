@@ -9,6 +9,7 @@ import {
   NexxusBaseQueuePayload,
   NexxusFilterQuery,
   INexxusAppModel,
+  NexxusModelDef,
 } from '@mayhem93/nexxus-core-lib';
 import { NexxusQueueMessage } from '@mayhem93/nexxus-message-queue-lib';
 import {
@@ -42,6 +43,15 @@ type NexxusTransportManagerWorkerEvents = NexxusBaseWorkerEvents & {
 }
 
 type NexxusTransportManagerWorkerStats = NexxusBaseWorkerStats & {}
+
+/**
+ * One fan-out message's worth of recipients: every device that matched the
+ * exact same set of channels, and therefore shares a single transport payload.
+ */
+type NexxusFanOutGroup = {
+  channels: string[];
+  deviceIds: string[];
+};
 
 export class NexxusTransportManagerWorker extends NexxusBaseWorker<
   NexxusTransportManagerWorkerConfig,
@@ -111,41 +121,36 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<
       model: data.type,
       modelId: data.id
     }, [ data ]);
-    const transportToDeviceChannelsMap: Map<NexxusQueueName, Map<string, string[]>> = new Map();
 
-    for (const [deviceTransport, channelKeys] of deviceToChannelsMap.entries()) {
-      const [deviceId, transport] = deviceTransport.split('|');
+    for (const [transport, groups] of this.groupDevicesForFanOut(deviceToChannelsMap).entries()) {
+      let deviceCount = 0;
 
-      if (!transportToDeviceChannelsMap.has(transport as NexxusQueueName)) {
-        transportToDeviceChannelsMap.set(transport as NexxusQueueName, new Map());
-      }
+      for (const { channels, deviceIds } of groups) {
+        deviceCount += deviceIds.length;
 
-      transportToDeviceChannelsMap.get(transport as NexxusQueueName)!.set(deviceId, Array.from(channelKeys));
-    }
-
-    for (const [transport, deviceChannelsMap] of transportToDeviceChannelsMap.entries()) {
-      for (const [deviceId, channelKeys] of deviceChannelsMap.entries()) {
-        this.publish(transport as NexxusQueueName, {
+        this.publish(transport, {
           event: 'device_message',
-          deviceIds: [ deviceId ],
+          deviceIds,
           data: {
             event: 'model_created',
             model: data,
             metadata: {
-              channels: channelKeys
+              channels
             }
           }
         });
       }
 
       NexxusTransportManagerWorker.logger.info(
-        `Notifying ${deviceChannelsMap.size} devices about new model with ID: "${data.id}" via transport: "${transport}"`,
+        `Notifying ${deviceCount} devices about new model with ID: "${data.id}" via transport: "${transport}" ` +
+        `in ${groups.length} message(s)`,
         {
           appId: data.appId,
           modelId: data.id,
           modelType: data.type,
           transport,
-          deviceCount: deviceChannelsMap.size
+          deviceCount,
+          messageCount: groups.length
         },
         NexxusTransportManagerWorker.loggerLabel
       );
@@ -167,19 +172,6 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<
       data.map(patch => patch.metadata.partialModel)
     );
 
-    // Group by transport
-    const transportToDeviceChannelsMap: Map<NexxusQueueName, Map<string, string[]>> = new Map();
-
-    for (const [deviceTransport, channelKeys] of deviceToChannelsMap.entries()) {
-      const [deviceId, transport] = deviceTransport.split('|');
-
-      if (!transportToDeviceChannelsMap.has(transport as NexxusQueueName)) {
-        transportToDeviceChannelsMap.set(transport as NexxusQueueName, new Map());
-      }
-
-      transportToDeviceChannelsMap.get(transport as NexxusQueueName)!.set(deviceId, Array.from(channelKeys));
-    }
-
     // All patches in a single model_updated event target the same model; identity
     // and patch ops are constant across devices — compute once, reuse per recipient.
     // The post-update `version` comes from the writer's partial (populated by the
@@ -197,28 +189,34 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<
       value: patch.value,
     }));
 
-    for (const [transport, deviceChannelsMap] of transportToDeviceChannelsMap.entries()) {
-      for (const [deviceId, channelKeys] of deviceChannelsMap.entries()) {
-        this.publish(transport as NexxusQueueName, {
+    for (const [transport, groups] of this.groupDevicesForFanOut(deviceToChannelsMap).entries()) {
+      let deviceCount = 0;
+
+      for (const { channels, deviceIds } of groups) {
+        deviceCount += deviceIds.length;
+
+        this.publish(transport, {
           event: 'device_message',
-          deviceIds: [ deviceId ],
+          deviceIds,
           data: {
             event: 'model_updated',
             model: modelIdentity,
             patches,
-            metadata: { channels: channelKeys },
+            metadata: { channels },
           }
         });
       }
 
       NexxusTransportManagerWorker.logger.info(
-        `Notified ${deviceChannelsMap.size} devices about update to model ID: "${data[0].metadata.id}" via transport: "${transport}"`,
+        `Notified ${deviceCount} devices about update to model ID: "${data[0].metadata.id}" via transport: "${transport}" ` +
+        `in ${groups.length} message(s)`,
         {
           appId: data[0].metadata.appId,
           modelId: data[0].metadata.id,
           modelType: data[0].metadata.type,
           transport,
-          deviceCount: deviceChannelsMap.size
+          deviceCount,
+          messageCount: groups.length
         },
         NexxusTransportManagerWorker.loggerLabel
       );
@@ -235,47 +233,98 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<
       model: data.type,
       modelId: data.id
     }, [ data ]);
-    const transportToDeviceChannelsMap: Map<NexxusQueueName, Map<string, string[]>> = new Map();
 
-    for (const [deviceTransport, channelKeys] of deviceToChannelsMap.entries()) {
-      const [deviceId, transport] = deviceTransport.split('|');
+    for (const [transport, groups] of this.groupDevicesForFanOut(deviceToChannelsMap).entries()) {
+      let deviceCount = 0;
 
-      if (!transportToDeviceChannelsMap.has(transport as NexxusQueueName)) {
-        transportToDeviceChannelsMap.set(transport as NexxusQueueName, new Map());
-      }
+      for (const { channels, deviceIds } of groups) {
+        deviceCount += deviceIds.length;
 
-      transportToDeviceChannelsMap.get(transport as NexxusQueueName)!.set(deviceId, Array.from(channelKeys));
-    }
-
-    for (const [transport, deviceChannelsMap] of transportToDeviceChannelsMap.entries()) {
-      for (const [deviceId, channelKeys] of deviceChannelsMap.entries()) {
-        this.publish(transport as NexxusQueueName, {
+        this.publish(transport, {
           event: 'device_message',
-          deviceIds: [deviceId],
+          deviceIds,
           data: {
             event: 'model_deleted',
             model: data,
             metadata: {
-              channels: channelKeys
+              channels
             }
           }
         });
       }
 
       NexxusTransportManagerWorker.logger.info(
-        `Notifying ${deviceChannelsMap.size} devices about deleted model with ID: "${data.id}" via transport: "${transport}"`,
+        `Notifying ${deviceCount} devices about deleted model with ID: "${data.id}" via transport: "${transport}" ` +
+        `in ${groups.length} message(s)`,
         {
           appId: data.appId,
           modelId: data.id,
           modelType: data.type,
           transport,
-          deviceCount: deviceChannelsMap.size
+          deviceCount,
+          messageCount: groups.length
         },
         NexxusTransportManagerWorker.loggerLabel
       );
     }
   }
 
+  /**
+   * Batches the flat device→channels map into as few transport messages as
+   * possible: one per (transport, distinct channel set).
+   *
+   * A `device_message` carries `deviceIds` as an array precisely so a single
+   * publish can serve many devices, but its `metadata.channels` is shared by
+   * every recipient in that message — clients use it to correlate the event
+   * with their local subscription containers, so devices that matched on
+   * different channels cannot be merged into the same message. Devices that
+   * matched the *same* channels can, which is the common case: most recipients
+   * come from the same unfiltered channel, so a fan-out to N devices collapses
+   * to a handful of messages instead of N.
+   */
+  private groupDevicesForFanOut(
+    deviceToChannelsMap: Map<NexxusDeviceTransportString, Set<string>>
+  ): Map<NexxusQueueName, NexxusFanOutGroup[]> {
+    const transportToGroups = new Map<NexxusQueueName, Map<string, NexxusFanOutGroup>>();
+
+    for (const [deviceTransport, channelKeys] of deviceToChannelsMap.entries()) {
+      const [deviceId, transport] = deviceTransport.split('|') as [string, NexxusQueueName];
+      // Sorted so two devices that matched the same channels in a different
+      // order still land in the same group. Channel keys are colon-delimited
+      // and never contain a newline, so it's a collision-free separator.
+      const channels = Array.from(channelKeys).sort();
+      const signature = channels.join('\n');
+
+      let groups = transportToGroups.get(transport);
+
+      if (!groups) {
+        groups = new Map();
+        transportToGroups.set(transport, groups);
+      }
+
+      const existing = groups.get(signature);
+
+      if (existing) {
+        existing.deviceIds.push(deviceId);
+      } else {
+        groups.set(signature, { channels, deviceIds: [ deviceId ] });
+      }
+    }
+
+    return new Map(
+      Array.from(transportToGroups.entries()).map(([transport, groups]) => [transport, Array.from(groups.values())])
+    );
+  }
+
+  /**
+   * Resolves every device that should hear about a change on `channel`, mapped
+   * to the channel keys it matched on.
+   *
+   * `filterTargets` are the model-shaped objects filtered subscriptions get
+   * tested against (empty for events that carry none). Callers normalize each
+   * event's shape: creates pass the new model, updates the per-patch
+   * post-update partial model, deletes the deleted model's identity fields.
+   */
   private async getDevicesFromGeneratedChannels(
     channel: NexxusBaseSubscriptionChannel,
     filterTargets: Array<Partial<INexxusAppModel>> = []
@@ -293,11 +342,13 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<
       return deviceToChannelsMap;
     }
 
-    // The model-shaped objects filtered subscriptions are tested against
-    // (empty for events that carry none). Callers normalize each event's shape:
-    // creates pass the new model, updates the per-patch post-update partial
-    // model, deletes the deleted model's identity fields.
-    const changes = filterTargets;
+    // Every generated pattern below shares this channel's `model`, so the
+    // schema filters get compiled against is constant for the whole call.
+    // getAppModelSchema() deep-clones the model's fields on every call, so
+    // resolve it at most once — lazily, because it throws for a model type the
+    // app doesn't declare and channels with no filtered subscriber never need it.
+    let appModelSchema: NexxusModelDef | undefined;
+    const getAppModelSchema = (): NexxusModelDef => appModelSchema ??= app.getAppModelSchema(channel.model);
 
     // Fetch the scope registry ONCE per event. This tells us which
     // (modelId/userId) combinations have any subscriber at all — patterns
@@ -340,7 +391,7 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<
           {
             channel: channelPattern,
             size: unfilteredDevices.size,
-            changesCount: changes.length
+            changesCount: filterTargets.length
           },
           NexxusTransportManagerWorker.loggerLabel
         );
@@ -348,14 +399,14 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<
 
       // Filtered subscriptions match only when there's an object to test the
       // filter against. Creates/updates/deletes all supply one (see callers);
-      // `changes` is empty only for events that carry none.
-      if (changes.length > 0) {
+      // `filterTargets` is empty only for events that carry none.
+      if (filterTargets.length > 0) {
         const filters = await NexxusRedisSubscription.getAllFilters(channelPattern);
 
         // For each filter, test if ANY change matches
         for (const [filterId, filterQuery] of Object.entries(filters)) {
-          const filter = new NexxusFilterQuery(filterQuery, app.getAppModelSchema(channelPattern.model));
-          const matchesFilter = changes.some(change => filter.test(change));
+          const filter = new NexxusFilterQuery(filterQuery, getAppModelSchema());
+          const matchesFilter = filterTargets.some(change => filter.test(change));
 
           if (matchesFilter) {
             const filteredSub = new NexxusRedisSubscription(channelPattern, filterId);
@@ -376,7 +427,7 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<
                 {
                   channel: channelPattern,
                   size: filteredDevices.size,
-                  changesCount: changes.length
+                  changesCount: filterTargets.length
                 },
                 NexxusTransportManagerWorker.loggerLabel
               );
@@ -387,7 +438,7 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<
     }
 
     NexxusTransportManagerWorker.logger.info(
-      `Total ${deviceToChannelsMap.size} unique devices to notify for update`,
+      `Total ${deviceToChannelsMap.size} unique devices to notify for channel: ${JSON.stringify(channel)}`,
       {
         channel,
         size: deviceToChannelsMap.size

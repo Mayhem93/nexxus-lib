@@ -3,19 +3,22 @@ import {
   NexxusWsInvalidParametersException,
   NexxusWsInternalServerException,
   NexxusWsDeviceNotFoundException
-} from "./Exceptions";
-import { NexxusWebsocketsTransportWorker } from "../WebsocketsTransportWorker";
+} from './Exceptions';
+// `NexxusBaseWorker.logger` and `NexxusWebsocketsTransportWorker.logger` are the
+// same static — reaching it through the base avoids importing the concrete
+// worker, which imports this module in turn.
+import { NexxusBaseWorker } from '../../BaseWorker';
 
-import { NexxusDevice, RedisKeyNotFoundException } from "@mayhem93/nexxus-redis";
+import { NexxusDevice, RedisKeyNotFoundException } from '@mayhem93/nexxus-redis';
 import {
   NexxusTransportModelCreatedPayload,
   NexxusTransportModelDeletedPayload,
   NexxusTransportModelUpdatedPayload
-} from "@mayhem93/nexxus-core-lib";
+} from '@mayhem93/nexxus-core-lib';
 
-import { WebSocket, Data as WebSocketData } from "ws";
+import { WebSocket, Data as WebSocketData } from 'ws';
 
-import { EventEmitter } from "node:events";
+import { EventEmitter } from 'node:events';
 
 export type ClientEventMap = {
   register: [ deviceId: string ];
@@ -64,6 +67,8 @@ export type NexxusWsServerEvent<E extends keyof NexxusWsServerMessage = keyof Ne
 export class NexxusWsClient extends EventEmitter<ClientEventMap> {
   private socket : WebSocket;
   private deviceId?: string;
+  /** True between emitting `register` and the worker confirming or failing it. */
+  private registering: boolean = false;
   public readonly id: string;
 
   constructor(clientId: string, ws: WebSocket) {
@@ -72,8 +77,27 @@ export class NexxusWsClient extends EventEmitter<ClientEventMap> {
     this.socket = ws;
     this.id = clientId;
 
-    this.socket.on('message', async (msg: WebSocketData) => {
-      const message = JSON.parse(msg.toString()) as NexxusWsClientEvent;
+    // Nothing in here may throw or reject: an unhandled rejection from a socket
+    // listener takes the whole worker process down, and with it every other
+    // device's live connection on this node. Any client could trigger that with
+    // a single malformed frame, so the frame is parsed defensively and
+    // processMessage's promise always carries a catch.
+    this.socket.on('message', (msg: WebSocketData) => {
+      let message: NexxusWsClientEvent;
+
+      try {
+        message = JSON.parse(msg.toString()) as NexxusWsClientEvent;
+      } catch (e) {
+        this.sendError(new NexxusWsInvalidParametersException(`Message is not valid JSON: ${(e as Error).message}`));
+
+        return;
+      }
+
+      if (!message || typeof message !== 'object') {
+        this.sendError(new NexxusWsInvalidParametersException('Message must be a JSON object.'));
+
+        return;
+      }
 
       if (!message.event) {
         this.sendError(new NexxusWsInvalidParametersException('Missing event type in message.'));
@@ -87,7 +111,15 @@ export class NexxusWsClient extends EventEmitter<ClientEventMap> {
         return;
       }
 
-      await this.processMessage(message);
+      // processMessage handles its own errors; this is the backstop for what it
+      // cannot (a socket that dies mid-reply).
+      void this.processMessage(message).catch((e: unknown) => {
+        NexxusBaseWorker.logger.error(
+          `Unhandled error processing message from client "${this.id}"`,
+          { error: e, clientId: this.id },
+          'NexxusWsClient'
+        );
+      });
     });
   }
 
@@ -99,6 +131,24 @@ export class NexxusWsClient extends EventEmitter<ClientEventMap> {
     return this.deviceId;
   }
 
+  /**
+   * Called by the transport worker once the device's Redis state is written and
+   * the client is actually routable. Registration is only true from here on:
+   * see the note in `registerDevice`.
+   */
+  public confirmRegistration(deviceId: string): void {
+    this.deviceId = deviceId;
+    this.registering = false;
+  }
+
+  /**
+   * Called by the transport worker when the handshake it owns failed. The client
+   * stays unregistered and is free to send another `register` frame.
+   */
+  public failRegistration(): void {
+    this.registering = false;
+  }
+
   public async processMessage(message: NexxusWsClientEvent) {
     try {
       switch (message.event) {
@@ -107,15 +157,17 @@ export class NexxusWsClient extends EventEmitter<ClientEventMap> {
 
           break;
         default:
-          NexxusWebsocketsTransportWorker.logger.warn(`Unknown client event: ${message.event}`, 'NexxusWsClient');
+          NexxusBaseWorker.logger.warn(`Unknown client event: ${message.event}`, 'NexxusWsClient');
       }
-    } catch (e) {
+    } catch (e : unknown) {
+      let err = e as Error;
+
       if (!(e instanceof NexxusWsException)) {
-        e = new NexxusWsInternalServerException('An unexpected error occurred while processing the message.');
+        err = new NexxusWsInternalServerException(`An unexpected error occurred while processing the message: ${e instanceof Error ? e.message : String(e)}`);
       }
 
-      NexxusWebsocketsTransportWorker.logger.error(`Error processing message from client "${this.id}"`, { error: e }, 'NexxusWsClient');
-      this.sendError(e);
+      NexxusBaseWorker.logger.error(`Error processing message from client "${this.id}"`, { error: err.message }, 'NexxusWsClient');
+      this.sendError(err);
     }
   }
 
@@ -128,13 +180,13 @@ export class NexxusWsClient extends EventEmitter<ClientEventMap> {
       }
     };
 
-    this.socket.send(JSON.stringify(errorMessage));
+    this.send(errorMessage);
   }
 
   public sendMessage<E extends keyof NexxusWsServerMessage>(event: E, data: NexxusWsServerMessage[E]) {
-    this.socket.send(JSON.stringify({ event, data }));
+    this.send({ event, data });
 
-    NexxusWebsocketsTransportWorker.logger.info(`Sent ${event} message to client ${this.id}`,
+    NexxusBaseWorker.logger.info(`Sent ${event} message to client ${this.id}`,
       {
         clientId: this.id,
         deviceId: this.deviceId,
@@ -143,9 +195,38 @@ export class NexxusWsClient extends EventEmitter<ClientEventMap> {
     'NexxusWsClient');
   }
 
+  /**
+   * `ws.send()` on a socket that is no longer OPEN doesn't throw — it emits
+   * 'error' on the socket, which is fatal to the process if nothing is
+   * listening. Losing a race with a disconnect is normal and not worth that, so
+   * the state is checked up front and the message dropped.
+   */
+  private send(payload: unknown): void {
+    if (this.socket.readyState !== WebSocket.OPEN) {
+      NexxusBaseWorker.logger.debug(
+        `Dropped a message for client "${this.id}" — socket is not open`,
+        { clientId: this.id, deviceId: this.deviceId, readyState: this.socket.readyState },
+        'NexxusWsClient'
+      );
+
+      return;
+    }
+
+    this.socket.send(JSON.stringify(payload));
+  }
+
   private async registerDevice(msg: NexxusWsClientEvent<'register'>) {
     if (this.isRegistered()) {
-      NexxusWebsocketsTransportWorker.logger.warn(`Client ${this.id} is already registered with device ID: "${this.deviceId}"`, 'NexxusWsClient');
+      NexxusBaseWorker.logger.warn(`Client ${this.id} is already registered with device ID: "${this.deviceId}"`, 'NexxusWsClient');
+
+      return ;
+    }
+
+    // Registration is only confirmed once the worker's Redis write lands, so
+    // without this a client could pipeline a burst of register frames and have
+    // every one of them hit Redis before the first was answered.
+    if (this.registering) {
+      NexxusBaseWorker.logger.warn(`Client ${this.id} already has a registration in flight`, 'NexxusWsClient');
 
       return ;
     }
@@ -156,17 +237,30 @@ export class NexxusWsClient extends EventEmitter<ClientEventMap> {
       throw new NexxusWsInvalidParametersException('Invalid or missing deviceId.');
     }
 
+    this.registering = true;
+
     try {
       await NexxusDevice.get(deviceId);
-
-      this.deviceId = deviceId;
-      this.emit('register', deviceId);
     } catch (e) {
+      this.registering = false;
+
       if (e instanceof RedisKeyNotFoundException) {
         this.sendError(new NexxusWsDeviceNotFoundException(`Device with ID "${deviceId}" not found.`));
-      } else {
-        throw e;
+
+        return;
       }
+
+      throw e;
     }
+
+    // From here the transport worker owns the rest of the handshake: it writes
+    // the volatile-device state and then calls `confirmRegistration` (or
+    // `failRegistration`), either of which clears the in-flight flag.
+    //
+    // `deviceId` is deliberately NOT stored yet. If it were, a failed write
+    // would leave this client believing it is registered while the worker has
+    // no route to it — and every retry would be refused as "already
+    // registered", stranding the device until it reconnects on its own.
+    this.emit('register', deviceId);
   }
 }

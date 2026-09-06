@@ -70,9 +70,37 @@ describe('NexxusRedisSubscription.generateSubscriptionPatterns', () => {
       { appId: 'a', model: 'runs' },
       { appId: 'a', model: 'runs', userId: 'u1' },
       { appId: 'a', model: 'runs', modelId: 'r1' },
-      { appId: 'a', userId: 'u1', model: 'runs' },
-      { appId: 'a', userId: 'u1', model: 'runs', modelId: 'r1' },
+      { appId: 'a', model: 'runs', modelId: 'r1', userId: 'u1' },
     ]);
+  });
+
+  it('yields only the scopes the channel actually has dimensions for', () => {
+    expect([...NexxusRedisSubscription.generateSubscriptionPatterns({ appId: 'a', model: 'runs', userId: 'u1' })])
+      .toEqual([
+        { appId: 'a', model: 'runs' },
+        { appId: 'a', model: 'runs', userId: 'u1' },
+      ]);
+
+    expect([...NexxusRedisSubscription.generateSubscriptionPatterns({ appId: 'a', model: 'runs', modelId: 'r1' })])
+      .toEqual([
+        { appId: 'a', model: 'runs' },
+        { appId: 'a', model: 'runs', modelId: 'r1' },
+      ]);
+  });
+
+  /**
+   * The generator used to yield `{ appId, model, userId }` twice (once directly,
+   * once inside a second userId branch). Both copies produced the same scope
+   * descriptor and the same Redis keys, so every event carrying a userId did the
+   * whole userId-scope round trip — devices, filters, and a device lookup per
+   * matching filter — a second time for nothing.
+   */
+  it('never yields two patterns that resolve to the same scope', () => {
+    const patterns = [...NexxusRedisSubscription.generateSubscriptionPatterns({ appId: 'a', model: 'runs', userId: 'u1', modelId: 'r1' })];
+    const descriptors = patterns.map(p => NexxusRedisSubscription.buildScopeDescriptor(p));
+
+    expect(descriptors).toEqual(['*', 'user:u1', 'id:r1', 'id:r1|user:u1']);
+    expect(new Set(descriptors).size).toBe(patterns.length);
   });
 });
 

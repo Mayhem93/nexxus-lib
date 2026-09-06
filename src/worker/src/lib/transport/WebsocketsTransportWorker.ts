@@ -20,6 +20,7 @@ import {
 
 import { WebSocketServer, type WebSocket } from 'ws';
 
+import * as crypto from 'node:crypto';
 import * as path from 'node:path';
 
 export type NexxusWebsocketsTransportWorkerConfig = NexxusVolatileTransportWorkerConfig & {
@@ -86,7 +87,11 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
     });
 
     await new Promise<void>((resolve, reject) => {
+      const onBindError = (err: Error) => reject(err);
+
       this.server.once('listening', () => {
+        this.server.removeListener('error', onBindError);
+
         NexxusWebsocketsTransportWorker.logger.info(
           `WebSocket server listening on port ${this.config.port}`,
           NexxusWebsocketsTransportWorker.loggerLabel
@@ -94,7 +99,18 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
         resolve();
       });
 
-      this.server.once('error', reject);
+      this.server.once('error', onBindError);
+    });
+
+    // The bind-time listener above is gone once we're listening. Without a
+    // lasting one, a later server-level error would be an unhandled 'error'
+    // event, which is fatal to the process.
+    this.server.on('error', (err: Error) => {
+      NexxusWebsocketsTransportWorker.logger.error(
+        `WebSocket server error: ${err.message}`,
+        { error: err },
+        NexxusWebsocketsTransportWorker.loggerLabel
+      );
     });
 
     this.server.on('connection', this.handleConnection.bind(this));
@@ -147,12 +163,16 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
     this.wsToNexxusClientMap.set(ws, client);
     this.unregisteredClients.add(client);
 
-    client.once('register', async deviceId => {
+    // `on`, not `once`: the client is only considered registered once the write
+    // below lands, so a failed attempt has to be retryable. The client's own
+    // in-flight guard is what stops a burst of register frames.
+    client.on('register', async deviceId => {
       try {
         await this.registerDevice(deviceId);
 
         this.unregisteredClients.delete(client);
         this.registeredClients.set(deviceId, client);
+        client.confirmRegistration(deviceId);
         client.sendMessage('register', { success: true });
 
         NexxusWebsocketsTransportWorker.logger.info(`Client "${clientId}" registered with device ID: "${deviceId}"`,
@@ -160,6 +180,9 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
           NexxusWebsocketsTransportWorker.loggerLabel
         );
       } catch (e : Error | unknown) {
+        // Leaves the client unregistered and free to try again.
+        client.failRegistration();
+
         if (e instanceof RedisDeviceInvalidParamsException) {
           client.sendError(new NexxusWsInvalidParametersException(`Invalid parameters for device with ID "${deviceId}": ${e.message}`));
         } else {
@@ -168,6 +191,17 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
           NexxusWebsocketsTransportWorker.logger.error(`Unexpected error during client registration for device ID "${deviceId}"`, { error: e, deviceId }, NexxusWebsocketsTransportWorker.loggerLabel);
         }
       }
+    });
+
+    // A ws socket with no 'error' listener throws, which any client could
+    // trigger with a malformed frame or an abrupt reset. 'close' follows an
+    // error, so cleanup is left to handleDisconnect.
+    ws.on('error', (err: Error) => {
+      NexxusWebsocketsTransportWorker.logger.error(
+        `WebSocket error for client "${clientId}": ${err.message}`,
+        { clientId, error: err },
+        NexxusWebsocketsTransportWorker.loggerLabel
+      );
     });
 
     ws.on('close', ((code: number, reason: Buffer) => {
@@ -179,33 +213,20 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
     NexxusWebsocketsTransportWorker.logger.debug('Handling client disconnect...', NexxusWebsocketsTransportWorker.loggerLabel);
 
     const nxxWsClient = this.wsToNexxusClientMap.get(ws);
-    let deviceId : string | undefined;
 
+    if (!nxxWsClient) {
+      return;
+    }
+
+    const deviceId = nxxWsClient.getDeviceId();
+
+    // Only the Redis update can fail. Doing it first, on its own, keeps a
+    // failure from skipping the local cleanup below — which would leak a client
+    // reference per disconnect and drift `totalConnections` upward for good.
     try {
-      if (!nxxWsClient) {
-        return;
-      }
-
-      deviceId = nxxWsClient.getDeviceId();
-
       if (deviceId) {
-        this.registeredClients.delete(deviceId);
         await this.unregisterDevice(deviceId);
-      } else {
-        this.unregisteredClients.delete(nxxWsClient);
       }
-
-      this.wsToNexxusClientMap.delete(ws);
-
-      NexxusWebsocketsTransportWorker.logger.info(
-        `Client "${nxxWsClient.id}" disconnected with device ID: "${deviceId || 'null'}. Code ${code}, Reason: "${reason.toString()}"`,
-        {
-          deviceId: deviceId || null,
-          code,
-          reason: reason.toString()
-        },
-        NexxusWebsocketsTransportWorker.loggerLabel
-      );
     } catch (e) {
       if (e instanceof RedisDeviceInvalidParamsException) {
         NexxusWebsocketsTransportWorker.logger.error(`Error updating device on disconnect for device ID "${deviceId}"`, { error: e }, NexxusWebsocketsTransportWorker.loggerLabel);
@@ -213,10 +234,29 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
         NexxusWebsocketsTransportWorker.logger.error('Unexpected error on client disconnect', { error: e }, NexxusWebsocketsTransportWorker.loggerLabel);
       }
     }
+
+    // Unconditional: the socket is gone either way.
+    if (deviceId) {
+      this.registeredClients.delete(deviceId);
+    } else {
+      this.unregisteredClients.delete(nxxWsClient);
+    }
+
+    this.wsToNexxusClientMap.delete(ws);
+
+    NexxusWebsocketsTransportWorker.logger.info(
+      `Client "${nxxWsClient.id}" disconnected with device ID: "${deviceId || 'null'}. Code ${code}, Reason: "${reason.toString()}"`,
+      {
+        deviceId: deviceId || null,
+        code,
+        reason: reason.toString()
+      },
+      NexxusWebsocketsTransportWorker.loggerLabel
+    );
   }
 
   public async close(): Promise<void> {
-    super.close();
+    await super.close();
 
     if (this.server) {
       await new Promise<void>((resolve, reject) => {
