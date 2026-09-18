@@ -2,9 +2,11 @@ import {
   ConfigCliArgs,
   ConfigEnvVars,
   NexxusQueueName,
-  NexxusTransportWorkerPayload
+  NexxusTransportWorkerPayload,
+  InvalidTokenException,
+  TokenExpiredException
 } from '@mayhem93/nexxus-core-lib';
-import { RedisDeviceInvalidParamsException } from '@mayhem93/nexxus-redis';
+import { RedisDeviceInvalidParamsException, RedisKeyNotFoundException } from '@mayhem93/nexxus-redis';
 
 import {
   NexxusVolatileTransportWorker,
@@ -15,7 +17,8 @@ import { NexxusBaseWorkerEvents, NexxusBaseWorkerStats, NexxusWorkerServices } f
 import { NexxusWsClient } from './ws/Client';
 import {
   NexxusWsInternalServerException,
-  NexxusWsInvalidParametersException
+  NexxusWsInvalidParametersException,
+  NexxusWsDeviceNotFoundException
 } from './ws/Exceptions';
 
 import { WebSocketServer, type WebSocket } from 'ws';
@@ -166,8 +169,14 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
     // `on`, not `once`: the client is only considered registered once the write
     // below lands, so a failed attempt has to be retryable. The client's own
     // in-flight guard is what stops a burst of register frames.
-    client.on('register', async deviceId => {
+    client.on('register', async token => {
+      let deviceId: string | undefined;
+
       try {
+        // The device is a claim inside the token, not a value the client chose,
+        // so a client can only ever register the device its own token names.
+        deviceId = await this.authenticateDevice(token);
+
         await this.registerDevice(deviceId);
 
         this.unregisteredClients.delete(client);
@@ -183,7 +192,14 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
         // Leaves the client unregistered and free to try again.
         client.failRegistration();
 
-        if (e instanceof RedisDeviceInvalidParamsException) {
+        if (e instanceof TokenExpiredException) {
+          client.sendError(new NexxusWsInvalidParametersException('Token has expired — re-authenticate and reconnect.'));
+        } else if (e instanceof InvalidTokenException) {
+          client.sendError(new NexxusWsInvalidParametersException(`Invalid token: ${(e as Error).message}`));
+        } else if (e instanceof RedisKeyNotFoundException) {
+          // Structurally valid token for a device whose record is gone.
+          client.sendError(new NexxusWsDeviceNotFoundException('The device this token was issued to no longer exists.'));
+        } else if (e instanceof RedisDeviceInvalidParamsException) {
           client.sendError(new NexxusWsInvalidParametersException(`Invalid parameters for device with ID "${deviceId}": ${e.message}`));
         } else {
           client.sendError(new NexxusWsInternalServerException('An unexpected error occurred while registering the device.'));

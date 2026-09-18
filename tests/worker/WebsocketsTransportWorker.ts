@@ -7,6 +7,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { NexxusWebsocketsTransportWorker, NexxusBaseWorker } from '@mayhem93/nexxus-worker-lib';
 import { NexxusDevice, RedisDeviceInvalidParamsException } from '@mayhem93/nexxus-redis';
+import { NexxusApplication, NexxusToken } from '@mayhem93/nexxus-core-lib';
 import { makeHarness, logger, mqState, getFreePort, resetWorkerStatics, type WorkerHarness } from './harness';
 
 import WebSocket from 'ws';
@@ -31,12 +32,25 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-/** A worker with its WS server already listening on a free port. */
+const SIGNING_SECRET = 'ws-test-secret';
+
+/** The application whose key device tokens are signed with. */
+let app: NexxusApplication;
+
+/** A worker with its WS server already listening on a free port, and an app loaded. */
 const build = async (): Promise<any> => {
   wsPort = await getFreePort();
 
   resetWorkerStatics(NexxusBaseWorker);
   h = await makeHarness({ port: wsPort });
+
+  // The worker verifies device tokens against the app registry it loads at
+  // boot, so registration needs a loaded app — not just a device in Redis.
+  app = new NexxusApplication({
+    id: 'app1', type: 'application', signingSecret: SIGNING_SECRET, name: 'A',
+    schema: { runs: { fields: { note: { type: 'string' } } } },
+  } as never);
+  (NexxusBaseWorker as any).loadedApps.set('app1', app);
 
   const w = new NexxusWebsocketsTransportWorker(h.services) as any;
 
@@ -47,6 +61,10 @@ const build = async (): Promise<any> => {
 
   return w;
 };
+
+/** A device token exactly as the API would mint it. */
+const tokenFor = (deviceId: string, over: Record<string, unknown> = {}): string =>
+  NexxusToken.issue(app, { appId: 'app1', deviceId, ...over });
 
 /** Seed a device document in the in-memory redis so NexxusDevice ops resolve. */
 const seedDevice = (id: string, over: Record<string, unknown> = {}) => {
@@ -92,7 +110,7 @@ const waitFor = async (predicate: () => boolean, label: string): Promise<void> =
   }
 };
 
-const register = (deviceId: unknown) => JSON.stringify({ event: 'register', data: { deviceId } });
+const register = (token: unknown) => JSON.stringify({ event: 'register', data: { token } });
 
 /** Register a device end-to-end and hand back its live socket. */
 const registered = async (w: any, deviceId = 'd1'): Promise<WebSocket> => {
@@ -101,7 +119,7 @@ const registered = async (w: any, deviceId = 'd1'): Promise<WebSocket> => {
   const client = await connect();
   const reply = nextFrame(client);
 
-  client.send(register(deviceId));
+  client.send(register(tokenFor(deviceId)));
 
   expect(await reply).toEqual({ event: 'register', data: { success: true } });
 
@@ -165,21 +183,23 @@ describe('NexxusWebsocketsTransportWorker registration', () => {
     expect(logger.has('info', /Client "[0-9a-f-]{36}" registered with device ID: "d1"/)).toBe(true);
   });
 
-  it('rejects a deviceId that does not exist in redis', async () => {
+  it('rejects a valid token whose device no longer exists', async () => {
     await build();
 
     const client = await connect();
     const reply = nextFrame(client);
 
-    client.send(register('ghost'));
+    // Correctly signed, but the record was reaped — the token proves identity,
+    // not existence.
+    client.send(register(tokenFor('ghost')));
 
     expect(await reply).toEqual({
       event: 'error',
-      data: { message: 'Device with ID "ghost" not found.', code: 'DEVICE_NOT_FOUND' },
+      data: { message: 'The device this token was issued to no longer exists.', code: 'DEVICE_NOT_FOUND' },
     });
   });
 
-  it('rejects a missing or blank deviceId', async () => {
+  it('rejects a missing or blank token', async () => {
     await build();
 
     for (const bad of [ undefined, '', '   ', 42 ]) {
@@ -189,16 +209,116 @@ describe('NexxusWebsocketsTransportWorker registration', () => {
       client.send(register(bad));
 
       // `undefined` drops the key entirely, so it trips the "missing data" guard
-      // on the way in rather than the deviceId check.
+      // on the way in rather than the token check.
       expect(await reply).toMatchObject({ event: 'error', data: { code: 'INVALID_PARAMETERS' } });
     }
+  });
+
+  /**
+   * The point of the whole exercise: a client can no longer name a device, only
+   * present a token that names one. A token signed with anything but this
+   * application's key buys nothing.
+   */
+  it('rejects a token signed with the wrong key', async () => {
+    await build();
+    seedDevice('d1');
+
+    const impostor = new NexxusApplication({
+      id: 'app1', type: 'application', signingSecret: 'not-the-real-secret', name: 'A',
+      schema: { runs: { fields: { note: { type: 'string' } } } },
+    } as never);
+
+    const client = await connect();
+    const reply = nextFrame(client);
+
+    client.send(register(NexxusToken.issue(impostor, { appId: 'app1', deviceId: 'd1' })));
+
+    expect(await reply).toMatchObject({
+      event: 'error',
+      data: { message: expect.stringMatching(/^Invalid token:/), code: 'INVALID_PARAMETERS' },
+    });
+  });
+
+  it('rejects a token for an application this worker has not loaded', async () => {
+    await build();
+    seedDevice('d1');
+
+    const other = new NexxusApplication({
+      id: 'other-app', type: 'application', signingSecret: SIGNING_SECRET, name: 'B',
+      schema: { runs: { fields: { note: { type: 'string' } } } },
+    } as never);
+
+    const client = await connect();
+    const reply = nextFrame(client);
+
+    client.send(register(NexxusToken.issue(other, { appId: 'other-app', deviceId: 'd1' })));
+
+    expect(await reply).toMatchObject({
+      event: 'error',
+      data: { message: /unknown application "other-app"/.source ? expect.stringContaining('unknown application') : '' },
+    });
+  });
+
+  it('tells a client with an expired token to re-authenticate', async () => {
+    await build();
+    seedDevice('d1');
+
+    // Same signing key, so the signature is fine — only `exp` has passed. The
+    // client needs to go get a new token, which is a different instruction from
+    // "your token is invalid".
+    const shortLived = new NexxusApplication({
+      id: 'app1', type: 'application', signingSecret: SIGNING_SECRET, name: 'A',
+      schema: { runs: { fields: { note: { type: 'string' } } } },
+      auth: { jwtExpiresIn: '1ms', strategies: { local: {} }, userDetailSchema: { default: {} } },
+    } as never);
+    const expired = NexxusToken.issue(shortLived, { appId: 'app1', deviceId: 'd1' });
+
+    await new Promise(resolve => setTimeout(resolve, 20));
+
+    const client = await connect();
+    const reply = nextFrame(client);
+
+    client.send(register(expired));
+
+    expect(await reply).toEqual({
+      event: 'error',
+      data: {
+        message: 'Token has expired — re-authenticate and reconnect.',
+        code: 'INVALID_PARAMETERS',
+      },
+    });
+  });
+
+  it('rejects a token that carries no device', async () => {
+    await build();
+
+    const client = await connect();
+    const reply = nextFrame(client);
+
+    client.send(register(NexxusToken.issue(app, { appId: 'app1' })));
+
+    expect(await reply).toMatchObject({
+      event: 'error',
+      data: { message: expect.stringContaining('carries no device'), code: 'INVALID_PARAMETERS' },
+    });
+  });
+
+  it('rejects a frame that is not a token at all', async () => {
+    await build();
+
+    const client = await connect();
+    const reply = nextFrame(client);
+
+    client.send(register('not-a-jwt'));
+
+    expect(await reply).toMatchObject({ event: 'error', data: { code: 'INVALID_PARAMETERS' } });
   });
 
   it('warns when an already registered client tries to register again', async () => {
     const w = await build();
     const client = await registered(w);
 
-    client.send(register('d1'));
+    client.send(register(tokenFor('d1')));
 
     await waitFor(
       () => logger.has('warning', /is already registered with device ID: "d1"/),
@@ -225,7 +345,7 @@ describe('NexxusWebsocketsTransportWorker registration', () => {
 
     const failure = nextFrame(client);
 
-    client.send(register('d1'));
+    client.send(register(tokenFor('d1')));
 
     expect(await failure).toMatchObject({ event: 'error', data: { code: 'INTERNAL_SERVER_ERROR' } });
     expect(w.registeredClients.size).toBe(0);
@@ -234,7 +354,7 @@ describe('NexxusWebsocketsTransportWorker registration', () => {
     // The retry must get through.
     const success = nextFrame(client);
 
-    client.send(register('d1'));
+    client.send(register(tokenFor('d1')));
 
     expect(await success).toEqual({ event: 'register', data: { success: true } });
     expect(w.registeredClients.size).toBe(1);
@@ -252,7 +372,7 @@ describe('NexxusWebsocketsTransportWorker registration', () => {
 
     const reply = nextFrame(client);
 
-    client.send(register('d1'));
+    client.send(register(tokenFor('d1')));
 
     expect(await reply).toMatchObject({
       event: 'error',
@@ -282,8 +402,8 @@ describe('NexxusWebsocketsTransportWorker registration', () => {
       return realGet(...(args as [string]));
     });
 
-    client.send(register('d1'));
-    client.send(register('d1'));
+    client.send(register(tokenFor('d1')));
+    client.send(register(tokenFor('d1')));
 
     await waitFor(() => logger.has('warning', /already has a registration in flight/), 'the in-flight warning');
 
@@ -300,20 +420,23 @@ describe('NexxusWebsocketsTransportWorker registration', () => {
 
     const client = await connect();
 
+    // Not a missing key — redis itself failing. The token verifies, so this
+    // surfaces through the worker's registration handler rather than as a
+    // rejected credential.
     vi.spyOn(h.redisClient.json, 'get').mockRejectedValueOnce(new Error('redis down'));
 
     const reply = nextFrame(client);
 
-    client.send(register('d1'));
+    client.send(register(tokenFor('d1')));
 
     expect(await reply).toEqual({
       event: 'error',
       data: {
-        message: 'An unexpected error occurred while processing the message.',
+        message: 'An unexpected error occurred while registering the device.',
         code: 'INTERNAL_SERVER_ERROR',
       },
     });
-    expect(logger.has('error', /Error processing message from client "[0-9a-f-]{36}"/)).toBe(true);
+    expect(logger.has('error', /Unexpected error during client registration/)).toBe(true);
     expect(w.registeredClients.size).toBe(0);
   });
 });
@@ -340,7 +463,7 @@ describe('NexxusWebsocketsTransportWorker inbound frame handling', () => {
 
     const success = nextFrame(client);
 
-    client.send(register('d1'));
+    client.send(register(tokenFor('d1')));
 
     expect(await success).toEqual({ event: 'register', data: { success: true } });
     expect(w.registeredClients.size).toBe(1);
@@ -411,10 +534,11 @@ describe('NexxusWebsocketsTransportWorker inbound frame handling', () => {
 
     const nxxClient = [ ...w.wsToNexxusClientMap.values() ][0];
 
-    vi.spyOn(h.redisClient.json, 'get').mockRejectedValueOnce(new Error('redis down'));
     vi.spyOn(nxxClient, 'sendError').mockImplementation(() => { throw new Error('socket gone'); });
 
-    client.send(register('d1'));
+    // A blank token makes processMessage throw; sendError then fails too, which
+    // is the only way to reach the backstop.
+    client.send(register(''));
 
     await waitFor(
       () => logger.has('error', /Unhandled error processing message from client "[0-9a-f-]{36}"/),

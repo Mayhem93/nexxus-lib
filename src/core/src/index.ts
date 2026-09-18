@@ -10,6 +10,7 @@ export * from './lib/Acl';
 export * from './lib/AclConditionResolver';
 
 export * from './common/QueuePayloads';
+export * from './common/Token';
 export * from './common/JsonPatch';
 export * from './common/FilterQuery';
 export * from './common/InferModel';

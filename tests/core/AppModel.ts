@@ -5,6 +5,9 @@ import {
   type NexxusApplicationSchema
 } from '@mayhem93/nexxus-core-lib';
 
+/** Dates normalize to integer UNIX SECONDS — see the SchemaValidator suite. */
+const EPOCH_SECONDS = Date.parse('2020-01-01T00:00:00.000Z') / 1000;
+
 const SCHEMA: NexxusApplicationSchema = {
   runs: {
     fields: {
@@ -32,7 +35,7 @@ describe('NexxusAppModel — validated construction', () => {
     expect(data.type).toBe('runs');
     expect(data.title).toBe('Morning run');
     // date string normalized to an integer timestamp
-    expect(data.when).toBe(Date.parse('2020-01-01T00:00:00.000Z'));
+    expect(data.when).toBe(EPOCH_SECONDS);
   });
 
   it('applies BaseModel defaults (id + timestamps) after normalization', () => {

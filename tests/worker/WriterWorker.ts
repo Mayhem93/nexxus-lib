@@ -36,12 +36,12 @@ const SCHEMA = {
   },
 };
 
-const AUTH = { jwtSecret: 's', strategies: { local: {} }, userDetailSchema: { default: {} } };
+const AUTH = { strategies: { local: {} }, userDetailSchema: { default: {} } };
 
 /** Register an app in the worker's shared registry. `acl` turns on ACLs. */
 const loadApp = (opts: { acl?: boolean } = {}): NexxusApplication => {
   const app = new NexxusApplication({
-    id: 'app1', type: 'application', name: 'A', schema: SCHEMA,
+    id: 'app1', type: 'application', signingSecret: 's', name: 'A', schema: SCHEMA,
     ...(opts.acl ? { auth: { ...AUTH, acl: true } } : {}),
   } as never);
 

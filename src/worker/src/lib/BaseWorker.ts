@@ -385,7 +385,7 @@ export abstract class NexxusBaseWorker<
     await this.unregisterFromHub();
     this.hubClient = null;
 
-    this.managementServer?.close();
+    await this.managementServer?.close();
     this.managementServer = null;
 
     // Upstream service shutdown happens after Hub deregistration + local

@@ -40,12 +40,12 @@ const SCHEMA = {
   },
 };
 
-const AUTH = { jwtSecret: 's', strategies: { local: {} }, userDetailSchema: { default: {} } };
+const AUTH = { strategies: { local: {} }, userDetailSchema: { default: {} } };
 
 /** Register an app in the worker's shared registry. `auth` makes `userId` a filterable field. */
 const loadApp = (opts: { auth?: boolean } = {}): NexxusApplication => {
   const app = new NexxusApplication({
-    id: 'app1', type: 'application', name: 'A', schema: SCHEMA,
+    id: 'app1', type: 'application', signingSecret: 's', name: 'A', schema: SCHEMA,
     ...(opts.auth ? { auth: AUTH } : {}),
   } as never);
 

@@ -1,7 +1,7 @@
-import { NexxusApiRequest, NexxusApiHeaders } from "../Api";
-import { InvalidParametersException } from "../Exceptions";
+import { NexxusApiRequest, NexxusApiHeaders } from '../Api';
+import { InvalidParametersException } from '../Exceptions';
 
-import { NextFunction, Response } from "express";
+import type { NextFunction, Response } from 'express';
 
 export default (header: keyof NexxusApiHeaders) => (req: NexxusApiRequest, res: Response, next: NextFunction) => {
   if (!req.headers[header]) {

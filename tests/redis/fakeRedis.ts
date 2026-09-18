@@ -10,7 +10,9 @@
 type Entry =
   | { type: 'hash'; value: Map<string, string> }
   | { type: 'set'; value: Set<string> }
-  | { type: 'json'; value: any };
+  | { type: 'json'; value: any }
+  /** `ttl` records what SET was asked for; expiry itself isn't simulated. */
+  | { type: 'string'; value: string; ttl?: number };
 
 export class FakeRedis {
   public store = new Map<string, Entry>();
@@ -26,7 +28,7 @@ export class FakeRedis {
     return (e as { value: Map<string, string> }).value;
   }
 
-  private set(key: string): Set<string> {
+  private setOf(key: string): Set<string> {
     let e = this.store.get(key);
 
     if (!e) {
@@ -35,6 +37,32 @@ export class FakeRedis {
     }
 
     return (e as { value: Set<string> }).value;
+  }
+
+  // ---- STRING ----
+  async set(key: string, value: string, opts?: { expiration?: { type: string; value: number } }): Promise<string> {
+    this.store.set(key, { type: 'string', value, ttl: opts?.expiration?.value });
+
+    return 'OK';
+  }
+
+  async get(key: string): Promise<string | null> {
+    const e = this.store.get(key);
+
+    return e?.type === 'string' ? e.value : null;
+  }
+
+  /** Atomic read-and-delete, which is what makes a nonce single-use. */
+  async getDel(key: string): Promise<string | null> {
+    const e = this.store.get(key);
+
+    if (e?.type !== 'string') {
+      return null;
+    }
+
+    this.store.delete(key);
+
+    return e.value;
   }
 
   // ---- HASH ----
@@ -102,7 +130,7 @@ export class FakeRedis {
 
   // ---- SET ----
   async sAdd(key: string, member: string): Promise<number> {
-    const s = this.set(key);
+    const s = this.setOf(key);
     const had = s.has(member);
 
     s.add(member);

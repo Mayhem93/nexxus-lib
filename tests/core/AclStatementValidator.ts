@@ -124,7 +124,7 @@ describe('NexxusAclStatementValidator.validateStructure', () => {
 
 describe('NexxusAclStatementValidator.validateAgainstSchema', () => {
   const makeApp = (schema: INexxusApplication['schema']): NexxusApplication =>
-    new NexxusApplication({ id: 'app-test', type: 'application', name: 'test app', schema } as INexxusApplication);
+    new NexxusApplication({ id: 'app-test', type: 'application', signingSecret: 's', name: 'test app', schema } as INexxusApplication);
 
   const app = makeApp({
     runs: {

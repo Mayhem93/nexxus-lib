@@ -12,6 +12,38 @@ export interface NexxusUserDetailSchema {
   [field: string]: NexxusFieldDef;
 }
 
+/**
+ * Prefix reserved by Nexxus inside a user's `details` — and only there; model
+ * schemas elsewhere have their own reserved names (`NEXXUS_RESERVED_FIELD_NAMES`)
+ * and are unaffected by this.
+ *
+ * A `details` field starting with `$` is system-owned: written by Nexxus, never
+ * declared in an application's `auth.userDetailSchema` and never settable from
+ * user input. Reserving the prefix rather than individual names means a new
+ * system-owned detail can be introduced later without colliding with a field
+ * some application has already shipped.
+ */
+export const NEXXUS_USER_DETAIL_RESERVED_PREFIX = '$';
+
+/** Whether a `details` field is system-owned rather than developer-declared. */
+export const isReservedUserDetailField = (field: string): boolean =>
+  field.startsWith(NEXXUS_USER_DETAIL_RESERVED_PREFIX);
+
+/**
+ * The `details` key one auth strategy's own fields live under: `$auth_google`,
+ * `$auth_github`.
+ *
+ * Provider data can't share a flat namespace with developer-declared profile
+ * fields — two strategies would eventually both want `name` — and it must not
+ * be user-writable, since a client able to edit `$auth_google.id` could repoint
+ * the account at someone else's provider identity.
+ *
+ * Underscore rather than a dot after `$auth`: patch paths are dot-separated, so
+ * a literal dot inside a key would make the field unaddressable by
+ * `NexxusJsonPatch`.
+ */
+export const authDetailKey = (strategyName: string): string => `$auth_${strategyName}`;
+
 export type INexxusUser =
   & INexxusBaseModel<'user'>
   & InferModel<typeof NEXXUS_BUILTIN_MODEL_SCHEMAS.user>

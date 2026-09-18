@@ -17,4 +17,5 @@ import './Exceptions';
 import './Redis';
 import './Subscription';
 import './FieldCache';
+import './AuthNonce';
 import './Device';

@@ -45,13 +45,13 @@ const worker = (Cls: typeof FakeWorker = FakeWorker, services = h.services): Fak
 
 /* --- fixtures --------------------------------------------------------- */
 const aclApp = (userTypes?: Record<string, unknown>) => new NexxusApplication({
-  id: 'app1', type: 'application', name: 'A',
+  id: 'app1', type: 'application', signingSecret: 's', name: 'A',
   schema: { runs: { fields: { note: { type: 'string' } } } },
-  auth: { jwtSecret: 's', strategies: { local: {} }, userDetailSchema: { default: {} }, acl: true, ...(userTypes ? { userTypes } : {}) },
+  auth: { strategies: { local: {} }, userDetailSchema: { default: {} }, acl: true, ...(userTypes ? { userTypes } : {}) },
 } as never);
 
 const plainApp = (id = 'app2') => new NexxusApplication({
-  id, type: 'application', name: 'B', schema: { runs: { fields: { note: { type: 'string' } } } },
+  id, type: 'application', signingSecret: 's', name: 'B', schema: { runs: { fields: { note: { type: 'string' } } } },
 } as never);
 
 const aclRole = (id: string) => new NexxusAclRole({

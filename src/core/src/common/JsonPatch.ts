@@ -174,8 +174,19 @@ export class NexxusJsonPatch {
       throw new InvalidJsonPatchException(`Unsupported JSON Patch operation: ${fullPatch.op}`);
     }
 
+    // Checked before the length comparison below, which would otherwise throw a
+    // raw TypeError on a patch that simply omitted one of them — and patches
+    // arrive from request bodies and MQ payloads, so "simply omitted" happens.
+    if (!Array.isArray(fullPatch.path) || !Array.isArray(fullPatch.value)) {
+      throw new InvalidJsonPatchException(`Patch must carry a path array and a value array`);
+    }
+
     if (fullPatch.path.length !== fullPatch.value.length) {
       throw new InvalidJsonPatchException(`Path and value arrays must have the same length`);
+    }
+
+    if (!fullPatch.metadata || typeof fullPatch.metadata !== 'object') {
+      throw new InvalidJsonPatchException(`Patch must include metadata`);
     }
 
     if (!fullPatch.metadata.type || typeof fullPatch.metadata.type !== 'string') {

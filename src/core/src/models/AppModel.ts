@@ -48,10 +48,12 @@ export class NexxusAppModel extends NexxusBaseModel<INexxusAppModel> {
     }
 
     // Validates field types and normalizes values (notably: date strings/numeric
-    // strings become integer timestamps so ES stores consistent types), and
-    // enforces required fields — `validateAgainstSchema` iterates the schema, so
-    // a required field missing from `props` is caught here. Fields present in
-    // `props` but absent from the schema are passed through unchanged.
+    // strings become integer timestamps so the adapter stores consistent types),
+    // and enforces required fields — `validateAgainstSchema` iterates the schema,
+    // so a required field missing from `props` is caught here. The schema is
+    // closed: a field in `props` that the developer never declared is rejected,
+    // with the system-managed reserved names (`type`, `appId`, `userId`, …)
+    // exempt since they're set here rather than declared.
     const normalized = NexxusSchemaValidator.validateAgainstSchema(
       props as Record<string, unknown>,
       modelDef.fields

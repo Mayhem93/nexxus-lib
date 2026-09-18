@@ -10,6 +10,9 @@ import {
  * primitives, a date (for normalization), primitive + object arrays, and a
  * nested object.
  */
+/** Dates normalize to integer UNIX SECONDS — see the SchemaValidator suite. */
+const EPOCH_SECONDS = Date.parse('2020-01-01T00:00:00.000Z') / 1000;
+
 const SCHEMA: NexxusModelDef = {
   title:  { type: 'string' },
   count:  { type: 'int' },
@@ -205,7 +208,7 @@ describe('NexxusJsonPatch validate() — value normalization', () => {
 
     patch.validate(SCHEMA);
 
-    expect(patch.get().value[0]).toBe(Date.parse('2020-01-01T00:00:00.000Z'));
+    expect(patch.get().value[0]).toBe(EPOCH_SECONDS);
   });
 
   it('normalizes a date on incr/decr as well', () => {

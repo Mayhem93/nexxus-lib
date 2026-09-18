@@ -71,6 +71,14 @@ export const NEXXUS_DEPLOYMENT_MODEL_SCHEMAS = {
     name:               { type: 'string',  required: true,  filterable: true },
     description:        { type: 'string',  required: false },
     /**
+     * Key this application signs and verifies its own tokens with.
+     *
+     * Application-level rather than under `auth` because signing was never
+     * auth-specific: an app with no users still has to sign device tokens, and
+     * an app with no `auth` block had nowhere to put a key.
+     */
+    signingSecret:      { type: 'string',  required: true },
+    /**
      * Per-application auth block. When `authEnabled` is true this must be
      * present and contain a non-empty `strategies` map; when false it should
      * be absent or have an empty `strategies`. The conditional rule isn't
@@ -84,7 +92,6 @@ export const NEXXUS_DEPLOYMENT_MODEL_SCHEMAS = {
     auth: {
       type: 'object', required: false, nullable: true,
       properties: {
-        jwtSecret:        { type: 'string', required: true },
         jwtExpiresIn:     { type: 'string', required: false },
         strategies:       { type: 'object', required: true,  properties: {} },
         userTypes:        { type: 'object', required: false, properties: {} },

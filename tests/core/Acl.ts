@@ -16,9 +16,9 @@ const makeManager = (id: string, statements: NexxusAclStatement[]): NexxusAclMan
 
 const makeApp = (userTypes: Record<string, NexxusUserTypeConfig>, managers: NexxusAclManager[]): NexxusApplication => {
   const app = new NexxusApplication({
-    id: 'app1', type: 'application', name: 'app',
+    id: 'app1', type: 'application', signingSecret: 's', name: 'app',
     schema: { runs: { fields: { note: { type: 'string' } } } },
-    auth: { jwtSecret: 's', strategies: { local: {} }, userDetailSchema: { default: {} }, userTypes },
+    auth: { strategies: { local: {} }, userDetailSchema: { default: {} }, userTypes },
   } as INexxusApplication);
 
   app.setRoleManagers(managers);

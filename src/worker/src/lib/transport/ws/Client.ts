@@ -1,15 +1,13 @@
 import {
   NexxusWsException,
   NexxusWsInvalidParametersException,
-  NexxusWsInternalServerException,
-  NexxusWsDeviceNotFoundException
+  NexxusWsInternalServerException
 } from './Exceptions';
 // `NexxusBaseWorker.logger` and `NexxusWebsocketsTransportWorker.logger` are the
 // same static — reaching it through the base avoids importing the concrete
 // worker, which imports this module in turn.
 import { NexxusBaseWorker } from '../../BaseWorker';
 
-import { NexxusDevice, RedisKeyNotFoundException } from '@mayhem93/nexxus-redis';
 import {
   NexxusTransportModelCreatedPayload,
   NexxusTransportModelDeletedPayload,
@@ -21,7 +19,8 @@ import { WebSocket, Data as WebSocketData } from 'ws';
 import { EventEmitter } from 'node:events';
 
 export type ClientEventMap = {
-  register: [ deviceId: string ];
+  /** Carries the raw token; the worker verifies it and resolves the device. */
+  register: [ token: string ];
 }
 
 export interface NexxusWsBaseEvent {
@@ -32,7 +31,12 @@ export interface NexxusWsBaseEvent {
 // Client → Server events
 export type NexxusWsClientMessage = {
   register: {
-    deviceId: string;
+    /**
+     * The token the API issued. The device id is a claim inside it rather than
+     * a field the client chooses, so a client can only ever register the device
+     * its own token was issued to.
+     */
+    token: string;
   };
   // Add more client events here
 };
@@ -231,36 +235,23 @@ export class NexxusWsClient extends EventEmitter<ClientEventMap> {
       return ;
     }
 
-    const deviceId = msg.data.deviceId;
+    const token = msg.data.token;
 
-    if (!deviceId || typeof deviceId !== 'string' || deviceId.trim() === '') {
-      throw new NexxusWsInvalidParametersException('Invalid or missing deviceId.');
+    if (!token || typeof token !== 'string' || token.trim() === '') {
+      throw new NexxusWsInvalidParametersException('Invalid or missing token.');
     }
 
     this.registering = true;
 
-    try {
-      await NexxusDevice.get(deviceId);
-    } catch (e) {
-      this.registering = false;
-
-      if (e instanceof RedisKeyNotFoundException) {
-        this.sendError(new NexxusWsDeviceNotFoundException(`Device with ID "${deviceId}" not found.`));
-
-        return;
-      }
-
-      throw e;
-    }
-
-    // From here the transport worker owns the rest of the handshake: it writes
-    // the volatile-device state and then calls `confirmRegistration` (or
-    // `failRegistration`), either of which clears the in-flight flag.
+    // From here the transport worker owns the whole handshake: it verifies the
+    // token, resolves the device, writes the volatile-device state, and then
+    // calls `confirmRegistration` (or `failRegistration`), either of which
+    // clears the in-flight flag.
     //
-    // `deviceId` is deliberately NOT stored yet. If it were, a failed write
-    // would leave this client believing it is registered while the worker has
-    // no route to it — and every retry would be refused as "already
+    // The device is deliberately NOT recorded here. If it were, a failed
+    // registration would leave this client believing it is registered while the
+    // worker has no route to it — and every retry would be refused as "already
     // registered", stranding the device until it reconnects on its own.
-    this.emit('register', deviceId);
+    this.emit('register', token);
   }
 }

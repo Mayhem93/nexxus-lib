@@ -10,8 +10,8 @@ const host = { getStats: async () => STATS };
 /** Started servers to tear down after each test. */
 const started: NexxusManagementServer[] = [];
 
-afterEach(() => {
-  started.forEach(s => s.close());
+afterEach(async () => {
+  await Promise.all(started.map(s => s.close()));
   started.length = 0;
 });
 
@@ -84,11 +84,11 @@ describe('NexxusManagementServer lifecycle', () => {
   it('close() stops the server and is idempotent', async () => {
     const { server, port } = await startServer();
 
-    server.close();
-    expect(() => server.close()).not.toThrow(); // second close is a no-op
+    // close() resolves only once the port is actually released, so there is no
+    // sleep here — awaiting it IS the guarantee the connection below is refused.
+    await server.close();
+    await expect(server.close()).resolves.toBeUndefined(); // second close is a no-op
 
-    // Give the socket a moment to release, then confirm connections are refused.
-    await new Promise(resolve => setTimeout(resolve, 50));
     await expect(get(port, { Authorization: `Bearer ${TOKEN}` })).rejects.toThrow();
   });
 });

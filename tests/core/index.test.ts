@@ -12,6 +12,7 @@ import './BaseModel';
 import './FilterQuery';
 import './JsonPatch';
 import './Application';
+import './Token';
 import './AppModel';
 import './User';
 import './Setting';

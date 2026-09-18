@@ -13,7 +13,11 @@ import {
   NEXXUS_RESERVED_FIELD_NAMES,
   isAppScopedBuiltinModel
 } from '../common/BuiltinSchemas';
-import { NexxusUserDetailSchema } from './User';
+import {
+  NexxusUserDetailSchema,
+  isReservedUserDetailField,
+  NEXXUS_USER_DETAIL_RESERVED_PREFIX
+} from './User';
 import { DEFAULT_ACL_ROLE_ID } from './AclRole';
 
 import type { NexxusAclManager } from '../lib/Acl';
@@ -57,8 +61,9 @@ export interface NexxusUserTypeConfig {
 
 /**
  * Per-application auth configuration. Lives on the Application document so
- * that each tenant carries its own JWT secret, per-strategy settings, and
- * user-shape declarations.
+ * that each tenant carries its own per-strategy settings and user-shape
+ * declarations. The signing key is NOT here — it lives at the application
+ * level (`signingSecret`), because apps with no auth still sign tokens.
  *
  * `strategies` is a map keyed by strategy name (must be a subset of the
  * deployment's `api.auth.availableStrategies`). Each value's shape is
@@ -70,7 +75,6 @@ export interface NexxusUserTypeConfig {
  * under `auth` to express that dependency in the type.
  */
 export interface NexxusApplicationAuthConfig {
-  jwtSecret: string;
   jwtExpiresIn?: string;
   strategies: Record<string, unknown>;
   /**
@@ -184,6 +188,12 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
       throw new Error('Application "name" is required and must be a string');
     }
 
+    // Required for EVERY application, not just those with auth: device tokens
+    // are signed with it, and those exist whether or not the app has users.
+    if (typeof data.signingSecret !== 'string' || data.signingSecret.length === 0) {
+      throw new Error('Application "signingSecret" is required and must be a non-empty string');
+    }
+
     if (data.defaultLimit !== undefined && (typeof data.defaultLimit !== 'number' || data.defaultLimit <= 10)) {
       throw new Error('Application "defaultLimit" must be a greater than 10 if provided');
     }
@@ -203,14 +213,11 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
       // Per-app auth block. Per-strategy config shapes are NOT validated here —
       // each strategy's own JSON Schema handles that when the strategy is
       // instantiated by the API at init time. Here we only enforce that the
-      // block itself is coherent: a usable JWT secret, at least one declared
-      // strategy, and a user-detail schema map (possibly empty).
+      // block itself is coherent: at least one declared strategy and a
+      // user-detail schema map (possibly empty). The signing key is validated
+      // above — it belongs to the application, not to this block.
       if (typeof data.auth !== 'object') {
         throw new Error('Application "auth" must be an object when provided');
-      }
-
-      if (typeof data.auth.jwtSecret !== 'string' || data.auth.jwtSecret.length === 0) {
-        throw new Error('Application "auth.jwtSecret" is required and must be a non-empty string when auth is enabled');
       }
 
       if (data.auth.jwtExpiresIn !== undefined && typeof data.auth.jwtExpiresIn !== 'string') {
@@ -227,6 +234,20 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
 
       if (!data.auth.userDetailSchema || typeof data.auth.userDetailSchema !== 'object') {
         throw new Error('Application "auth.userDetailSchema" must be provided when auth is enabled');
+      }
+
+      // A developer-declared `$` field would be overwritten by the auth-strategy
+      // merge in `getUserDetailSchema` and, worse, would be writable through
+      // `PUT /user` — which is precisely what the reserved prefix prevents.
+      for (const [ userType, detailSchema ] of Object.entries(data.auth.userDetailSchema)) {
+        const reserved = Object.keys(detailSchema ?? {}).filter(isReservedUserDetailField);
+
+        if (reserved.length > 0) {
+          throw new Error(
+            `Application "auth.userDetailSchema.${userType}" declares reserved field(s) "${reserved.join('", "')}" — `
+            + `the "${NEXXUS_USER_DETAIL_RESERVED_PREFIX}" prefix is reserved by Nexxus`
+          );
+        }
       }
 
       if (data.auth.userTypes !== undefined && typeof data.auth.userTypes !== 'object') {
@@ -258,6 +279,47 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
     return this.data.schema;
   }
 
+  /**
+   * Key this application signs and verifies its own tokens with — user tokens
+   * where the app has auth, device tokens either way.
+   *
+   * Guaranteed present: the constructor rejects an application without one, so
+   * callers don't have to handle a missing key.
+   */
+  public getSigningSecret(): string {
+    return this.data.signingSecret;
+  }
+
+  /**
+   * Detail fields contributed by this app's auth strategies, keyed by their
+   * `$auth_<name>` namespace. Populated by whoever instantiates the strategies
+   * (the API, at boot) — core can't know the strategy classes, so this is the
+   * same hand-it-in shape `setRoleManagers` uses for ACL.
+   */
+  private authDetailSchema: NexxusUserDetailSchema = {};
+
+  /**
+   * Declare the auth strategies' own detail fields. Called once per app after
+   * its strategies are instantiated; calling it again replaces the set, so an
+   * app whose strategies change at runtime just re-registers.
+   */
+  public setAuthDetailSchema(schema: NexxusUserDetailSchema): void {
+    this.authDetailSchema = schema;
+  }
+
+  /**
+   * The detail schema for a user type: what the developer declared, plus the
+   * `$auth_*` namespaces the enabled auth strategies own.
+   *
+   * Merged here rather than at each call site so that everything reading a
+   * detail schema — patch validation on `PUT /user`, the filter query behind
+   * username lookup, device linking — sees the same shape. Strategies are
+   * configured per application, not per user type, so every user type gets the
+   * same `$auth_*` fields.
+   *
+   * Returns null for a user type the application never declared; the merge does
+   * NOT invent a schema for one.
+   */
   public getUserDetailSchema(userType: string = 'default'): NexxusUserDetailSchema | null {
     const userDetailSchema = this.data.auth?.userDetailSchema;
 
@@ -265,7 +327,13 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
       return null;
     }
 
-    return userDetailSchema[userType] ?? null;
+    const declared = userDetailSchema[userType];
+
+    if (!declared) {
+      return null;
+    }
+
+    return { ...declared, ...this.authDetailSchema };
   }
 
   /**

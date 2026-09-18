@@ -7,6 +7,13 @@ import {
 
 const { validateValue, validateAgainstSchema } = NexxusSchemaValidator;
 
+/**
+ * Every `date` normalizes to an integer UNIX timestamp in SECONDS — the unit
+ * `NexxusBaseModel` stamps `createdAt`/`updatedAt` with, so a document never
+ * holds two different units in two fields.
+ */
+const EPOCH_SECONDS = Date.parse('2020-01-01T00:00:00.000Z') / 1000;
+
 describe('NexxusSchemaValidator.validateValue — primitives', () => {
   it('accepts and returns a valid string', () => {
     expect(validateValue('hi', { type: 'string' }, 'f')).toBe('hi');
@@ -43,17 +50,24 @@ describe('NexxusSchemaValidator.validateValue — primitives', () => {
 describe('NexxusSchemaValidator.validateValue — date normalization', () => {
   const date: NexxusFieldDef = { type: 'date' };
 
-  it('passes a finite numeric timestamp through unchanged', () => {
-    expect(validateValue(1577836800000, date, 'when')).toBe(1577836800000);
+  it('passes a finite number through as already-seconds', () => {
+    // A bare number is taken to be in the canonical unit already. It has to be:
+    // 1577836800 is a valid instant read as either seconds or milliseconds, so
+    // there is nothing to detect and a heuristic would eventually be wrong.
+    expect(validateValue(EPOCH_SECONDS, date, 'when')).toBe(EPOCH_SECONDS);
   });
 
-  it('parses a numeric string to a number', () => {
-    expect(validateValue('1577836800000', date, 'when')).toBe(1577836800000);
+  it('reads a numeric string as seconds too', () => {
+    expect(validateValue(String(EPOCH_SECONDS), date, 'when')).toBe(EPOCH_SECONDS);
+  });
+
+  it('floors a fractional timestamp', () => {
+    expect(validateValue(EPOCH_SECONDS + 0.9, date, 'when')).toBe(EPOCH_SECONDS);
   });
 
   it('parses an ISO string to a floored integer timestamp', () => {
     expect(validateValue('2020-01-01T00:00:00.000Z', date, 'when'))
-      .toBe(Date.parse('2020-01-01T00:00:00.000Z'));
+      .toBe(EPOCH_SECONDS);
   });
 
   it('rejects a non-numeric, unparseable string', () => {
@@ -64,8 +78,20 @@ describe('NexxusSchemaValidator.validateValue — date normalization', () => {
     expect(() => validateValue(NaN, date, 'when')).toThrow(/Expected valid date/);
   });
 
-  it('rejects a non-string, non-number value', () => {
+  it('accepts a Date, converting its milliseconds to seconds', () => {
+    // The natural thing for server-side code to build a patch with — three of
+    // the four internal `updatedAt` patch sites did exactly this.
+    expect(validateValue(new Date('2020-01-01T00:00:00.000Z'), date, 'when')).toBe(EPOCH_SECONDS);
+  });
+
+  it('rejects an Invalid Date', () => {
+    // `new Date('garbage')` is still a Date; its time is NaN.
+    expect(() => validateValue(new Date('not-a-date'), date, 'when')).toThrow(/Invalid Date/);
+  });
+
+  it('rejects a non-string, non-number, non-Date value', () => {
     expect(() => validateValue(true, date, 'when')).toThrow(/Expected valid date/);
+    expect(() => validateValue({}, date, 'when')).toThrow(/Expected valid date/);
   });
 });
 
@@ -80,11 +106,20 @@ describe('NexxusSchemaValidator.validateValue — object', () => {
   };
 
   it('validates nested fields and returns a normalized copy', () => {
-    const input = { city: 'Cluj', zip: 400000, extra: 'kept' };
+    const input = { city: 'Cluj', zip: 400000 };
     const out = validateValue(input, objDef, 'addr') as Record<string, unknown>;
 
-    expect(out).toEqual({ city: 'Cluj', zip: 400000, extra: 'kept' });
+    expect(out).toEqual({ city: 'Cluj', zip: 400000 });
     expect(out).not.toBe(input); // shallow copy, not the same reference
+  });
+
+  it('rejects a nested field the properties do not declare', () => {
+    // No reserved-name exemption down here — system fields only live at the
+    // root of a model, so `id` inside a nested object is just undeclared.
+    expect(() => validateValue({ city: 'X', extra: 'nope' }, objDef, 'addr'))
+      .toThrow(/Field\(s\) "extra" at path "addr" are not declared in the schema/);
+    expect(() => validateValue({ city: 'X', id: 'nope' }, objDef, 'addr'))
+      .toThrow(/not declared in the schema/);
   });
 
   it('rejects a non-object (null / array / primitive)', () => {
@@ -123,7 +158,7 @@ describe('NexxusSchemaValidator.validateValue — array', () => {
     const def: NexxusFieldDef = { type: 'array', arrayType: 'date' };
 
     expect(validateValue(['2020-01-01T00:00:00.000Z'], def, 'dates'))
-      .toEqual([Date.parse('2020-01-01T00:00:00.000Z')]);
+      .toEqual([EPOCH_SECONDS]);
   });
 
   it('validates an array of objects against its properties', () => {
@@ -172,13 +207,35 @@ describe('NexxusSchemaValidator.validateAgainstSchema', () => {
     expect(() => validateAgainstSchema({ age: 5 }, modelDef)).toThrow(/Required field "name" is missing/);
   });
 
-  it('normalizes declared values and passes unknown fields through, without mutating the input', () => {
-    const input = { name: 'a', when: '2020-01-01T00:00:00.000Z', extra: 'kept' };
+  it('normalizes declared values without mutating the input', () => {
+    const input = { name: 'a', when: '2020-01-01T00:00:00.000Z' };
     const out = validateAgainstSchema(input, modelDef);
 
-    expect(out).toEqual({ name: 'a', when: Date.parse('2020-01-01T00:00:00.000Z'), extra: 'kept' });
+    expect(out).toEqual({ name: 'a', when: EPOCH_SECONDS });
     // input untouched — the date string is still a string on the original object
     expect(input.when).toBe('2020-01-01T00:00:00.000Z');
+  });
+
+  it('rejects fields the schema does not declare, naming all of them', () => {
+    expect(() => validateAgainstSchema({ name: 'a', extra: 1, alsoExtra: 2 }, modelDef))
+      .toThrow(/Field\(s\) "extra", "alsoExtra" are not declared in the schema/);
+  });
+
+  /**
+   * The reserved names are set by the API/Worker at construction and an
+   * application schema is FORBIDDEN from declaring them, so they can never be
+   * found in a modelDef — without this exemption every app-model write would
+   * fail on its own `type`.
+   */
+  it('lets system-managed reserved fields through undeclared', () => {
+    const input = { name: 'a', id: 'x', type: 'runs', appId: 'app1', userId: 'u1', createdAt: 1, updatedAt: 2 };
+
+    expect(() => validateAgainstSchema(input, modelDef)).not.toThrow();
+  });
+
+  it('still rejects "version", which is reserved but never caller-settable', () => {
+    expect(() => validateAgainstSchema({ name: 'a', version: 2 }, modelDef))
+      .toThrow(/system-managed Nexxus field/);
   });
 
   it('skips absent optional fields (they do not appear in the result)', () => {

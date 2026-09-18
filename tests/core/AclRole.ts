@@ -56,7 +56,7 @@ describe('NexxusAclRole', () => {
 
   describe('validateAgainstSchema (delegates to the validator with the owning app)', () => {
     const app = new NexxusApplication({
-      id: 'app1', type: 'application', name: 'app',
+      id: 'app1', type: 'application', signingSecret: 's', name: 'app',
       schema: { runs: { fields: { note: { type: 'string' } } } },
     } as INexxusApplication);
 

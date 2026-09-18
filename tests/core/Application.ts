@@ -6,13 +6,14 @@ const makeData = (overrides: Record<string, unknown> = {}): INexxusApplication =
   id: 'app1',
   type: 'application',
   name: 'Test App',
+  signingSecret: 'secret',
   schema: { runs: { fields: { note: { type: 'string', required: false } } } },
   ...overrides,
 } as INexxusApplication);
 
 /** Valid minimal auth block, with per-test overrides. */
 const withAuth = (authOverrides: Record<string, unknown> = {}): INexxusApplication => makeData({
-  auth: { jwtSecret: 'secret', strategies: { local: {} }, userDetailSchema: { default: {} }, ...authOverrides },
+  auth: { strategies: { local: {} }, userDetailSchema: { default: {} }, ...authOverrides },
 });
 
 describe('NexxusApplication constructor', () => {
@@ -79,6 +80,23 @@ describe('NexxusApplication constructor', () => {
     expect(() => new NexxusApplication(makeData({ name: undefined }))).toThrow(/"name" is required/);
   });
 
+  /**
+   * Required for EVERY app, not just those with auth — device tokens are signed
+   * with it and they exist whether or not the app has users.
+   */
+  it('requires a non-empty signingSecret, with or without auth', () => {
+    expect(() => new NexxusApplication(makeData({ signingSecret: undefined })))
+      .toThrow(/"signingSecret" is required/);
+    expect(() => new NexxusApplication(makeData({ signingSecret: '' })))
+      .toThrow(/"signingSecret" is required/);
+    expect(() => new NexxusApplication(makeData({ signingSecret: 123 })))
+      .toThrow(/"signingSecret" is required/);
+  });
+
+  it('exposes the signing secret', () => {
+    expect(new NexxusApplication(makeData()).getSigningSecret()).toBe('secret');
+  });
+
   it('rejects defaultLimit <= 10', () => {
     expect(() => new NexxusApplication(makeData({ defaultLimit: 5 }))).toThrow(/defaultLimit/);
   });
@@ -93,17 +111,12 @@ describe('NexxusApplication constructor', () => {
 });
 
 describe('NexxusApplication auth + acl', () => {
-  it('requires jwtSecret when auth is provided', () => {
-    expect(() => new NexxusApplication(makeData({ auth: { strategies: { local: {} }, userDetailSchema: {} } })))
-      .toThrow(/jwtSecret/);
-  });
-
   it('requires a non-empty strategies map', () => {
     expect(() => new NexxusApplication(withAuth({ strategies: {} }))).toThrow(/strategies/);
   });
 
   it('requires userDetailSchema', () => {
-    expect(() => new NexxusApplication(makeData({ auth: { jwtSecret: 's', strategies: { local: {} } } })))
+    expect(() => new NexxusApplication(makeData({ auth: { strategies: { local: {} } } })))
       .toThrow(/userDetailSchema/);
   });
 

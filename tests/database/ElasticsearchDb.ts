@@ -26,7 +26,7 @@ afterEach(async () => {
 const appModel = (over: Record<string, unknown> = {}) =>
   NexxusAppModel.fromStorage({ id: 'r1', appId: 'app1', type: 'runs', ...over } as never);
 
-const application = () => new NexxusApplication({ id: 'app1', type: 'application', name: 'App', schema: { runs: { fields: { note: { type: 'string' } } } } } as never);
+const application = () => new NexxusApplication({ id: 'app1', type: 'application', signingSecret: 's', name: 'App', schema: { runs: { fields: { note: { type: 'string' } } } } } as never);
 const setting = () => new NexxusSetting({ id: 'pipeline', value: '{}' } as never);
 const user = () => new NexxusUser({ appId: 'app1', username: 'u', authProviders: ['local'], devices: [], userType: 'default' } as never);
 
@@ -146,7 +146,7 @@ describe('NexxusElasticsearchDb.createItems', () => {
 
 describe('NexxusElasticsearchDb.searchItems', () => {
   it('maps hits to Application instances', async () => {
-    state.searchResult = { hits: { hits: [{ _source: { id: 'app1', type: 'application', name: 'A', schema: { runs: { fields: { n: { type: 'string' } } } } } }] } };
+    state.searchResult = { hits: { hits: [{ _source: { id: 'app1', type: 'application', signingSecret: 's', name: 'A', schema: { runs: { fields: { n: { type: 'string' } } } } } }] } };
 
     const results = await db().searchItems({ type: 'application' });
 
@@ -183,7 +183,7 @@ describe('NexxusElasticsearchDb.getItems', () => {
   it('mgets and maps found docs, dropping missing/errored ones', async () => {
     state.mget = () => ({
       docs: [
-        { found: true, _source: { id: 'app1', type: 'application', name: 'A', schema: { runs: { fields: { n: { type: 'string' } } } } } },
+        { found: true, _source: { id: 'app1', type: 'application', signingSecret: 's', name: 'A', schema: { runs: { fields: { n: { type: 'string' } } } } } },
         { found: false, _id: 'missing' },
         { error: { type: 'x' }, _id: 'boom' },
       ],

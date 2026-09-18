@@ -29,7 +29,7 @@ describe('NexxusElasticsearchDbBootstrapper.bootstrapDeployment', () => {
     expect(mapping.properties.auth).toEqual({ type: 'object', enabled: false });
     expect(mapping.properties.type).toEqual({ type: 'keyword' });
     expect(mapping.properties.id).toEqual({ type: 'keyword' });      // universal field
-    expect(mapping.properties.createdAt).toEqual({ type: 'date' });  // universal field
+    expect(mapping.properties.createdAt).toEqual({ type: 'date', format: 'epoch_second' }); // universal field
     expect(mapping.dynamic_templates).toHaveLength(3);
   });
 
@@ -44,7 +44,7 @@ describe('NexxusElasticsearchDbBootstrapper.bootstrapDeployment', () => {
 
 describe('NexxusElasticsearchDbBootstrapper.onApplicationCreated', () => {
   const appWith = (schema: Record<string, unknown>, auth?: Record<string, unknown>) => new NexxusApplication({
-    id: 'app1', type: 'application', name: 'App', schema, ...(auth ? { auth } : {}),
+    id: 'app1', type: 'application', signingSecret: 's', name: 'App', schema, ...(auth ? { auth } : {}),
   } as never);
 
   it('maps every Nexxus field type to the right ES mapping', async () => {
@@ -72,7 +72,7 @@ describe('NexxusElasticsearchDbBootstrapper.onApplicationCreated', () => {
     expect(p.count).toEqual({ type: 'long' });
     expect(p.ratio).toEqual({ type: 'double' });
     expect(p.active).toEqual({ type: 'boolean' });
-    expect(p.when).toEqual({ type: 'date' });
+    expect(p.when).toEqual({ type: 'date', format: 'epoch_second' });
     expect(p.tags).toEqual({ type: 'keyword' });                                  // primitive-array → element mapping
     expect(p.items).toEqual({ properties: { name: { type: 'keyword' } } });        // object-array with props
     expect(p.rawlog).toEqual({ type: 'object' });                                  // object-array without props
@@ -102,7 +102,7 @@ describe('NexxusElasticsearchDbBootstrapper.onApplicationCreated', () => {
 
     await bootstrapper().onApplicationCreated(appWith(
       { runs: { fields: { note: { type: 'string' } } } },
-      { jwtSecret: 's', strategies: { local: {} }, userDetailSchema: { default: {} } },
+      { strategies: { local: {} }, userDetailSchema: { default: {} } },
     ));
     expect(createdIndexNames()).toContain(`${NEXXUS_PREFIX_LC}-app-app1-user`);
   });
@@ -110,7 +110,7 @@ describe('NexxusElasticsearchDbBootstrapper.onApplicationCreated', () => {
   it('creates an acl index only when ACLs are enabled', async () => {
     await bootstrapper().onApplicationCreated(appWith(
       { runs: { fields: { note: { type: 'string' } } } },
-      { jwtSecret: 's', strategies: { local: {} }, userDetailSchema: { default: {} }, acl: true },
+      { strategies: { local: {} }, userDetailSchema: { default: {} }, acl: true },
     ));
 
     expect(createdIndexNames()).toContain(`${NEXXUS_PREFIX_LC}-app-app1-acl`);
