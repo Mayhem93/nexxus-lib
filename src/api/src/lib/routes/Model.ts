@@ -2,17 +2,15 @@ import { InvalidParametersException, ModelNotFoundException } from '../Exception
 import { NexxusApiBaseRoute } from '../BaseRoute';
 import { type NexxusApiRequest, type NexxusApiResponse, NexxusApi } from '../Api';
 import { RequiredHeadersMiddleware, AppExistsMiddleware, AuthMiddleware } from '../middlewares';
-import { validateModelQueryParams, buildDatabaseFilter } from '../ModelQueryValidation';
+import { NexxusApiModelParams } from '../ModelParams';
+import { NexxusApiAcl } from '../Acl';
 import {
   NexxusAppModel,
   NexxusJsonPatch,
   type INexxusAppModel,
-  type NexxusApplicationSchema,
   InvalidJsonPatchException,
   NexxusJsonPatchInternal,
-  NexxusFilterQueryType,
-  NexxusFilterQuery,
-  InvalidQueryFilterException
+  NexxusFilterQueryType
 } from '@mayhem93/nexxus-core-lib';
 
 import type { Router, RequestHandler } from 'express';
@@ -85,16 +83,19 @@ export default class ModelRoute extends NexxusApiBaseRoute {
 
   protected registerRoutes(): void {
     this.router.use(RequiredHeadersMiddleware('nxx-app-id') as RequestHandler);
-    this.router.use(RequiredHeadersMiddleware('nxx-device-id') as RequestHandler);
     this.router.use(AppExistsMiddleware() as RequestHandler);
     this.router.use(AuthMiddleware as RequestHandler);
 
     this.router.post('/', this.createModel.bind(this) as RequestHandler);
-    this.router.get('/:id', this.getModel.bind(this) as RequestHandler<GetModelRequest['params'], any, any, GetModelRequest['query']>);
+    this.router.get('/:id',
+      this.getModel.bind(this) as RequestHandler<GetModelRequest['params'], any, any, GetModelRequest['query']>
+    );
     this.router.put('/:id',
       this.updateModel.bind(this) as RequestHandler<UpdateAppModelRequest['params'], any, UpdateAppModelRequest['body']>
     );
-    this.router.delete('/:id', this.deleteModel.bind(this) as RequestHandler<DeleteAppModelRequest['params']>);
+    this.router.delete('/:id',
+      this.deleteModel.bind(this) as RequestHandler<DeleteAppModelRequest['params']>
+    );
     this.router.post('/count',
       this.countModel.bind(this) as RequestHandler<any, any, CountModelRequestBody>
     );
@@ -107,11 +108,13 @@ export default class ModelRoute extends NexxusApiBaseRoute {
    * Traditional search — no subscription side-effect. Model type comes
    * from the URL param; filter / pagination / id / userId from the body.
    * Shared validation with subscribe/unsubscribe lives in
-   * `ModelQueryValidation.validateModelQueryParams`.
+   * `NexxusApiModelParams.validate`.
    */
   private async searchModel(req: SearchModelRequest, res: NexxusApiResponse): Promise<void> {
-    const validated = validateModelQueryParams(req, req.body, req.params.type);
+    const validated = NexxusApiModelParams.validate(req, req.body, req.params.type);
     const { appId, app, model } = validated;
+
+    const aclConstraint = NexxusApiAcl.authorize(app, req, 'search', model);
 
     // Pagination — kept inline because only this route uses it.
     let limit = req.body.limit;
@@ -134,7 +137,7 @@ export default class ModelRoute extends NexxusApiBaseRoute {
       throw new InvalidParametersException('Invalid offset parameter');
     }
 
-    const databaseFilter = buildDatabaseFilter(validated, req.body.filter);
+    const databaseFilter = NexxusApiModelParams.toDatabaseFilter(validated, req.body.filter, aclConstraint ?? undefined);
 
     const results = (await NexxusApi.database.searchItems({
       appId,
@@ -149,7 +152,8 @@ export default class ModelRoute extends NexxusApiBaseRoute {
 
   private async getModel(req: GetModelRequest, res: NexxusApiResponse): Promise<void> {
     const appId = req.headers['nxx-app-id'] as string;
-    const appSchema = NexxusApi.getStoredApp(appId)?.getSchema() as NexxusApplicationSchema;
+    const app = NexxusApi.getStoredApp(appId)!;
+    const appSchema = app.getSchema();
 
     if (!req.query.type) {
       throw new InvalidParametersException('Query parameter "type" is required');
@@ -158,6 +162,8 @@ export default class ModelRoute extends NexxusApiBaseRoute {
     if (!appSchema[req.query.type]) {
       throw new ModelNotFoundException(`Model "${req.query.type}" not found in schema for the application "${appId}"`);
     }
+
+    const aclConstraint = NexxusApiAcl.authorize(app, req, 'get', req.query.type);
 
     const items = await NexxusApi.database.getItems({
       ids: [ req.params.id ],
@@ -168,6 +174,8 @@ export default class ModelRoute extends NexxusApiBaseRoute {
     if (items.length === 0 || !items[0]) {
       throw new ModelNotFoundException(`Model instance with ID "${req.params.id}" not found`);
     }
+
+    NexxusApiAcl.enforceRowConstraint(app, req, 'get', req.query.type, aclConstraint, items[0].getData() as Record<string, unknown>);
 
     res.status(200).send({ data: items[0].getData() });
   }
@@ -181,11 +189,17 @@ export default class ModelRoute extends NexxusApiBaseRoute {
       throw new ModelNotFoundException(`Model "${req.body.type}" not found in schema for the application "${appId}"`);
     }
 
+    const aclConstraint = NexxusApiAcl.authorize(app, req, 'create', req.body.type);
+
     const newModel = new NexxusAppModel({
       ...req.body,
       appId: appId,
       userId: req.user?.id
     }, appSchema);
+
+    // The created object must itself satisfy the row condition (e.g. a role
+    // that may only create objects it owns) — checked against the new data.
+    NexxusApiAcl.enforceRowConstraint(app, req, 'create', req.body.type, aclConstraint, newModel.getData() as Record<string, unknown>);
 
     // Transient models bypass the writer entirely — their records are
     // notification-shaped, existing only long enough to fan out to
@@ -220,6 +234,14 @@ export default class ModelRoute extends NexxusApiBaseRoute {
       throw new InvalidParametersException(
         `Model "${req.body.type}" is transient (create-only) and cannot be updated`
       );
+    }
+
+    const aclConstraint = NexxusApiAcl.authorize(app, req, 'update', req.body.type);
+
+    if (aclConstraint) {
+      const attrs = await NexxusApiAcl.loadObjectAttributes(appId, req.body.type, req.params.id);
+
+      NexxusApiAcl.enforceRowConstraint(app, req, 'update', req.body.type, aclConstraint, attrs);
     }
 
     try {
@@ -262,6 +284,14 @@ export default class ModelRoute extends NexxusApiBaseRoute {
       );
     }
 
+    const aclConstraint = NexxusApiAcl.authorize(app, req, 'delete', req.body.type);
+
+    if (aclConstraint) {
+      const attrs = await NexxusApiAcl.loadObjectAttributes(appId, req.body.type, req.params.id);
+
+      NexxusApiAcl.enforceRowConstraint(app, req, 'delete', req.body.type, aclConstraint, attrs);
+    }
+
     await NexxusApi.messageQueue.publishMessage('writer', { event: 'model_deleted', data: {
       appId,
       id: req.params.id,
@@ -272,36 +302,33 @@ export default class ModelRoute extends NexxusApiBaseRoute {
     res.status(202).send({ message: 'Model deleted successfully!' });
   }
 
+  /**
+   * Count matching objects.
+   *
+   * Shares its request validation with search, subscribe and unsubscribe
+   * rather than re-implementing it — which is what this route used to do, and
+   * why it validated LESS than the others: it never checked that `userId` is
+   * only usable on an application with authentication, and it built its filter
+   * through a second, near-identical code path.
+   */
   private async countModel(req: CountModelRequest, res: NexxusApiResponse): Promise<void> {
-    const appId = req.headers['nxx-app-id'] as string;
-    const appSchema = NexxusApi.getStoredApp(appId)?.getSchema() as NexxusApplicationSchema;
+    // Count's parameters are `userId` and `filter`; they're forwarded by name
+    // rather than handing over the whole body, so nothing a client invents can
+    // reach the shared validator.
+    const params = { userId: req.body.userId, filter: req.body.filter };
+    const validated = NexxusApiModelParams.validate(req, params, req.body.type);
+    const { appId, app, model } = validated;
 
-    if (!appSchema[req.body.type]) {
-      throw new ModelNotFoundException(`Model "${req.body.type}" not found in schema for the application "${appId}"`);
-    }
+    // Gated at the action level only — the row constraint is deliberately NOT
+    // folded into the filter, so a restricted role still gets a full count
+    // (per the ACL design).
+    NexxusApiAcl.authorize(app, req, 'count', model);
 
-    let databaseFilter: NexxusFilterQuery | undefined;
-
-    //we merge "id" and "userId" queries to a db filter since these two are handled separately in the request
-    if (req.body.filter !== undefined || req.body.userId !== undefined) {
-      const dbFilterInput: NexxusFilterQueryType = {
-        ...structuredClone(req.body.filter || {}),
-        ...(req.body.userId && { userId: req.body.userId })
-      };
-
-      try {
-        databaseFilter = new NexxusFilterQuery(dbFilterInput, NexxusApi.getStoredApp(appId)!.getAppModelSchema(req.body.type));
-      } catch (e) {
-        if (e instanceof InvalidQueryFilterException) {
-          throw new InvalidParametersException(`Invalid filter parameter: ${e.message}`);
-        }
-        throw e;
-      }
-    }
+    const databaseFilter = NexxusApiModelParams.toDatabaseFilter(validated, req.body.filter);
 
     const count = await NexxusApi.database.countItems({
-      type: req.body.type,
-      appId: appId,
+      type: model,
+      appId,
       filter: databaseFilter
     });
 

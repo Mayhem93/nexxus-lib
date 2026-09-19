@@ -3,7 +3,6 @@ import { NexxusException } from "@mayhem93/nexxus-core-lib";
 export enum NexxusWsExceptions {
   INTERNAL_SERVER_ERROR = "INTERNAL_SERVER_ERROR",
   INVALID_PARAMETERS = "INVALID_PARAMETERS",
-  DEVICE_NOT_REGISTERED = "DEVICE_NOT_REGISTERED",
   DEVICE_NOT_FOUND = "DEVICE_NOT_FOUND"
 };
 
@@ -22,12 +21,6 @@ export class NexxusWsInternalServerException extends NexxusWsException {
 export class NexxusWsInvalidParametersException extends NexxusWsException {
   constructor(message: string) {
     super(NexxusWsExceptions.INVALID_PARAMETERS, message);
-  }
-}
-
-export class NexxusWsDeviceNotRegisteredException extends NexxusWsException {
-  constructor(message: string) {
-    super(NexxusWsExceptions.DEVICE_NOT_REGISTERED, message);
   }
 }
 

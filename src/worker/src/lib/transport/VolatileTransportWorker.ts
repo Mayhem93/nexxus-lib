@@ -1,4 +1,9 @@
-import { FatalErrorException, NexxusHubNode } from '@mayhem93/nexxus-core-lib';
+import {
+  FatalErrorException,
+  InvalidTokenException,
+  NexxusHubNode,
+  NexxusToken
+} from '@mayhem93/nexxus-core-lib';
 import { NexxusDevice } from '@mayhem93/nexxus-redis';
 
 import {
@@ -122,7 +127,7 @@ export abstract class NexxusVolatileTransportWorker<
     try {
       await NexxusBaseWorker.messageQueue.deleteQueue(this.queueName);
     } catch (err) {
-      NexxusVolatileTransportWorker.logger.warn(
+      NexxusVolatileTransportWorker.logger.error(
         `Failed to delete slot queue ${this.queueName} on shutdown: ${(err as Error).message}`,
         NexxusVolatileTransportWorker.loggerLabel,
       );
@@ -132,9 +137,54 @@ export abstract class NexxusVolatileTransportWorker<
   }
 
   /**
-   * Called by the subclass when a client successfully registers itself with a deviceId
-   * (via whatever protocol-specific handshake the subclass implements).
-   * Records the volatile-flavor device state in Redis.
+   * Verify a device token presented during a subclass's connection handshake and
+   * return the device id it proves.
+   *
+   * This lives on the volatile base because a volatile transport is the only
+   * place a client presents a credential — persistent transports register
+   * out-of-band through the API, and their `unregisterDevice` is triggered by
+   * the push provider, so neither has a token to check. Every volatile
+   * transport (websockets today, MQTT or SSE tomorrow) inherits one
+   * implementation rather than each re-deriving what a valid device is.
+   *
+   * The application is found by reading `appId` off the UNVERIFIED token — the
+   * worker has no other context from a bare socket — which only selects the key
+   * to verify against. A forged appId picks a different key and fails the
+   * signature check below.
+   *
+   * Existence in Redis is checked too: the token proves the device's identity,
+   * not that its record survived. A device reaped from Redis holds a
+   * structurally valid token that nothing can be done with.
+   *
+   * Throws `InvalidTokenException` / `TokenExpiredException` from core, or
+   * `RedisKeyNotFoundException` when the record is gone — the subclass maps
+   * these onto its own protocol's error shape.
+   */
+  protected async authenticateDevice(token: string): Promise<string> {
+    const appId = NexxusToken.peekAppId(token);
+
+    if (!appId) {
+      throw new InvalidTokenException('Token does not name an application');
+    }
+
+    const app = NexxusBaseWorker.loadedApps.get(appId);
+
+    if (!app) {
+      throw new InvalidTokenException(`Token names an unknown application "${appId}"`);
+    }
+
+    // `deviceId` is a plain string, not `string | undefined`: verify() checks
+    // the claim shape, so there is nothing left to re-check here.
+    const { deviceId } = NexxusToken.verify(app, token);
+
+    await NexxusDevice.get(deviceId);
+
+    return deviceId;
+  }
+
+  /**
+   * Called by the subclass once a client's device id is established (see
+   * `authenticateDevice`). Records the volatile-flavor device state in Redis.
    */
   protected async registerDevice(deviceId: string): Promise<void> {
     await NexxusDevice.update(deviceId, {

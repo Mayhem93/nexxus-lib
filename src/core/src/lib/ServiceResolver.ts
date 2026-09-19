@@ -63,7 +63,7 @@ export function loadPackage(configuredName: string): Promise<any> {
  * Falls back to a clear error if a package returns something unexpected
  * (a plain function, a data object, etc.).
  */
-function assertNexxusService(cls: unknown, configuredName: string): void {
+export function assertNexxusService(cls: unknown, configuredName: string): void {
   if (typeof cls !== 'function' || !((cls as { prototype: unknown }).prototype instanceof NexxusBaseService)) {
     throw new InvalidConfigException(
       `Class resolved from "${configuredName}" does not extend NexxusBaseService. Make sure the adapter extends NexxusBaseService.`
@@ -78,7 +78,7 @@ function assertNexxusService(cls: unknown, configuredName: string): void {
  * Nexxus adapters are Nexxus-specific and there's no reason to hide the
  * class behind a named export.
  */
-function pickDefaultExport(mod: any, configuredName: string): unknown {
+export function pickDefaultExport(mod: any, configuredName: string): unknown {
   if (typeof mod.default === 'function') {
     return mod.default;
   }

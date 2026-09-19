@@ -1,222 +1,122 @@
-# @mayhem93/nexxus-database
+# @mayhem93/nexxus-database-lib
 
-> Database abstraction layer for Nexxus - Pluggable adapters for different database systems
+> Database abstraction for Nexxus — a pluggable adapter contract plus a built-in Elasticsearch implementation.
 
 ---
 
 ## Overview
 
-The **Database package** provides a unified interface for data persistence across different database systems. It comes with a built-in Elasticsearch adapter and allows developers to implement adapters for any database of their choice.
+This package defines **how Nexxus talks to a database** without committing to any particular one. It gives you:
 
-**Key Responsibility:** Abstract database operations (CRUD, search, bulk operations) behind a consistent API while translating Nexxus-specific constructs (FilterQuery, JsonPatch) into native database queries.
+- **`NexxusDatabaseAdapter`** — the abstract contract every adapter implements (CRUD over model instances, search, count, connection lifecycle).
+- **`NexxusDatabaseBootstrapper`** — the deployment-time hook that provisions storage (indices / tables / collections) for a deployment and for each application.
+- A built-in **Elasticsearch** adapter and bootstrapper.
+
+The adapter's job is to translate Nexxus's database-agnostic constructs — the **FilterQuery** DSL and **JsonPatch** — into whatever the underlying engine speaks, and to persist/return the framework's model objects. This README is written for **adapter authors**: the Elasticsearch adapter is the reference implementation, not the subject.
 
 ---
 
 ## Features
 
-### 🔌 Pluggable Architecture
-
-- Built-in **Elasticsearch** adapter
-- Extend `DatabaseAdapter` for other databases (PostgreSQL, MongoDB, etc.)
-- Consistent API regardless of underlying database
-
-### 🔍 Query Translation
-
-- Converts `FilterQuery` DSL to native database queries
-- Database-agnostic filtering logic
-- Support for complex nested queries (`$and`, `$or`, operators)
-
-### ✏️ Update Operations
-
-- JsonPatch to database update translation
-- Bulk update support with scripted operations
-- Partial field returns (dot notation support)
-
-### 📦 Bulk Operations
-
-- Batch create, update, delete for performance
-- Transaction-like semantics where supported
-- Efficient bulk indexing
+- **Pluggable adapter contract** — implement `NexxusDatabaseAdapter` for any store; the API/worker code never knows which engine is behind it.
+- **FilterQuery translation** — a validated, engine-neutral query DSL each adapter lowers to its native query language.
+- **JsonPatch translation** — the framework's patch ops mapped onto native update mechanisms.
+- **Collection / bulk operations** — every operation takes a collection, so batching is the default rather than an afterthought.
+- **Connection liveness** — adapters report `connect` / `disconnect` events that the API/worker use to gate availability.
+- **Deployment bootstrapping** — a separate contract for one-shot deployment setup and per-application provisioning.
 
 ---
 
-## Architecture
+## The adapter interface
 
-```
-Application Code
-      ↓
-DatabaseAdapter (Abstract)
-      ↓
-   ┌──────────────────────────────┐
-   │  ElasticsearchAdapter        │ (Built-in)
-   │  PostgresAdapter             │ (Custom)
-   │  MongoDBAdapter              │ (Custom)
-   │  Neo4jAdapter                │ (Custom)
-   └──────────────────────────────┘
-      ↓
-Underlying Database
-```
-
----
-
-## Built-in Adapter: Elasticsearch
-
-### Why Elasticsearch?
-
-- **Full-text search** capabilities
-- **Scalable** horizontal scaling
-- **JSON-native** document storage
-- **Real-time indexing** for instant queries
-- **Aggregations** for analytics
-
-### Features
-
-- Single-node and cluster support
-- Index management with settings/mappings
-- Bulk operations with error handling
-- Script-based updates for nested fields
-- Source filtering for partial returns
-
----
-
-## Core Operations
-
-### Create
+`NexxusDatabaseAdapter` extends core's `NexxusBaseService`, so an adapter is a config-bound service with a typed config slice, typed events, and `getStats()`:
 
 ```typescript
-await database.createItem({
-  index: 'tasks',
-  item: {
-    id: 'task-123',
-    title: 'Implement feature',
-    status: 'todo',
-    assignee: { email: 'dev@example.com' }
-  },
-  returnFields: ['id', 'title', 'createdAt']
-});
+abstract class NexxusDatabaseAdapter<
+  T extends NexxusConfig,                     // the adapter's "database" config subtree
+  Ev extends NexxusDatabaseAdapterEvents,     // connect / disconnect / error
+  TStats extends NexxusDatabaseAdapterStats = {}
+> extends NexxusBaseService<T, Ev, TStats> { … }
 ```
 
-### Read
+The operations an adapter must implement — note everything is a **collection** and works on **model instances**, not plain objects:
+
+| Method | Purpose |
+| --- | --- |
+| `connect()` / `disconnect()` | Open/close the connection; drive the `connect`/`disconnect` events. |
+| `getBootstrapper()` | Return this adapter's `NexxusDatabaseBootstrapper` (see below). |
+| `createItems(collection: AnyNexxusModel[])` | Persist model instances. |
+| `getItems({ ids, type, appId? })` | Fetch by id (returns `null` per missing id, per model type). |
+| `searchItems({ type, appId?, filter?, limit?, offset?, sort?, databaseSpecific? })` | Query with a `NexxusFilterQuery`. |
+| `updateItems(patches: NexxusJsonPatch[], { returnFields? })` | Apply patches; optionally return the changed fields. |
+| `deleteItems(collection: NexxusBaseModel[])` | Delete by model instance. |
+| `countItems({ type, appId?, filter? })` | Count matching documents. |
+| `buildQuery(options)` *(protected)* | Adapter-internal: translate search options into the native query. |
+
+Typical caller usage (the API and workers, not end users):
 
 ```typescript
-// Get by ID
-const task = await database.getItem({
-  index: 'tasks',
-  id: 'task-123'
-});
+// create — pass model instances, not raw JSON
+await db.createItems([ new NexxusAppModel(data, app.getSchema()) ]);
 
-// Get multiple
-const tasks = await database.getItems({
-  index: 'tasks',
-  ids: ['task-123', 'task-456']
-});
-```
+// read by id
+const [task] = await db.getItems({ type: 'task', ids: ['task-1'], appId: 'app-123' });
 
-### Search
-
-```typescript
-const results = await database.searchItems({
-  index: 'tasks',
-  filters: new NexxusFilterQuery({
-    "$and": [
-      { "status": { "$eq": "todo" } },
-      { "assignee.email": { "$eq": "dev@example.com" } }
-    ]
-  }),
-  sort: [{ field: 'createdAt', order: 'desc' }],
+// search
+const tasks = await db.searchItems({
+  type: 'task',
+  appId: 'app-123',
+  filter: new NexxusFilterQuery({ $and: [{ status: 'todo' }] }, taskSchema),
+  sort: { field: 'createdAt', order: 'desc' },
   limit: 20,
-  offset: 0
+  offset: 0,
 });
+
+// update — patches are validated NexxusJsonPatch instances
+const [changed] = await db.updateItems([patch], { returnFields: new Set(['status']) });
+
+// delete / count
+await db.deleteItems([taskModel]);
+const total = await db.countItems({ type: 'task', appId: 'app-123' });
 ```
 
-### Update
-
-```typescript
-// Single update with JsonPatch
-await database.updateItem({
-  index: 'tasks',
-  id: 'task-123',
-  item: new NexxusJsonPatch({
-    op: 'replace',
-    path: ['status'],
-    value: ['completed'],
-    metadata: { /* ... */ }
-  }),
-  returnFields: ['status', 'updatedAt']
-});
-```
-
-### Bulk Update
-
-```typescript
-// Update multiple items with different patches
-await database.updateItems({
-  index: 'tasks',
-  items: [
-    {
-      id: 'task-123',
-      item: patch1
-    },
-    {
-      id: 'task-456',
-      item: patch2
-    }
-  ],
-  returnFields: ['status', 'updatedAt']
-});
-```
-
-### Delete
-
-```typescript
-// Single delete
-await database.deleteItem({
-  index: 'tasks',
-  id: 'task-123'
-});
-
-// Bulk delete
-await database.deleteItems({
-  index: 'tasks',
-  ids: ['task-123', 'task-456', 'task-789']
-});
-```
+`getItems` and `searchItems` are overloaded by `type` so built-in models resolve to their concrete classes (`NexxusApplication`, `NexxusUser`, `NexxusSetting`) and everything else to `NexxusAppModel`.
 
 ---
 
-## FilterQuery Translation
+## FilterQuery translation
 
-### Input (FilterQuery DSL)
+Callers never write engine queries. They build a `NexxusFilterQuery` — a small, schema-validated DSL (`$and`/`$or` plus `ne`/`gt`/`gte`/`lt`/`lte`/`in` and bare-value equality). Core validates it against the model's field definitions (field exists, is primitive, is `filterable`) *before* it reaches the adapter, so by the time an adapter sees it, it's a well-formed tree of nodes.
 
-```typescript
+Each adapter's job is simply to **walk that tree and emit its native equivalent** — bool/must/should for a search engine, a `WHERE` clause for SQL, a query document for a document store, and so on. Because validation and shape live in core, adapters share one query surface and one set of guarantees; the only per-adapter code is the lowering.
+
+The built-in Elasticsearch adapter lowers it to a `bool` query:
+
+```jsonc
+// FilterQuery input
 {
   "$and": [
-    { "status": { "$in": ["todo", "in_progress"] } },
-    { "priority": { "$gte": 5 } },
+    { "status": { "in": ["todo", "in_progress"] } },
+    { "priority": { "gte": 5 } },
     { "$or": [
-      { "assignee.email": { "$eq": "dev@example.com" } },
-      { "team": { "$eq": "backend" } }
+      { "assignee.email": "dev@example.com" },
+      { "team": "backend" }
     ]}
   ]
 }
 ```
 
-### Output (Elasticsearch Query)
-
 ```json
+// Elasticsearch output
 {
   "bool": {
     "must": [
       { "terms": { "status": ["todo", "in_progress"] } },
       { "range": { "priority": { "gte": 5 } } },
-      {
-        "bool": {
-          "should": [
-            { "term": { "assignee.email": "dev@example.com" } },
-            { "term": { "team": "backend" } }
-          ]
-        }
-      }
+      { "bool": { "should": [
+        { "term": { "assignee.email": "dev@example.com" } },
+        { "term": { "team": "backend" } }
+      ] } }
     ]
   }
 }
@@ -224,294 +124,97 @@ await database.deleteItems({
 
 ---
 
-## JsonPatch Translation
+## JsonPatch translation
 
-### Input (JsonPatch)
+Updates arrive as validated `NexxusJsonPatch` instances whose ops are `replace`, `append`, `prepend`, `incr`, and `decr` (with parallel `path[]`/`value[]` arrays). An adapter maps those ops onto its engine's native update mechanism: a scripted update, a SQL `UPDATE` with the right expressions, a document-store update operator (`$set`, `$inc`, `$push`, …), etc. The important part is preserving each op's semantics — `incr`/`decr` are relative arithmetic, `append`/`prepend` mutate arrays/strings — and applying all of a document's patches atomically where the engine allows.
 
-```typescript
-{
-  op: "replace",
-  path: ["status", "assignee.email"],
-  value: ["completed", "new-dev@example.com"]
-}
+The Elasticsearch adapter compiles the patches for a document into a single painless script (one script per document, so its `_version` bumps exactly once):
+
+```painless
+// replace status; incr viewCount
+ctx._source.status = params.value0;
+ctx._source.viewCount += params.value1;
 ```
 
-### Output (Elasticsearch Script)
-
-```javascript
-ctx._source.status = params.status;
-ctx._source.assignee.email = params.assignee_email;
-```
-
-**Features:**
-
-- Handles nested object updates
-- Dot notation to nested structure conversion
-- Validation of paths against schema
-- Safe parameter binding (prevents injection)
+Values are passed as script `params` (never string-interpolated), and paths are validated against the model schema before the script is built.
 
 ---
 
-## Custom Adapter Implementation
+## Deployment bootstrapping
 
-### Step 1: Extend DatabaseAdapter
+Runtime CRUD assumes storage already exists. Standing that storage up is a **separate concern** handled by `NexxusDatabaseBootstrapper`, obtained from an adapter via `getBootstrapper()` (so it reuses the adapter's already-connected client rather than opening its own). It has two idempotent hooks:
 
-```typescript
-import { DatabaseAdapter } from '@mayhem93/nexxus-database';
+- **`bootstrapDeployment()`** — one-shot, deployment-wide setup: the base infrastructure the runtime expects to exist (base indices / tables / collections). Run by the Nexxus CLI at provisioning time; must be a safe no-op on re-run.
+- **`onApplicationCreated(app)`** — provisions per-application storage when a new application is created (via Hub or CLI). Also idempotent, so Hub can replay an `app_created` event after a restart.
 
-export class PostgresDatabaseAdapter extends DatabaseAdapter {
-  private pool: pg.Pool;
+Migration (framework upgrades, schema evolution, data rewrites) is **explicitly out of scope** for this contract.
 
-  async connect(config: any) {
-    this.pool = new pg.Pool(config);
-  }
+For Elasticsearch this is where **explicit mappings** get declared — the whole reason the bootstrapper exists. Left to itself, ES dynamic-maps fields on first write, which breaks the filter semantics Nexxus wants (strings become analyzed `text`+`keyword`, decimals become `float`). `NexxusElasticsearchDbBootstrapper` instead:
 
-  async disconnect() {
-    await this.pool.end();
-  }
+- creates the deployment-scoped `nxx-application` and `nxx-setting` indices in `bootstrapDeployment()`, and one `nxx-app-<appId>-<modelType>` index per declared model (plus `nxx-app-<appId>-user` when the app has auth) in `onApplicationCreated()`;
+- maps Nexxus types deliberately — `string → keyword` (no analyzers), `int → long`, `float → double`, `date → date`, `boolean → boolean` — and installs dynamic templates so any open subtree inherits the same policy;
+- marks the Application document's `schema` and `auth` blobs `enabled: false` (stored in `_source`, never indexed);
+- skips `transient` models, which never reach the database.
 
-  async createItem(options: NexxusDbCreateOptions) {
-    const query = `
-      INSERT INTO ${options.index} (data)
-      VALUES ($1)
-      RETURNING *
-    `;
-    const result = await this.pool.query(query, [JSON.stringify(options.item)]);
-    return result.rows[0];
-  }
+---
 
-  async searchItems(options: NexxusDbSearchOptions) {
-    // Translate FilterQuery to SQL WHERE clause
-    const whereClause = this.filterQueryToSQL(options.filters);
-    const query = `
-      SELECT * FROM ${options.index}
-      WHERE ${whereClause}
-      LIMIT ${options.limit}
-      OFFSET ${options.offset}
-    `;
-    const result = await this.pool.query(query);
-    return result.rows;
-  }
+## Writing a custom adapter
 
-  private filterQueryToSQL(filter: NexxusFilterQuery): string {
-    // Convert FilterQuery DSL to SQL
-    // Example: { "status": { "$eq": "active" } } → "status = 'active'"
-  }
+To add support for a new store, ship a package that:
 
-  // Implement other abstract methods...
-}
-```
+1. **Extends `NexxusDatabaseAdapter<Config, Events, Stats>`** and sets the static config hooks it inherits from `NexxusBaseService` — `configRootKey` is already `'database'`; you provide `schemaPath` (a JSON schema for your config) and any `envVars` / `cliArgs` specs.
+2. **Implements the operations** in the interface table above. Remember the inputs are framework objects: `createItems` receives model instances (`getData()` to read them), `updateItems` receives `NexxusJsonPatch` instances (`get()` after `validate()`), `deleteItems` receives `NexxusBaseModel` instances.
+3. **Lowers FilterQuery and JsonPatch** to native queries/updates in `searchItems`/`buildQuery` and `updateItems` respectively.
+4. **Drives the lifecycle events** — resolve `connect()` on first successful connection and keep retrying rather than failing fast; emit `disconnect` when the connection drops and `connect` when it returns. The API/worker gate request availability on these, so getting them right matters more than the CRUD.
+5. **Preserves the `version` field** — it's a per-write counter the client uses for gap detection. Assign/return it on writes the way ES surfaces `_version`; a store without a native document version needs its own monotonic counter (see the write-concurrency notes in core).
+6. **Provides a `NexxusDatabaseBootstrapper` subclass** via `getBootstrapper()` for deployment/app provisioning.
 
-### Step 2: Register Adapter
-
-```typescript
-const database = new PostgresDatabaseAdapter();
-await database.connect({
-  host: 'localhost',
-  port: 5432,
-  database: 'nexxus'
-});
-```
+Package it with `@mayhem93/nexxus-core-lib` as a **peer dependency** so `instanceof` checks resolve against a single shared copy, then point `app.database` at your package name in config — the framework dynamic-imports it.
 
 ---
 
 ## Configuration
 
-### Elasticsearch (Built-in)
+An adapter's config lives under the `database` key of the root config and must be backed by a **JSON schema** (`schemaPath`) so the config manager can validate it. See the built-in schema at [`src/schemas/elasticsearch.schema.json`](src/schemas/elasticsearch.schema.json) for the shape (`host`, `port`, `user`, `password`).
 
-```typescript
-{
-  database: {
-    adapter: "elasticsearch",
-    nodes: ["http://localhost:9200"],
-    auth: {
-      username: "elastic",
-      password: "changeme"
-    },
-    tls: {
-      rejectUnauthorized: false
-    }
-  }
-}
-```
+Adapters may also declare `envVars` / `cliArgs` specs (see the core config manager). The Elasticsearch adapter declares env vars only, each `NXX_`-prefixed and typed so the value is coerced:
 
-### Custom Adapter
+| Env var | Config path | Type |
+| --- | --- | --- |
+| `NXX_DB_HOST` | `database.host` | string |
+| `NXX_DB_PORT` | `database.port` | int |
+| `NXX_DB_USERNAME` | `database.user` | string |
+| `NXX_DB_PASSWORD` | `database.password` | string |
 
-```typescript
-{
-  database: {
-    adapter: new PostgresDatabaseAdapter(),
-    config: {
-      host: "localhost",
-      port: 5432,
-      database: "nexxus",
-      user: "nexxus_user",
-      password: "secret"
-    }
-  }
-}
-```
+Anything a service requires but no provider supplies fails validation against the computed schema at boot.
 
 ---
 
-## Package Structure
+## Built-in adapter: Elasticsearch
 
-```
-src/
-├── lib/
-│   ├── ElasticsearchDb.ts      # Built-in Elasticsearch adapter
-│   ├── DatabaseAdapter.ts      # Abstract base class
-│   └── DatabaseService.ts      # Service wrapper
-│
-└── index.ts                    # Public exports
-```
+`NexxusElasticsearchDb` is the reference adapter. Rather than argue *why* Elasticsearch, here's what it does that's ES-specific:
+
+- **Index-per-type, per-app layout** — `nxx-application` and `nxx-setting` are deployment-scoped; app data lives in `nxx-app-<appId>-<modelType>` (and `nxx-app-<appId>-user` when auth is enabled). The document `type` is expressed by the index it lives in rather than a filtered field.
+- **Explicit, analyzer-free mappings** declared by the bootstrapper (see above), with dynamic templates enforcing the same policy for open subtrees.
+- **Scripted bulk updates** — a document's patches merge into one painless script so `_version` bumps once; conflicts use `retry_on_conflict`. That `_version` becomes the model's `version`.
+- **Reactive liveness** — `connect()` retries until ES answers, then a background ping loop (relaxed while connected, aggressive while down) flips the `connect`/`disconnect` events the API listens on.
+- **Write visibility** — app-model writes don't force a refresh; built-in model writes wait for one, so control-plane reads are immediately consistent.
 
 ---
 
-## Key Classes
+## Key classes
 
-### `DatabaseAdapter` (Abstract)
-
-Base class for all database adapters.
-
-**Abstract Methods:**
-
-- `connect(config: any): Promise<void>`
-- `disconnect(): Promise<void>`
-- `createItem(options: NexxusDbCreateOptions): Promise<T>`
-- `getItem(options: NexxusDbGetOptions): Promise<T>`
-- `getItems(options: NexxusDbGetItemsOptions): Promise<T[]>`
-- `searchItems(options: NexxusDbSearchOptions): Promise<T[]>`
-- `updateItem(options: NexxusDbUpdateOptions): Promise<Partial<T>>`
-- `updateItems(options: NexxusDbUpdateItemsOptions): Promise<Partial<T>[]>`
-- `deleteItem(options: NexxusDbDeleteOptions): Promise<void>`
-- `deleteItems(options: NexxusDbDeleteItemsOptions): Promise<void>`
-
-### `NexxusElasticsearchDb`
-
-Elasticsearch implementation of `DatabaseAdapter`.
-
-**Features:**
-
-- Index management (create, delete, exists)
-- Bulk operations (create, update, delete)
-- Script-based updates for nested fields
-- Source filtering with dot notation
-- Error handling with detailed logging
-
----
-
-## Dependencies
-
-**Runtime:**
-
-- `@elastic/elasticsearch` (built-in adapter)
-- `@mayhem93/nexxus-core` (FilterQuery, JsonPatch, models)
-
-**DevDependencies:**
-
-- TypeScript
-- Node.js type definitions
-
----
-
-## Usage in Other Packages
-
-```typescript
-// In @mayhem93/nexxus-api
-import { DatabaseAdapter } from '@mayhem93/nexxus-database';
-
-const results = await database.searchItems({
-  index: 'tasks',
-  filters: new NexxusFilterQuery({ /* ... */ })
-});
-
-// In @mayhem93/nexxus-worker
-import { NexxusElasticsearchDb } from '@mayhem93/nexxus-database';
-
-const db = new NexxusElasticsearchDb();
-await db.connect(config);
-await db.createItem({ /* ... */ });
-```
-
----
-
-## Adapter Examples
-
-### PostgreSQL (Relational)
-
-```typescript
-class PostgresDatabaseAdapter extends DatabaseAdapter {
-  // Store models as JSONB columns
-  // Translate FilterQuery to SQL WHERE clauses
-  // Use JSON path operators for nested queries
-}
-```
-
-### MongoDB (Document)
-
-```typescript
-class MongoDBAdapter extends DatabaseAdapter {
-  // Native document storage (similar to Elasticsearch)
-  // FilterQuery maps cleanly to MongoDB query operators
-  // JsonPatch to MongoDB update operators
-}
-```
-
-### Neo4j (Graph)
-
-```typescript
-class Neo4jAdapter extends DatabaseAdapter {
-  // Store models as nodes with properties
-  // FilterQuery to Cypher WHERE clauses
-  // Relationships for nested objects
-}
-```
-
----
-
-## Performance Considerations
-
-### Bulk Operations
-
-- Use bulk operations for multiple items (10-100x faster)
-- Elasticsearch bulk API processes 1000+ docs/second
-- Batching reduces network overhead
-
-### Indexing
-
-- Elasticsearch refresh interval affects write performance
-- Configure index settings per use case (real-time vs. throughput)
-- Use index templates for consistent settings
-
-### Query Optimization
-
-- Use FilterQuery validation to catch errors early
-- Leverage database-specific optimizations (indices, caching)
-- Return only needed fields with `returnFields`
+- **`NexxusDatabaseAdapter`** *(abstract)* — the adapter contract; extends `NexxusBaseService`.
+- **`NexxusDatabaseBootstrapper`** *(abstract)* — deployment + per-application provisioning contract.
+- **`NexxusElasticsearchDb`** — built-in Elasticsearch adapter.
+- **`NexxusElasticsearchDbBootstrapper`** — built-in ES bootstrapper (index + mapping creation).
+- **`NexxusDatabaseException` / `NexxusDatabaseUpdateConflictException`** — adapter error types; the conflict exception carries the offending `id`/`appId`.
 
 ---
 
 ## Status
 
-🚧 **Work in Progress** - Additional adapters and optimizations planned.
-
-**Coming Soon:**
-
-- Connection pooling configuration
-- Transaction support (where applicable)
-- Query result caching
-- Database-specific optimizations
-
----
-
-## Related Packages
-
-- **[@mayhem93/nexxus-core](../core/)** - FilterQuery, JsonPatch, model definitions
-- **[@mayhem93/nexxus-api](../api/)** - Uses database for reads and queued writes
-- **[@mayhem93/nexxus-worker](../worker/)** - Writer worker persists to database
-
----
+🚧 Pre-alpha. The adapter and bootstrapper contracts are still moving; breaking changes land without deprecation shims.
 
 ## License
 

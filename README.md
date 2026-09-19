@@ -2,6 +2,8 @@
 
 > A pluggable, real-time synchronization backend-as-a-service for building event-driven applications
 
+[![Tests](https://github.com/Mayhem93/nexxus-lib/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/Mayhem93/nexxus-lib/actions/workflows/tests.yml)
+[![Coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fmayhem93.github.io%2Fnexxus-lib%2Fbadge.json)](https://mayhem93.github.io/nexxus-lib/)
 [![License: MPL 2.0](https://img.shields.io/badge/License-MPL_2.0-brightgreen.svg)](https://opensource.org/licenses/MPL-2.0)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D24.0.0-brightgreen.svg)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-6.0.0-blue.svg)](https://www.typescriptlang.org/)

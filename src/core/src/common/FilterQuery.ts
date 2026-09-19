@@ -144,12 +144,20 @@ export class NexxusFilterQuery {
       return false;
     }
 
+    // Array field values match by membership: eq = "contains", ne =
+    // "does not contain", in = "contains any". Primitive fields compare directly.
+    const actualIsArray = Array.isArray(actualValue);
+
     switch (node.operator) {
       case 'eq':
-        return actualValue === node.value;
+        return actualIsArray
+          ? (actualValue as NexxusFieldValue[]).includes(node.value)
+          : actualValue === node.value;
 
       case 'ne':
-        return actualValue !== node.value;
+        return actualIsArray
+          ? !(actualValue as NexxusFieldValue[]).includes(node.value as NexxusFieldValue)
+          : actualValue !== node.value;
 
       case 'gt':
         return typeof actualValue === 'number' && actualValue > (node.value as number);
@@ -166,7 +174,9 @@ export class NexxusFilterQuery {
       case 'in': {
         const values = node.value as NexxusFieldValue[];
 
-        return values.some(v => actualValue === v);
+        return actualIsArray
+          ? values.some(v => (actualValue as NexxusFieldValue[]).includes(v))
+          : values.some(v => actualValue === v);
       }
       default:
         return false;
@@ -185,8 +195,12 @@ export class NexxusFilterQuery {
       throw new InvalidQueryFilterException(`Field "${path}" does not exist in model schema`);
     }
 
-    if (fieldDef.type === 'object' || fieldDef.type === 'array') {
-      throw new InvalidQueryFilterException(`Cannot filter on non-primitive field "${path}"`);
+    // Object fields can't be filtered directly (use dot notation for a nested
+    // field). Array fields CAN be filtered — by membership (see `test`).
+    if (fieldDef.type === 'object') {
+      throw new InvalidQueryFilterException(
+        `Cannot filter on object field "${path}" directly — use dot notation for a nested field`
+      );
     }
 
     if (!fieldDef.filterable) {
@@ -290,15 +304,6 @@ export class NexxusFilterQuery {
         );
       }
     }
-
-    // 'in' operator works with arrays or primitive fields
-    if (operator === 'in') {
-      if (type === 'object') {
-        throw new InvalidQueryFilterException(
-          `Operator "in" at path "${path}" cannot be used with object fields`
-        );
-      }
-    }
   }
 
   private validateValueType(
@@ -381,9 +386,6 @@ export class NexxusFilterQuery {
 
         break;
       }
-
-      case 'object':
-        throw new InvalidQueryFilterException(`Cannot query object field "${path}" directly. Use dot notation for nested fields.`);
     }
   }
 

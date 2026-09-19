@@ -1,7 +1,7 @@
-import { NexxusApiRequest, NexxusApi } from "../Api";
-import { ApplicationNotFoundException } from "../Exceptions";
+import { NexxusApiRequest, NexxusApi } from '../Api';
+import { ApplicationNotFoundException } from '../Exceptions';
 
-import { type NextFunction, type Response } from "express";
+import { type NextFunction, type Response } from 'express';
 
 export default () => (req: NexxusApiRequest, res: Response, next: NextFunction) => {
   const appId = req.headers['nxx-app-id'] as string;

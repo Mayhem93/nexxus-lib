@@ -91,19 +91,30 @@ export class NexxusFileConfigProvider extends NexxusConfigProvider {
   }
 
   public getConfig(): NexxusConfig {
+    let raw: string;
+
+    // Read + error-map in one step. `accessSync` was removed: with no mode it
+    // only checks existence (F_OK), so it never caught a read-permission
+    // problem — and on Windows `fs.access` ignores ACLs entirely. `readFileSync`
+    // surfaces every case (ENOENT / EACCES / EPERM / EISDIR / …) directly.
     try {
-      fs.accessSync(this.filePath);
+      raw = fs.readFileSync(this.filePath, 'utf-8');
     } catch (e) {
       if (e.code === 'ENOENT') {
         throw new FatalErrorException(`Cannot access config file "${this.filePath}": ${e.message}`, FatalErrorSubcodes.CONFIG_FILE_NOT_FOUND);
-      } else if (e.code === 'EACCES') {
+      } else if (e.code === 'EACCES' || e.code === 'EPERM') {
+        // EACCES on unix-likes, EPERM on Windows (icacls DENY read).
         throw new FatalErrorException(`Cannot access config file "${this.filePath}": ${e.message}`, FatalErrorSubcodes.CONFIG_FILE_UNREADABLE);
       } else {
         throw new FatalErrorException(`Failed reading config file "${this.filePath}": ${e.message}`);
       }
     }
 
-    return JSON.parse(fs.readFileSync(this.filePath, 'utf-8')) as NexxusConfig;
+    try {
+      return JSON.parse(raw) as NexxusConfig;
+    } catch (e) {
+      throw new FatalErrorException(`Config file "${this.filePath}" is not valid JSON: ${(e as Error).message}`, FatalErrorSubcodes.CONFIG_FILE_INVALID_JSON);
+    }
   }
 }
 

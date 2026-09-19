@@ -6,7 +6,9 @@ export enum NexxusExceptions {
   INVALID_JSON_PATCH = "InvalidJsonPatchException",
   INVALID_QUERY_FILTER = "InvalidQueryFilterException",
   INVALID_SCHEMA_DATA = "InvalidSchemaDataException",
-  INVALID_USER_MODEL = "InvalidUserModelException"
+  INVALID_USER_MODEL = "InvalidUserModelException",
+  TOKEN_EXPIRED = "TokenExpiredException",
+  INVALID_TOKEN = "InvalidTokenException"
 };
 
 export class NexxusException extends Error {
@@ -72,5 +74,26 @@ export class InvalidSchemaDataException extends NexxusException {
 export class InvalidUserModelException extends NexxusException {
   constructor(message: string) {
     super(NexxusExceptions.INVALID_USER_MODEL, message);
+  }
+}
+
+/**
+ * A token was well-formed and correctly signed, but its lifetime has passed.
+ * Separate from `InvalidTokenException` because it's the one verification
+ * failure a client can act on by re-authenticating.
+ */
+export class TokenExpiredException extends NexxusException {
+  constructor(message: string) {
+    super(NexxusExceptions.TOKEN_EXPIRED, message);
+  }
+}
+
+/**
+ * A token failed verification for any reason other than expiry: bad signature,
+ * malformed, or issued for a different application.
+ */
+export class InvalidTokenException extends NexxusException {
+  constructor(message: string) {
+    super(NexxusExceptions.INVALID_TOKEN, message);
   }
 }

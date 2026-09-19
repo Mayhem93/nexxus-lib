@@ -1,560 +1,246 @@
-# @mayhem93/nexxus-message-queue
+# @mayhem93/nexxus-message-queue-lib
 
-> Message broker abstraction for Nexxus - Pluggable adapters for event-driven communication
+> Message-broker abstraction for Nexxus — a pluggable adapter contract plus a built-in RabbitMQ implementation.
 
 ---
 
 ## Overview
 
-The **Message Queue package** provides a unified interface for asynchronous communication between Nexxus services. It comes with a built-in RabbitMQ adapter and allows developers to implement adapters for any message broker of their choice.
+Nexxus moves work between its nodes over a message broker: the API hands writes off asynchronously, workers consume and re-publish, and transport workers fan changes out to clients. This package defines **how a broker is plugged in** without committing to a specific one:
 
-**Key Responsibility:** Enable reliable, decoupled communication between API, workers, and transport layers using publish-subscribe and queue patterns.
+- **`NexxusMessageQueueAdapter`** — the abstract contract every adapter implements. The base class already owns the hard parts (connection state machine with retry, consumer bookkeeping, pause/resume, optional compression); a concrete adapter fills in a small `do*` surface.
+- **`NexxusMessageQueueBootstrapper`** — the deployment-time hook that declares broker topology (exchanges, per-stage queues).
+- A built-in **RabbitMQ** adapter, bootstrapper, and an **lz4** message compressor.
+
+This README targets **adapter authors** — RabbitMQ is the reference, not the subject.
 
 ---
 
 ## Features
 
-### 🔌 Pluggable Architecture
-
-- Built-in **RabbitMQ** adapter
-- Extend `MessageQueueAdapter` for other brokers (Kafka, Redis Streams, AWS SQS, etc.)
-- Consistent API regardless of underlying message broker
-
-### 📨 Communication Patterns
-
-- **Topic-based** (broadcast/pub-sub) - One message, multiple consumers
-- **Queue-based** (point-to-point) - One message, one consumer
-- **Work queues** - Distribute tasks across multiple workers
-
-### 🔄 Reliability
-
-- Message acknowledgment (manual/auto)
-- Delivery guarantees (at-least-once, exactly-once where supported)
-- Dead letter queues for failed messages
-- Retry mechanisms
-
-### 🎯 Type-Safe Payloads
-
-- Strongly-typed message payloads from `@mayhem93/nexxus-core`
-- Queue names as constants (`NexxusQueueName`)
-- Payload validation at compile-time
+- **Pluggable adapter contract** — back Nexxus with any broker by implementing a handful of `do*` methods.
+- **Base-owned connection lifecycle** — retry-until-connected, reconnect handling, and `connect`/`disconnect` events live in the base class, not each adapter.
+- **Consumer durability across reconnects** — registered consumers are restored automatically when the connection returns.
+- **Pause / resume** — consumption can be gated (workers pause when a downstream dependency is unavailable).
+- **Optional wire compression** — deployment-wide payload compression (lz4 today) handled transparently by the base.
+- **Type-safe payloads** — queue name → payload type is enforced at compile time via `NexxusQueuePayload<Q>`.
 
 ---
 
-## Architecture
+## Message flow & the pluggable pipeline
 
+The data pipeline is a chain of queues connected by workers. The **only** pipeline wired up today is the base one:
+
+```text
+API ──▶ writer ──▶ transport-manager ──▶ <transport> ──▶ clients
 ```
-Publisher (API/Worker)
-      ↓
-MessageQueueAdapter (Abstract)
-      ↓
-   ┌──────────────────────────────┐
-   │  RabbitMQAdapter             │ (Built-in)
-   │  KafkaAdapter                │ (Custom)
-   │  RedisStreamsAdapter         │ (Custom)
-   │  SQSAdapter                  │ (Custom)
-   └──────────────────────────────┘
-      ↓
-Message Broker
-      ↓
-Consumer (Worker)
-```
+
+- `writer` — the API publishes app-model writes here; the Writer worker persists them.
+- `transport-manager` — the Writer republishes change events here; the Transport Manager routes them to the right per-device channels.
+- `<transport>` — a **transport adapter** delivers to connected clients. WebSockets is one such transport; it is not the only one (an MQTT transport is planned), so the final stage is deliberately not a hardcoded queue name — it's whichever transport(s) a deployment runs.
+
+The pipeline is **pluggable**: it's just queues and workers, so custom workers can be inserted along the chain and adjusted to an application's needs. `NexxusQueueName` is `known-names | (string & {})`, so custom stages are first-class. (Customizing the pipeline is still a work in progress — the base chain above is what runs today.)
+
+Queue names come in two shapes: **static** stages (`writer`, `transport-manager`) and **dynamic per-slot** stages for horizontally-scaled transports, named `<pattern>_<n>` (e.g. `websockets-transport_1`).
 
 ---
 
-## Message Flow in Nexxus
+## The adapter interface
 
-### Write Operation Flow
-
-```
-API Server
-    ↓ [publish]
-Writer Queue (writer)
-    ↓ [consume]
-Writer Worker
-    ↓ [publish]
-Transport Manager Queue (transport-manager)
-    ↓ [consume]
-Transport Manager Worker
-    ↓ [publish]
-WebSocket Queue (websockets-transport)
-    ↓ [consume]
-WebSocket Worker
-    ↓
-Connected Clients
-```
-
-### Queue Names (from `@mayhem93/nexxus-core`)
+`NexxusMessageQueueAdapter` extends core's `NexxusBaseService`, so an adapter is a config-bound service (config subtree under `message_queue`, typed events, `getStats()`):
 
 ```typescript
-export type NexxusQueueName =
-  | 'writer'                    // API → Writer Worker
-  | 'transport-manager'         // Writer → Transport Manager
-  | 'websockets-transport'      // Transport Manager → WebSocket Worker
-  | string;                     // Custom worker queues
+abstract class NexxusMessageQueueAdapter<
+  T extends NexxusMessageQueueConfig,          // its "message_queue" config subtree
+  Ev extends NexxusMessageQueueAdapterEvents,  // connect / disconnect / error / message
+  TStats extends NexxusMessageQueueAdapterStats
+> extends NexxusBaseService<T, Ev, TStats> { … }
 ```
 
+**The base class already implements**, so you don't:
+
+- `connect()` / `disconnect()` — a full state machine: retry-until-connected, reconnect on unexpected drops, one-shot resolution of the first connect, and the `connect`/`disconnect` events.
+- `consumeMessages(queue, handler)` — registers and retains the `(queue, handler)` tuple, dispatches it, and **re-establishes it automatically** after a reconnect.
+- `pauseConsuming()` / `resumeConsuming()` — idempotent gates over all consumers.
+- `serializePayload()` / `deserializePayload()` — JSON encode/decode plus optional compression.
+
+**A concrete adapter implements** the small broker-specific surface:
+
+| Method | Responsibility |
+| --- | --- |
+| `doConnect()` | Open the connection; wire the client's close handler to call `onConnectionLost()`. |
+| `doDisconnect()` | Close the connection cleanly (safe if nothing is open). |
+| `isFatalConnectError(err)` | Classify a connect error as fatal (give up) vs retryable (default to retryable). |
+| `doConsume(queue, handler)` | Start a broker consumer; track whatever handle is needed to cancel it. |
+| `doCancelAll()` | Cancel all active consumers (for pause); swallow per-consumer errors. |
+| `publishMessage(queue, message, metadata?)` | Publish, using `serializePayload()` for the wire bytes. |
+| `queueExists` / `createVolatileQueue` / `deleteQueue` | Support the per-slot volatile queues transport workers claim. |
+| `getBootstrapper(options)` | Return this adapter's `NexxusMessageQueueBootstrapper`. |
+| `reconnectDelayMs` | The retry interval the base's loop uses. |
+
 ---
 
-## Built-in Adapter: RabbitMQ
-
-### Why RabbitMQ?
-
-- **Reliable** message delivery with acknowledgments
-- **Flexible routing** with exchanges and bindings
-- **Battle-tested** in production environments
-- **Feature-rich** dead letter queues, TTL, priority queues
-- **AMQP protocol** standard
-
-### Features
-
-- Exchange types: direct, topic, fanout, headers
-- Persistent messages (survive broker restarts)
-- Consumer prefetch (control throughput)
-- Connection/channel management
-- Automatic reconnection
-
----
-
-## Core Operations
-
-### Publish Message
+## Publishing & consuming
 
 ```typescript
-// Publish to queue
-await messageQueue.publish('writer', {
+// Publish — the payload type is inferred from the queue name.
+await mq.publishMessage('writer', {
   event: 'model_created',
-  data: {
-    appId: 'myapp',
-    userId: 'user123',
-    type: 'task',
-    id: 'task-456',
-    title: 'New Task',
-    status: 'todo'
-  }
+  data: appModel.getData(),
 });
 
-// Publish with options
-await messageQueue.publish('writer', payload, {
-  persistent: true,      // Survive broker restart
-  priority: 5,          // Higher priority (0-10)
-  expiration: '60000'   // Message TTL in ms
-});
-```
-
-### Subscribe to Queue
-
-```typescript
-// Subscribe with callback
-await messageQueue.subscribe('writer', async (payload) => {
-  console.log('Received:', payload);
-
-  if (payload.event === 'model_created') {
-    // Handle model creation
-    await database.createItem(payload.data);
-  }
-
-  // Message auto-acknowledged on successful return
-  // Throws error to reject and requeue
+// Consume — register once; the base restores it across reconnects.
+await mq.consumeMessages('writer', async (message) => {
+  const payload = message.payload; // typed as the 'writer' queue's payload
+  // …process…
+  // (the built-in RabbitMQ adapter acks after the handler resolves;
+  //  a throwing handler leaves the message unacked)
 });
 
-// Subscribe with manual acknowledgment
-await messageQueue.subscribe('writer', async (payload, message) => {
-  try {
-    await processMessage(payload);
-    message.ack(); // Manual acknowledgment
-  } catch (error) {
-    message.nack(); // Reject and requeue
-  }
-}, { autoAck: false });
+// Gate consumption (e.g. a worker whose database dropped)
+await mq.pauseConsuming();
+await mq.resumeConsuming();
 ```
 
-### Unsubscribe
-
-```typescript
-await messageQueue.unsubscribe('writer');
-```
+`publishMessage<Q>` and `consumeMessages<Q>` are generic over the queue name, and `NexxusQueuePayload<Q>` maps each known queue to its payload type — so publishing the wrong shape to a queue is a compile error.
 
 ---
 
-## Message Payloads (from `@mayhem93/nexxus-core`)
+## Message payloads
 
-### Model Created
+Payloads live in core (`@mayhem93/nexxus-core-lib`) and are keyed to queues by type. The three hops of the base pipeline:
+
+**`writer` queue** — `NexxusWriterPayload`:
 
 ```typescript
-{
-  event: 'model_created',
-  data: {
-    appId: string;
-    userId?: string;
-    type: string;        // Model type (e.g., 'task')
-    id: string;          // Model ID
-    [key: string]: any;  // Model fields
-  }
-}
+{ event: 'model_created', data: INexxusAppModel }
+{ event: 'model_updated', data: NexxusJsonPatchInternal[] }               // one entry per patch
+{ event: 'model_deleted', data: { id, type, appId, userId } }
 ```
 
-### Model Updated
+**`transport-manager` queue** — `NexxusTransportManagerPayload`. Same events, but each update patch now also carries the post-write partial model the Writer produced:
 
 ```typescript
 {
   event: 'model_updated',
-  data: Array<NexxusJsonPatchInternal>  // Array of patches
+  data: Array<{ op, path, value, metadata: { …, partialModel: Partial<INexxusAppModel> } }>
 }
 ```
 
-**Writer → Transport Manager:**
-Full metadata in patches:
-
-```typescript
-{
-  op: 'replace',
-  path: ['status'],
-  value: ['completed'],
-  metadata: {
-    appId: string;
-    userId?: string;
-    type: string;
-    id: string;
-  }
-}
-```
-
-**Transport Manager → WebSocket Worker:**
-Slim metadata with channel keys:
-
-```typescript
-{
-  op: 'replace',
-  path: ['status'],
-  value: ['completed'],
-  metadata: {
-    channels: string[];  // Array of subscription channel keys
-  }
-}
-```
-
-### Model Deleted
-
-```typescript
-{
-  event: 'model_deleted',
-  data: {
-    appId: string;
-    userId?: string;
-    type: string;
-    id: string;
-  }
-}
-```
-
-### Device Message (Transport-specific)
+**Transport queues** (`<transport>_<n>`) — `NexxusTransportWorkerPayload`, identical across every transport so each adapter just re-encodes `data` into its own wire format:
 
 ```typescript
 {
   event: 'device_message',
-  deviceIds: string[];  // Target devices
-  data: NexxusWebSocketModelUpdatedPayload | NexxusModelCreatedPayload | NexxusModelDeletedPayload
+  deviceIds: string[],                 // who to deliver to
+  data: {                              // model_created | model_updated | model_deleted
+    event: 'model_updated',
+    model: { id, type, appId, userId, version },  // version drives client gap-detection
+    patches: Array<{ op, path, value }>,
+    metadata: { channels: string[] }              // matched subscription channels
+  }
 }
 ```
 
 ---
 
-## Custom Adapter Implementation
+## Deployment bootstrapping
 
-### Step 1: Extend MessageQueueAdapter
+Runtime publish/consume assumes the broker topology already exists. Declaring it is a separate concern handled by `NexxusMessageQueueBootstrapper`, obtained via `getBootstrapper(options)` and run by the CLI/Hub (never by a regular node). Its one hook:
 
-```typescript
-import { MessageQueueAdapter } from '@mayhem93/nexxus-message-queue';
+- **`bootstrapDeployment(pipeline)`** — idempotent, one-shot: declare the cross-node broadcast surface plus one queue per **static** pipeline stage. Dynamic per-slot stages are skipped — the worker that claims a slot declares its own `<stage>_<n>` queue. Migration is explicitly out of scope.
 
-export class KafkaMessageQueueAdapter extends MessageQueueAdapter {
-  private producer: Kafka.Producer;
-  private consumer: Kafka.Consumer;
+The RabbitMQ bootstrapper runs entirely over the broker's **HTTP management API** (so it can run before any AMQP connection exists — it's what creates the vhost the adapter later connects to). It declares, in order: the `/nexxus` vhost, the runtime user + its per-vhost permissions, the `systemMessages` fanout exchange (cross-node broadcast; workers bind their own ephemeral queues to it), and one durable **quorum** queue per static stage.
 
-  async connect(config: any) {
-    const kafka = new Kafka({
-      clientId: config.clientId,
-      brokers: config.brokers
-    });
+---
 
-    this.producer = kafka.producer();
-    this.consumer = kafka.consumer({ groupId: config.groupId });
+## Writing a custom adapter
 
-    await this.producer.connect();
-    await this.consumer.connect();
-  }
+To back Nexxus with a different broker:
 
-  async disconnect() {
-    await this.producer.disconnect();
-    await this.consumer.disconnect();
-  }
+1. **Extend `NexxusMessageQueueAdapter<Config, Events, Stats>`** and set the static config hooks from `NexxusBaseService` — `configRootKey` is `'message_queue'`; provide `schemaPath` (JSON schema for your config) and any `envVars`/`cliArgs`.
+2. **Implement the `do*` surface** from the table above, plus `publishMessage`, the volatile-queue trio, `getBootstrapper`, and `reconnectDelayMs`. You do **not** reimplement `connect`/`disconnect`/`consumeMessages`/`pause`/`resume` — those are the base's.
+3. **Ship a `NexxusMessageQueueBootstrapper` subclass** that declares your broker's topology.
 
-  async publish(queue: string, payload: any, options?: any) {
-    await this.producer.send({
-      topic: queue,
-      messages: [{
-        value: JSON.stringify(payload),
-        headers: options?.headers
-      }]
-    });
-  }
+Watch out for:
 
-  async subscribe(queue: string, callback: (payload: any) => Promise<void>, options?: any) {
-    await this.consumer.subscribe({ topic: queue });
-
-    await this.consumer.run({
-      eachMessage: async ({ message }) => {
-        const payload = JSON.parse(message.value.toString());
-        await callback(payload);
-      }
-    });
-  }
-
-  async unsubscribe(queue: string) {
-    // Kafka-specific unsubscribe logic
-  }
-}
-```
-
-### Step 2: Register Adapter
-
-```typescript
-const messageQueue = new KafkaMessageQueueAdapter();
-await messageQueue.connect({
-  clientId: 'nexxus',
-  brokers: ['localhost:9092'],
-  groupId: 'nexxus-workers'
-});
-```
+- **Wire the close handler.** In `doConnect`, hook the client's "connection closed" event to `this.onConnectionLost()` — that's what lets the base restart the retry loop. Do **not** call it from `doDisconnect` (that's the graceful path the base already owns).
+- **Use `serializePayload`/`deserializePayload`.** Encode/decode through them rather than raw `JSON.stringify`, or compression silently won't apply.
+- **Track consumer handles.** `doConsume` must remember whatever token cancels a consumer so `doCancelAll` can stop it; expect `doConsume` to be called again on reconnect and on resume.
+- **Acknowledge after the handler.** Ack/commit only once the handler resolves, so a failure requeues rather than drops.
+- **Classify errors conservatively.** `isFatalConnectError` should return `true` only for things retrying can't fix (e.g. bad credentials); everything else stays retryable.
+- **Peer-depend on `@mayhem93/nexxus-core-lib`** so `instanceof` checks resolve against one shared copy. Point `app.message_queue` at your package name and the framework dynamic-imports it.
 
 ---
 
 ## Configuration
 
-### RabbitMQ (Built-in)
+An adapter's config lives under the `message_queue` key and must be backed by a JSON schema (`schemaPath`) — see [`src/schemas/rabbitmq.schema.json`](src/schemas/rabbitmq.schema.json). The RabbitMQ shape:
 
-```typescript
+```jsonc
 {
-  messageQueue: {
-    url: "amqp://localhost:5672",
-    // Or with auth
-    url: "amqp://user:password@localhost:5672",
-    options: {
-      heartbeat: 60,
-      prefetch: 10,        // Messages to prefetch per consumer
-      reconnectDelay: 5000 // Reconnection delay in ms
+  "message_queue": {
+    "host": "localhost",
+    "port": 5672,
+    "user": "nexxus",
+    "password": "…",
+    "managementPort": 15672,   // used by the bootstrapper's management-API calls
+
+    // Optional, deployment-wide. Every producer AND consumer must match.
+    "compression": {
+      "enabled": true,
+      "algo": "lz4",
+      "options": {}
     }
   }
 }
 ```
 
-### Custom Adapter
-
-```typescript
-{
-  messageQueue: {
-    clientId: "nexxus",
-    brokers: ["localhost:9092"],
-    groupId: "nexxus-workers"
-  }
-}
-```
+The RabbitMQ adapter declares `NXX_`-prefixed, typed env vars: `NXX_MQ_HOST` (string), `NXX_MQ_PORT` (int), `NXX_MQ_USER` (string), `NXX_MQ_PASSWORD` (string). Compression is inherited from the shared `NexxusMessageQueueConfig`, so every adapter picks it up for free.
 
 ---
 
-## Package Structure
+## Built-in adapter: RabbitMQ
 
-```
-src/
-├── lib/
-│   ├── RabbitMQAdapter.ts        # Built-in RabbitMQ adapter
-│   ├── MessageQueueAdapter.ts    # Abstract base class
-│   └── MessageQueueService.ts    # Service wrapper
-│
-└── index.ts                      # Public exports
-```
+`NexxusRabbitMq` is the reference adapter. What's RabbitMQ-specific about it:
 
----
+- **Two queue shapes.** Static pipeline stages are **durable quorum** queues; the per-slot queues transport workers claim are **classic non-durable + exclusive + auto-delete** — exclusivity gives broker-level collision detection when two workers race for the same slot, and auto-delete cleans them up on disconnect.
+- **Fanout for broadcast.** A `systemMessages` fanout exchange carries one-message-to-every-node traffic, separate from the competing-consumer work queues.
+- **Connects over AMQP** to the `/nexxus` vhost with a heartbeat; the bootstrapper works over the **management HTTP API** instead, so provisioning needs no live AMQP connection.
+- **Consumer tags** are tracked per queue so consumers can be cancelled for `pauseConsuming` and re-registered on reconnect.
+- **Persistent publishes**, with the content-type reflecting whether the body is compressed.
 
-## Key Classes
-
-### `MessageQueueAdapter` (Abstract)
-
-Base class for all message queue adapters.
-
-**Abstract Methods:**
-
-- `connect(config: any): Promise<void>`
-- `disconnect(): Promise<void>`
-- `publish(queue: string, payload: any, options?: any): Promise<void>`
-- `subscribe(queue: string, callback: Function, options?: any): Promise<void>`
-- `unsubscribe(queue: string): Promise<void>`
-
-### `RabbitMQAdapter`
-
-RabbitMQ implementation of `MessageQueueAdapter`.
-
-**Features:**
-
-- AMQP 0-9-1 protocol support
-- Connection and channel pooling
-- Automatic reconnection on failure
-- Exchange declaration (direct, topic, fanout)
-- Queue assertion with options (durable, auto-delete)
-- Message acknowledgment (manual/auto)
-- Dead letter exchange configuration
+Compression is provided by `NexxusMessageCompressor` (lz4 via `lz4-napi`), applied by the base adapter — messages carry no per-message algo marker, so it's strictly a deployment-wide setting.
 
 ---
 
-## Worker Pipeline Example
+## Custom worker pipelines
 
-### Custom Email Worker
+Because the pipeline is just queues and workers, a deployment can insert its own workers along the chain — a worker consumes one stage, does its thing, and publishes onward. Some shapes this is meant to enable (still design-stage — the base chain is what runs today):
 
-```typescript
-import { MessageQueueAdapter, NexxusModelCreatedPayload } from '@mayhem93/nexxus-message-queue';
+- **Data masking / redaction** — sit between the Writer and the transports and strip or tokenize sensitive fields before they fan out to clients.
+- **Security / policy** — an authorization or content-policy gate that drops or flags events that violate a rule before they propagate.
+- **Monitoring / metrics** — a passive consumer on a broadcast copy of events that emits metrics or traces without altering the flow.
+- **External sinks** — a worker that forwards a copy of events to an analytics warehouse, a search index, or a third-party system.
 
-class EmailWorker {
-  constructor(private messageQueue: MessageQueueAdapter) {}
-
-  async start() {
-    await this.messageQueue.subscribe('email-notifications', async (payload: NexxusModelCreatedPayload) => {
-      if (payload.event === 'model_created' && payload.data.type === 'task') {
-        await this.sendEmail(payload.data);
-      }
-    });
-  }
-
-  private async sendEmail(task: any) {
-    // Send email notification
-    console.log(`Sending email for task: ${task.title}`);
-  }
-}
-
-// Register in pipeline
-// Writer Worker publishes to both 'transport-manager' and 'email-notifications'
-```
-
-### Adding to Pipeline
-
-```typescript
-// In Writer Worker
-async handleModelCreated(payload: NexxusModelCreatedPayload) {
-  // Persist to database
-  await database.createItem(payload.data);
-
-  // Publish to Transport Manager (real-time notifications)
-  await messageQueue.publish('transport-manager', payload);
-
-  // Publish to Email Worker (custom logic)
-  await messageQueue.publish('email-notifications', payload);
-}
-```
+The general pattern is the same: a stage publishes to the next queue name, custom workers subscribe where they need to, and the transport stage stays whatever transport adapter(s) the deployment runs.
 
 ---
 
-## Dependencies
+## Key classes
 
-**Runtime:**
+For someone writing an adapter over a different broker:
 
-- `amqplib` (RabbitMQ client)
-- `@mayhem93/nexxus-core` (queue payload types)
-
-**DevDependencies:**
-
-- TypeScript
-- Node.js type definitions
-
----
-
-## Usage in Other Packages
-
-```typescript
-// In @mayhem93/nexxus-api
-import { MessageQueueAdapter } from '@mayhem93/nexxus-message-queue';
-
-await messageQueue.publish('writer', {
-  event: 'model_created',
-  data: newTask
-});
-
-// In @mayhem93/nexxus-worker (Writer)
-import { NexxusModelCreatedPayload } from '@mayhem93/nexxus-core';
-
-await messageQueue.subscribe('writer', async (payload: NexxusModelCreatedPayload) => {
-  await handleModelCreated(payload);
-});
-```
-
----
-
-## Adapter Examples
-
-### Kafka
-
-```typescript
-class KafkaAdapter extends MessageQueueAdapter {
-  // Topics instead of queues
-  // Consumer groups for load balancing
-  // Offset management for replay capability
-  // Partitioning for ordering guarantees
-}
-```
-
-### Redis Streams
-
-```typescript
-class RedisStreamsAdapter extends MessageQueueAdapter {
-  // Lightweight, in-memory messaging
-  // Consumer groups with XREADGROUP
-  // Message acknowledgment with XACK
-  // Ideal for high-throughput scenarios
-}
-```
-
-### AWS SQS
-
-```typescript
-class SQSAdapter extends MessageQueueAdapter {
-  // Fully managed queue service
-  // Visibility timeout for processing time
-  // Long polling for efficiency
-  // FIFO queues for ordering
-}
-```
-
-### Google Cloud Pub/Sub
-
-```typescript
-class PubSubAdapter extends MessageQueueAdapter {
-  // Global messaging service
-  // Topic-based pub-sub
-  // Push and pull delivery
-  // Automatic scaling
-}
-```
+- **`NexxusMessageQueueAdapter`** *(abstract)* — the contract. **You should have** a `do*` implementation for connect/disconnect/consume/cancel and a `publishMessage`; **watch out** that you wire the close handler to `onConnectionLost()` and encode through `serializePayload`.
+- **`NexxusMessageQueueBootstrapper`** *(abstract)* — deployment topology. **You should** make every declare idempotent; **watch out** to skip dynamic per-slot stages (workers declare those).
+- **`NexxusMessageCompressor`** — deployment-wide compression. **Watch out**: it's all-or-nothing across the fleet, since messages carry no algo marker.
+- **`NexxusRabbitMq` / `NexxusRabbitMqBootstrapper`** — the reference implementation and its management-API-based provisioning.
 
 ---
 
 ## Status
 
-🚧 **Work in Progress** - Additional adapters and patterns planned.
-
-**Coming Soon:**
-
-- Request-reply pattern support
-- Message compression
-- Schema validation
-- Monitoring and metrics integration
-
----
-
-## Related Packages
-
-- **[@mayhem93/nexxus-core](../core/)** - Queue payload types and constants
-- **[@mayhem93/nexxus-api](../api/)** - Publishes to writer queue
-- **[@mayhem93/nexxus-worker](../worker/)** - Consumes and publishes messages
-
----
+🚧 Pre-alpha. The adapter/bootstrapper contracts and the pipeline model are still moving; breaking changes land without deprecation shims.
 
 ## License
 
