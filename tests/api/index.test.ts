@@ -20,3 +20,4 @@ import './UserRoute';
 import './ModelRoute';
 import './SubscriptionRoute';
 import './Api';
+import './OpenApi';

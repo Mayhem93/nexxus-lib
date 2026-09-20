@@ -15,7 +15,8 @@
   },
   "files": [
     "dist-*/**",
-    "src/schemas/**/*.json"
+    "src/schemas/**/*.json",
+    "openapi.yaml"
   ],
   "homepage": "https://github.com/Mayhem93/nexxus-lib/tree/main/src/api",
   "keywords": [
@@ -55,7 +56,8 @@
     "@types/passport-google-oauth20": "^2.0.17",
     "@types/passport-local": "^1.0.38",
     "concurrently": "^9.2.1",
-    "typescript": "^6.0.0"
+    "typescript": "^6.0.0",
+    "yaml": "^2.9.1"
   },
   "repository": {
     "type": "git",

@@ -1,0 +1,1346 @@
+openapi: 3.1.1
+
+info:
+  title: Nexxus API
+  version: 0.0.10
+  summary: HTTP surface of a Nexxus deployment.
+  description: |
+    Nexxus is a config-driven, real-time backend-as-a-service. This document
+    describes the **framework** contract: the routes every deployment exposes
+    and the envelope every response carries.
+
+    ### Application-defined shapes
+
+    An application's data models are *runtime configuration*, not source code.
+    A deployment serving a fitness app and one serving a chat app expose the
+    same `/model/*` routes with entirely different payloads. Where the shape is
+    the application's to declare, the schema here says so — see `AppModel` and
+    `UserDetails`.
+
+    The same applies to `/auth/{strategy}`: which strategies exist is per
+    deployment (`api.auth.availableStrategies`) and per application
+    (`auth.strategies`).
+
+    ### Multi-tenancy
+
+    One deployment serves many applications. Almost every request carries an
+    `nxx-app-id` header naming which one. It is not a secret and can ship in
+    client code.
+
+    ### Authentication
+
+    A bearer token is issued by `/user/register`, `/auth/{strategy}` and
+    `/device/register`. It always names a **device**, and additionally names a
+    **user** when the application has authentication enabled. There is no
+    device header — the device is part of the token.
+
+    ### Dates
+
+    Every date is an integer UNIX timestamp in **seconds**.
+  license:
+    name: MPL-2.0
+    identifier: MPL-2.0
+
+servers:
+  - url: '{scheme}://{host}'
+    description: A self-hosted Nexxus deployment.
+    variables:
+      scheme:
+        enum: [ http, https ]
+        default: https
+        
+      host:
+        default: localhost:3000
+
+tags:
+  - name: Meta
+    description: Service-level endpoints.
+  - name: Authentication
+    description: Obtaining a token.
+  - name: Users
+    description: Accounts on applications that have authentication enabled.
+  - name: Devices
+    description: |
+      A device is one installation of a client. Subscriptions belong to a
+      device, and every token is bound to one.
+  - name: Models
+    description: |
+      CRUD over application-defined models. Writes are accepted asynchronously
+      (`202`) and applied shortly after.
+  - name: Subscriptions
+    description: |
+      Real-time channels. Subscribing returns the first page of data plus a
+      channel id; updates then arrive over the device's transport.
+
+paths:
+  /:
+    get:
+      tags: [ Meta ]
+      summary: Service greeting
+      description: |
+        Returns a static greeting. The only route that needs no application
+        header, token or device — use it as a liveness check.
+      security: []
+      responses:
+        '200':
+          description: The service is up.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+              example:
+                message: Welcome to the Nexxus API!
+
+  /auth/{strategy}:
+    post:
+      tags: [ Authentication ]
+      summary: Authenticate with a configured strategy
+      description: |
+        Authenticates against one of the application's configured strategies
+        and returns a session.
+
+        - `local` expects `username` and `password` in the body, and returns
+          the session directly.
+        - Redirect strategies (e.g. `google`) respond with a `302` to the
+          provider and complete at `/auth/{strategy}/callback`.
+
+        Which strategies exist is per deployment and per application. `local`
+        and `google` ship with the framework; others are resolved from
+        `node_modules` by package name. A `404` means this application has not
+        configured that strategy.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/AppId'
+        - name: strategy
+          in: path
+          required: true
+          description: Strategy name, e.g. `local` or `google`.
+          schema:
+            type: string
+          example: local
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                username:
+                  type: string
+                  description: Local strategy only.
+                password:
+                  type: string
+                  format: password
+                  description: Local strategy only.
+                userType:
+                  type: string
+                  description: |
+                    Redirect strategies only — the user type an account is
+                    created with if this is a first sign-in.
+                  default: default
+                device:
+                  $ref: '#/components/schemas/DeviceHint'
+      responses:
+        '200':
+          $ref: '#/components/responses/Session'
+        '302':
+          description: Redirect-based strategies send the caller to the provider.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: |
+            Authentication failed. The message does not distinguish an unknown
+            username from a wrong password.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Error'
+                  - type: object
+                    properties:
+                      error:
+                        const: UserAuthenticationFailedException
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /auth/{strategy}/callback:
+    get:
+      tags: [ Authentication ]
+      summary: Redirect-flow callback
+      description: |
+        Completes a redirect flow and returns a session. The provider sends
+        the caller here; a client does not call it directly. Registered only for
+        strategies that declare `requiresCallback`.
+
+        No `nxx-app-id` header — the application is identified by `state`, which
+        must come back exactly as issued and can only be redeemed once.
+      security: []
+      parameters:
+        - name: strategy
+          in: path
+          required: true
+          schema:
+            type: string
+          example: google
+        - name: state
+          in: query
+          required: true
+          description: The signed state issued when the flow started.
+          schema:
+            type: string
+        - name: code
+          in: query
+          description: Provider authorization code.
+          schema:
+            type: string
+      responses:
+        '200':
+          $ref: '#/components/responses/Session'
+        '400':
+          description: |
+            The `state` parameter is missing, malformed, unsigned, or has
+            already been redeemed.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Error'
+                  - type: object
+                    properties:
+                      error:
+                        const: InvalidParametersException
+        '401':
+          description: |
+            The provider declined, or returned an account whose email address it
+            has not verified. An unverified provider email is refused.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Error'
+                  - type: object
+                    properties:
+                      error:
+                        const: UserAuthenticationFailedException
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /user/register:
+    post:
+      tags: [ Users ]
+      summary: Create an account
+      description: |
+        Creates a user account and returns a session, so no separate login
+        call is needed. Requires an application with authentication and a
+        configured `local` strategy.
+
+        Any property beyond the ones listed is stored as a user **detail** and
+        must be declared in the application's `auth.userDetailSchema`. An
+        undeclared field is a `400`. See `UserDetails`.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/AppId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ username, password ]
+              properties:
+                username:
+                  type: string
+                password:
+                  type: string
+                  format: password
+                userType:
+                  type: string
+                  description: Must be a user type the application declares.
+                  default: default
+                device:
+                  $ref: '#/components/schemas/DeviceHint'
+              additionalProperties: true
+              examples:
+                - username: ann@example.com
+                  password: correct-horse-battery-staple
+                  device:
+                    id: 0f8b1e2a-...
+      responses:
+        '200':
+          $ref: '#/components/responses/Session'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/AppNotFound'
+        '409':
+          description: That username already exists on this application.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Error'
+                  - type: object
+                    properties:
+                      error:
+                        const: UserAlreadyExistsException
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /user/me:
+    get:
+      tags: [ Users ]
+      summary: The authenticated user
+      description: |
+        Returns the user the token names.
+
+        Reads the token, not the stored record. A change made through
+        `PUT /user` appears here only after the client authenticates again.
+      parameters:
+        - $ref: '#/components/parameters/AppId'
+      responses:
+        '200':
+          description: The user the token names.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          description: |
+            The token names no user. An application without authentication has
+            none to return.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Error'
+                  - type: object
+                    properties:
+                      error:
+                        const: InvalidAuthMethodException
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/AppNotFound'
+
+  /user:
+    put:
+      tags: [ Users ]
+      summary: Update the authenticated user
+      description: |
+        Applies a patch to the account the token names. There is no user
+        parameter.
+
+        Refused paths: `userType`, `authProviders`, `devices`, `createdAt`,
+        `updatedAt`, and anything under a `details.$…` key (see `UserDetails`).
+
+        Patching `password` hashes the value server-side and, on an account that
+        had none, adds `local` to `authProviders`.
+      parameters:
+        - $ref: '#/components/parameters/AppId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ patch ]
+              properties:
+                patch:
+                  $ref: '#/components/schemas/JsonPatch'
+      responses:
+        '200':
+          description: The patch was accepted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/AppNotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /device/register:
+    post:
+      tags: [ Devices ]
+      summary: Register a new device
+      description: |
+        Creates a device and returns a token bound to it. Use that token for
+        subsequent requests; the caller's previous token still names the
+        previous device.
+
+        This route always creates. To *reuse* an existing device, pass its id as
+        a hint when authenticating instead.
+
+        Works on an application without authentication, where the device has no
+        owner.
+      parameters:
+        - $ref: '#/components/parameters/AppId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ name ]
+              properties:
+                name:
+                  type: string
+                  description: Human-readable, shown in the user's device list.
+                  examples: [ Ann's Laptop ]
+      responses:
+        '200':
+          description: The device was created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  token:
+                    type: string
+                    description: A new token, bound to the device just created.
+                  device:
+                    $ref: '#/components/schemas/Device'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/AppNotFound'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /device/list:
+    get:
+      tags: [ Devices ]
+      summary: The authenticated user's devices
+      description: |
+        Returns every device registered to the user the token names. Requires
+        a token that names a user.
+
+        A device that no longer exists is omitted rather than failing the
+        request.
+      parameters:
+        - $ref: '#/components/parameters/AppId'
+      responses:
+        '200':
+          description: The devices currently readable for this user.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  devices:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Device'
+        '400':
+          description: The token names no user.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Error'
+                  - type: object
+                    properties:
+                      error:
+                        const: InvalidAuthMethodException
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/AppNotFound'
+
+  /device:
+    get:
+      tags: [ Devices ]
+      summary: The calling device
+      description: |
+        Returns the device the token names. There is no device parameter.
+      parameters:
+        - $ref: '#/components/parameters/AppId'
+      responses:
+        '200':
+          description: The device the token names.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Device'
+        '400':
+          $ref: '#/components/responses/NoDevice'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: |
+            The device no longer exists. Register a new one.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Error'
+                  - type: object
+                    properties:
+                      error:
+                        const: NotFoundException
+    put:
+      tags: [ Devices ]
+      summary: Rename the calling device
+      description: |
+        Renames the device the token names. There is no device parameter.
+      parameters:
+        - $ref: '#/components/parameters/AppId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ name ]
+              properties:
+                name:
+                  type: string
+      responses:
+        '200':
+          description: The device was renamed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '400':
+          $ref: '#/components/responses/NoDevice'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/AppNotFound'
+
+  /model:
+    post:
+      tags: [ Models ]
+      summary: Create a model instance
+      description: |
+        Creates one instance of a model type.
+
+        Accepted asynchronously — the object is persisted shortly after and is
+        not readable at the moment this returns.
+
+        A model declared `transient` is never stored; it goes straight to
+        subscribers.
+      parameters:
+        - $ref: '#/components/parameters/AppId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AppModelCreate'
+      responses:
+        '202':
+          $ref: '#/components/responses/WriteAccepted'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/ModelNotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /model/count:
+    post:
+      tags: [ Models ]
+      summary: Count matching instances
+      description: |
+        Returns how many instances of a model type match the filter.
+
+        Unlike `search`, the result is not narrowed by the caller's role: where
+        a role can only read its own rows, `count` still counts the rest.
+      parameters:
+        - $ref: '#/components/parameters/AppId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ type ]
+              properties:
+                type:
+                  type: string
+                  description: A model type the application's schema declares.
+                userId:
+                  type: string
+                  description: |
+                    Only usable on an application with authentication.
+                filter:
+                  $ref: '#/components/schemas/FilterQuery'
+      responses:
+        '200':
+          description: The number of matching instances.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      count:
+                        type: integer
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/ModelNotFound'
+
+  /model/{type}/search:
+    post:
+      tags: [ Models ]
+      summary: Search instances of a model
+      description: |
+        Returns instances of a model type matching the filter, paginated.
+
+        Where ACLs are enabled, results are limited to the rows the caller's
+        role permits.
+      parameters:
+        - $ref: '#/components/parameters/AppId'
+        - name: type
+          in: path
+          required: true
+          description: A model type the application's schema declares.
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                id:
+                  type: string
+                  description: Mutually exclusive with `userId`.
+                userId:
+                  type: string
+                  description: |
+                    Only usable on an application with authentication. Mutually
+                    exclusive with `id`.
+                filter:
+                  $ref: '#/components/schemas/FilterQuery'
+                limit:
+                  type: integer
+                  minimum: 1
+                  description: Defaults to the application's `defaultLimit`.
+                offset:
+                  type: integer
+                  minimum: 0
+                  default: 0
+      responses:
+        '200':
+          description: Matching instances.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/AppModel'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/ModelNotFound'
+
+  /model/{id}:
+    get:
+      tags: [ Models ]
+      summary: Read one instance
+      description: |
+        Fetches a single object by id.
+
+        Use it to **re-hydrate** an object a subscription did not deliver. A
+        filtered subscription only carries objects matching its filter, so an
+        object that changes in a way which moves it into scope — or that was
+        already out of scope when the client subscribed — has no update to
+        arrive on. This is how a client fills that gap.
+
+        A direct read, not a search: no filter, no pagination.
+      parameters:
+        - $ref: '#/components/parameters/AppId'
+        - $ref: '#/components/parameters/ModelId'
+        - name: type
+          in: query
+          required: true
+          description: A model type the application's schema declares.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The instance.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/AppModel'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/ModelNotFound'
+    put:
+      tags: [ Models ]
+      summary: Patch one instance
+      description: |
+        Applies a patch to one instance.
+
+        Accepted asynchronously. A `transient` model cannot be updated.
+
+        An object the caller's role may not write is refused with `403` whether
+        or not it exists.
+      parameters:
+        - $ref: '#/components/parameters/AppId'
+        - $ref: '#/components/parameters/ModelId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ type, patch ]
+              properties:
+                type:
+                  type: string
+                  description: A model type the application's schema declares.
+                patch:
+                  $ref: '#/components/schemas/JsonPatch'
+      responses:
+        '202':
+          $ref: '#/components/responses/WriteAccepted'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/ModelNotFound'
+    delete:
+      tags: [ Models ]
+      summary: Delete one instance
+      description: |
+        Deletes one instance. Accepted asynchronously. A `transient` model
+        cannot be deleted.
+      parameters:
+        - $ref: '#/components/parameters/AppId'
+        - $ref: '#/components/parameters/ModelId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ type ]
+              properties:
+                type:
+                  type: string
+                  description: A model type the application's schema declares.
+      responses:
+        '202':
+          $ref: '#/components/responses/WriteAccepted'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/ModelNotFound'
+
+  /subscription:
+    post:
+      tags: [ Subscriptions ]
+      summary: Subscribe to a channel
+      description: |
+        Records the subscription against the calling device and returns the
+        first page of matching data, so the client starts in sync. Later changes
+        arrive over the device's transport.
+
+        The device must already be connected to a transport.
+
+        Where ACLs are enabled, both the first page and the live updates are
+        limited to the rows the caller's role permits.
+      parameters:
+        - $ref: '#/components/parameters/AppId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ model ]
+              properties:
+                model:
+                  type: string
+                  description: |
+                    A model type the application declares, and one it has not
+                    marked `subscribable: false`.
+                id:
+                  type: string
+                userId:
+                  type: string
+                filter:
+                  $ref: '#/components/schemas/FilterQuery'
+                limit:
+                  type: integer
+                  minimum: 1
+                offset:
+                  type: integer
+                  minimum: 0
+      responses:
+        '200':
+          description: Subscribed, with the first page of data.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      channelId:
+                        type: string
+                        description: |
+                          Identifies the channel updates will arrive on. Sending
+                          the same descriptor to `DELETE` removes this
+                          subscription.
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/AppModel'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: |
+            The model type is not declared, or the calling device no longer
+            exists.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Error'
+                  - type: object
+                    properties:
+                      error:
+                        enum: [ ModelNotFoundException, NotFoundException ]
+        '409':
+          description: The device is not connected to any transport.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Error'
+                  - type: object
+                    properties:
+                      error:
+                        const: DeviceNotConnectedException
+    delete:
+      tags: [ Subscriptions ]
+      summary: Unsubscribe from a channel
+      description: |
+        Removes a subscription. Takes the same descriptor that created it; a
+        descriptor matching no existing subscription is a `404`.
+      parameters:
+        - $ref: '#/components/parameters/AppId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ model ]
+              properties:
+                model:
+                  type: string
+                id:
+                  type: string
+                userId:
+                  type: string
+                filter:
+                  $ref: '#/components/schemas/FilterQuery'
+      responses:
+        '200':
+          description: The subscription was removed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      channel:
+                        type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: |
+            The model type is not declared, the device no longer exists, or the
+            device holds no such subscription.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: The device is not connected to any transport.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Error'
+                  - type: object
+                    properties:
+                      error:
+                        const: DeviceNotConnectedException
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Issued by `/user/register`, `/auth/{strategy}` and `/device/register`.
+        Names a device, and a user where the application has authentication.
+
+  parameters:
+    AppId:
+      name: nxx-app-id
+      in: header
+      required: true
+      description: |
+        Which application this request is for. Not a secret; it can ship in
+        client code.
+      schema:
+        type: string
+    ModelId:
+      name: id
+      in: path
+      required: true
+      description: Instance id.
+      schema:
+        type: string
+
+  schemas:
+    Error:
+      type: object
+      description: |
+        Every failure uses this shape. `error` is a stable identifier to branch
+        on; `message` is for humans and may change.
+      required: [ error, message ]
+      properties:
+        error:
+          type: string
+          description: Identifies the failure.
+        message:
+          type: string
+        stack:
+          type: string
+          description: Present only when the deployment runs with `NODE_ENV=dev`.
+
+    DeviceHint:
+      type: object
+      description: |
+        What a client can say about the device it is calling from. An `id` that
+        does not resolve to a device this caller owns is ignored and a new
+        device is issued; it is not an error.
+      properties:
+        id:
+          type: string
+          description: The device id from a previous session.
+        name:
+          type: string
+          description: Used only when a new device is created.
+
+    Device:
+      type: object
+      properties:
+        id:
+          type: string
+        appId:
+          type: string
+        userId:
+          type: string
+          description: Absent on an application without authentication.
+        name:
+          type: string
+        type:
+          type: string
+          enum: [ volatile, persistent, unknown ]
+        status:
+          type: string
+          enum: [ online, offline ]
+        lastSeen:
+          type: string
+          format: date-time
+        transport:
+          type: [ string, 'null' ]
+          description: |
+            The transport this device is connected through. `null` when it is
+            not connected.
+
+    User:
+      type: object
+      description: |
+        The user as carried by the token. Never includes a password.
+      properties:
+        id:
+          type: string
+        username:
+          type: string
+        userType:
+          type: string
+        appId:
+          type: string
+        authProviders:
+          type: array
+          items:
+            type: string
+          description: Which strategies this account can authenticate with.
+        details:
+          $ref: '#/components/schemas/UserDetails'
+
+    UserDetails:
+      type: object
+      description: |
+        A user's profile fields. Two kinds of key live here.
+
+        **Yours.** Whatever the application declares in `auth.userDetailSchema`
+        for that user type. Sending a field it does not declare is a `400`.
+        These are the only keys this response contains.
+
+        **The auth providers'.** Each auth strategy enabled on the application
+        owns a `$auth_<strategy>` namespace on the stored record — `$auth_local`,
+        `$auth_google`, and one per third-party strategy the deployment installs
+        — holding what that provider reported about the account (Google
+        contributes `name` and `id`). The strategy declares those contents, not
+        your `auth.userDetailSchema`.
+
+        They are written at login and are **not returned by the API**. To tell
+        which providers an account is linked to, read `authProviders` on the
+        user.
+
+        Every key beginning with `$` is reserved. Sending one to
+        `/user/register`, or patching one through `PUT /user`, is a `400`.
+      additionalProperties: true
+
+    AppModel:
+      type: object
+      description: |
+        **Application-defined.** An instance of a model declared in the
+        application's schema, so the meaningful properties differ per
+        deployment. The framework-managed envelope below is always present; a
+        deployment's own fields sit alongside it.
+      required: [ id, type, appId, createdAt, updatedAt ]
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          description: The model type, as declared in the application schema.
+        appId:
+          type: string
+        userId:
+          type: string
+          description: Who created it.
+        createdAt:
+          type: integer
+          description: UNIX timestamp in seconds.
+        updatedAt:
+          type: integer
+          description: UNIX timestamp in seconds.
+        version:
+          type: integer
+          readOnly: true
+          description: |
+            Increments on every write. Use it to detect missed updates.
+      additionalProperties: true
+
+    AppModelCreate:
+      type: object
+      description: |
+        **Application-defined.** What a client sends to create an instance:
+        `type`, plus the fields the application's schema declares for that type.
+        Nothing else — an undeclared field is a `400`.
+
+        The framework-managed fields are not part of this body:
+
+        - `id`, `createdAt` and `updatedAt` are generated when absent.
+        - `appId` and `userId` are set by the server; values sent here are
+          overwritten.
+        - `version` is rejected.
+      required: [ type ]
+      properties:
+        type:
+          type: string
+          description: A model type the application's schema declares.
+      additionalProperties: true
+      examples:
+        - type: runs
+          distance: 5000
+          note: Morning loop
+
+    JsonPatch:
+      type: object
+      description: |
+        Nexxus's own patch shape — `path` and `value` are parallel arrays, so
+        one patch can touch several fields. Not RFC 6902.
+      required: [ op, path, value ]
+      properties:
+        op:
+          type: string
+          enum: [ replace, append, prepend, incr, decr, remove ]
+        path:
+          type: array
+          items:
+            type: string
+          description: |
+            Dot-separated field paths, e.g. `details.age`. Must be declared in
+            the model's schema.
+        value:
+          type: array
+          description: |
+            One entry per `path`, in the same order. Each entry is typed by the
+            field it targets, so the element type is whatever the application's
+            schema declares — a string, a number, a date, an object, an array.
+          items:
+            description: |
+              Any JSON value the target field accepts. Dates may be sent as a
+              UNIX timestamp in seconds or as a parseable date string; both are
+              stored as seconds.
+      examples:
+        - op: replace
+          path: [ details.age, details.nickname ]
+          value: [ 31, ann ]
+
+    FilterQuery:
+      type: object
+      description: |
+        Matches on fields the model declares `filterable: true`. Leaf entries
+        are `field: value`; `$and` and `$or` nest.
+      properties:
+        $and:
+          type: array
+          items:
+            $ref: '#/components/schemas/FilterQuery'
+        $or:
+          type: array
+          items:
+            $ref: '#/components/schemas/FilterQuery'
+      additionalProperties: true
+      examples:
+        - $and:
+            - status: active
+            - distance: 5
+
+  responses:
+    Session:
+      description: |
+        A token, the device it is bound to, and the user it names.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              token:
+                type: string
+              device:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  name:
+                    type: string
+              user:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  username:
+                    type: string
+
+    WriteAccepted:
+      description: |
+        Accepted for asynchronous processing. The write is applied shortly
+        after; it is not readable at the moment this returns.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              message:
+                type: string
+
+    BadRequest:
+      description: The request is malformed or a parameter is invalid.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: '#/components/schemas/Error'
+              - type: object
+                properties:
+                  error:
+                    enum:
+                      - InvalidParametersException
+                      - InvalidAuthMethodException
+
+    Unauthorized:
+      description: |
+        No token was presented on an application that requires one, or the token
+        is invalid or expired.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: '#/components/schemas/Error'
+              - type: object
+                properties:
+                  error:
+                    enum:
+                      - NoAuthPresentException
+                      - UserAuthenticationFailedException
+                      - UserTokenExpiredException
+
+    Forbidden:
+      description: |
+        The caller's role does not permit this action, or does not permit it
+        on this object.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: '#/components/schemas/Error'
+              - type: object
+                properties:
+                  error:
+                    const: AccessDeniedException
+
+    NotFound:
+      description: The requested resource does not exist.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: '#/components/schemas/Error'
+              - type: object
+                properties:
+                  error:
+                    const: NotFoundException
+
+    AppNotFound:
+      description: No application matches the `nxx-app-id` header.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: '#/components/schemas/Error'
+              - type: object
+                properties:
+                  error:
+                    const: ApplicationNotFoundException
+
+    ModelNotFound:
+      description: |
+        The application's schema declares no such model type, or the instance
+        does not exist.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: '#/components/schemas/Error'
+              - type: object
+                properties:
+                  error:
+                    const: ModelNotFoundException
+
+    NoDevice:
+      description: |
+        This route acts on the calling device, and the token names none.
+        Register a device and use the token it returns.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: '#/components/schemas/Error'
+              - type: object
+                properties:
+                  error:
+                    const: InvalidParametersException
+
+    ServerError:
+      description: |
+        An unexpected failure. The message is generic.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: '#/components/schemas/Error'
+              - type: object
+                properties:
+                  error:
+                    const: ServerErrorException
+
+    Unavailable:
+      description: |
+        An upstream service is currently disconnected. Retry.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: '#/components/schemas/Error'
+              - type: object
+                properties:
+                  error:
+                    const: ServiceUnavailableException
+
+security:
+  - bearerAuth: []
