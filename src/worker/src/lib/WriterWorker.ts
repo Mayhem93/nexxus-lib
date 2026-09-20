@@ -10,6 +10,7 @@ import {
   INexxusAppModel
 } from '@mayhem93/nexxus-core-lib';
 import { NexxusQueueMessage } from '@mayhem93/nexxus-message-queue-lib';
+import { NexxusModelFieldCache } from '@mayhem93/nexxus-redis';
 import {
   NexxusBaseWorker,
   NexxusBaseWorkerEvents,
@@ -76,10 +77,36 @@ export class NexxusWriterWorker extends NexxusBaseWorker<
           modelType: payload.data.type
         }, NexxusWriterWorker.loggerLabel);
 
-        this.publish('transport-manager', {
+        await this.publish('transport-manager', {
           event: 'model_created',
           data: appModel.getData(),
         });
+
+        // Mirror the ACL field projection into the Redis field cache: the
+        // always-cached builtins (id/userId/createdAt) plus any schema fields
+        // flagged `acl: true`. Best-effort — the DB write already succeeded.
+        if (app.isAclEnabled()) {
+          const data = appModel.getData();
+          const cacheFields: Record<string, unknown> = {
+            id: data.id,
+            createdAt: data.createdAt,
+          };
+
+          if (data.userId !== undefined) {
+            cacheFields.userId = data.userId;
+          }
+
+          for (const field of app.getAclFields(data.type)) {
+            if (data[field] !== undefined) {
+              cacheFields[field] = data[field];
+            }
+          }
+
+          await this.safeFieldCacheOp(
+            () => new NexxusModelFieldCache(data.id as string, cacheFields).save(),
+            `create cache for "${data.id}"`
+          );
+        }
 
         break;
       }
@@ -89,7 +116,12 @@ export class NexxusWriterWorker extends NexxusBaseWorker<
 
         for (const patchData of payload.data) {
           const app = NexxusWriterWorker.loadedApps.get(patchData.metadata.appId!);
-          const modelSchema = app!.getAppModelSchema(patchData.metadata.type);
+
+          if (!app) {
+            throw new Error(`App not found for model_updated: appId=${patchData.metadata.appId}`);
+          }
+
+          const modelSchema = app.getAppModelSchema(patchData.metadata.type);
           const jsonPatch = new NexxusJsonPatch(patchData);
 
           jsonPatch.validate(modelSchema);
@@ -103,11 +135,20 @@ export class NexxusWriterWorker extends NexxusBaseWorker<
 
           updateUpdatedAtPatch.validate(modelSchema);
 
+          // ACL fields are added to returnFields so their post-write values
+          // come back in the partial model and can be written through to the
+          // field cache below (only when the app uses ACLs).
+          const aclFields = app.isAclEnabled()
+            ? app.getAclFields(patchData.metadata.type)
+            : new Set<string>();
+          const returnFields = new Set<string>([
+            ...app.getModelFilterableFields(patchData.metadata.type),
+            ...aclFields
+          ]);
+
           const result = await NexxusWriterWorker.database.updateItems(
             [jsonPatch, updateUpdatedAtPatch],
-            {
-              returnFields: app?.getModelFilterableFields(patchData.metadata.type)
-            }
+            { returnFields }
           ) as Array<Partial<INexxusAppModel>>;
 
           if (!result[0]) {
@@ -117,6 +158,27 @@ export class NexxusWriterWorker extends NexxusBaseWorker<
             );
 
             return ;
+          }
+
+          // Write-through the acl fields this patch actually touched. A partial
+          // entry (e.g. after a TTL expiry) is fine — the read path backfills
+          // missing builtins from the DB on the next cache miss.
+          if (app.isAclEnabled() && aclFields.size > 0) {
+            const patchedTopLevel = new Set(patchData.path.map(p => p.split('.')[0]));
+            const changed: Record<string, unknown> = {};
+
+            for (const field of aclFields) {
+              if (patchedTopLevel.has(field) && result[0][field] !== undefined) {
+                changed[field] = result[0][field];
+              }
+            }
+
+            if (Object.keys(changed).length > 0) {
+              await this.safeFieldCacheOp(
+                () => new NexxusModelFieldCache(patchData.metadata.id, changed).save(),
+                `update cache for "${patchData.metadata.id}"`
+              );
+            }
           }
 
           const transformedPatchData = jsonPatch.get();
@@ -147,7 +209,7 @@ export class NexxusWriterWorker extends NexxusBaseWorker<
           modelType: payload.data[0].metadata.type
         }, NexxusWriterWorker.loggerLabel);
 
-        this.publish('transport-manager', {
+        await this.publish('transport-manager', {
           event: 'model_updated',
           data: validatedPatches,
         });
@@ -162,7 +224,11 @@ export class NexxusWriterWorker extends NexxusBaseWorker<
           throw new Error(`App not found for model_deleted: appId=${payload.data.appId}`);
         }
 
-        const appModel = new NexxusAppModel(payload.data as INexxusAppModel, app.getSchema());
+        // Trusted path: a delete only needs id/appId/type to address the
+        // document, so re-validating the whole payload against the schema
+        // would add nothing and would reject an otherwise-valid delete whose
+        // payload omits a required field.
+        const appModel = NexxusAppModel.fromStorage(payload.data as INexxusAppModel);
 
         await NexxusWriterWorker.database.deleteItems([ appModel ]);
 
@@ -172,15 +238,38 @@ export class NexxusWriterWorker extends NexxusBaseWorker<
           modelType: payload.data.type
         }, NexxusWriterWorker.loggerLabel);
 
-        this.publish('transport-manager', {
+        await this.publish('transport-manager', {
           event: 'model_deleted',
           data: payload.data,
         });
+
+        if (app.isAclEnabled()) {
+          await this.safeFieldCacheOp(
+            () => NexxusModelFieldCache.remove(payload.data.id as string),
+            `delete cache for "${payload.data.id}"`
+          );
+        }
 
         break;
       }
       default:
         NexxusWriterWorker.logger.warn(`Unknown event type: ${(payload as NexxusBaseQueuePayload).event}`, NexxusWriterWorker.loggerLabel);
+    }
+  }
+
+  /**
+   * Run a field-cache mutation best-effort: the authoritative DB write has
+   * already succeeded, so a Redis failure here is logged and swallowed rather
+   * than failing the message (which would redeliver and re-run the DB write).
+   */
+  private async safeFieldCacheOp(op: () => Promise<void>, context: string): Promise<void> {
+    try {
+      await op();
+    } catch (e) {
+      NexxusWriterWorker.logger.warn(
+        `Field cache op failed (${context}) — non-fatal: ${(e as Error).message}`,
+        NexxusWriterWorker.loggerLabel
+      );
     }
   }
 }

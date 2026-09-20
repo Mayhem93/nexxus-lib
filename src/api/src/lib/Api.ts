@@ -13,7 +13,13 @@ import {
   MODEL_REGISTRY,
   FatalErrorException,
   InvalidConfigException,
-  INexxusUser,
+  NexxusAclManager,
+  authDetailKey,
+  type NexxusUserDetailSchema,
+  NexxusAclRole,
+  DEFAULT_ACL_ROLE,
+  DEFAULT_ACL_ROLE_ID,
+  NexxusTokenUser,
   WinstonNexxusLogger,
   resolveConstructableServiceClass,
   resolveFactoryServiceClass,
@@ -34,7 +40,6 @@ import {
 } from '@mayhem93/nexxus-redis';
 import {
   RootRoute,
-  ApplicationRoute,
   DeviceRoute,
   UserRoute,
   SubscriptionRoute,
@@ -66,21 +71,20 @@ import {
  * here and instantiates one per Application during init.
  *
  * Constructor args mirror `NexxusAuthStrategy`:
- *   - `config`        — per-strategy config from `app.auth.strategies[name]`
- *   - `appId`         — owning Application id (becomes part of the Passport
- *                       registration name so each tenant is isolated)
- *   - `jwtSecret`     — per-app JWT signing secret from `app.auth.jwtSecret`
- *   - `jwtExpiresIn?` — per-app JWT expiry, defaults to '7d' inside the base
+ *   - `config` — per-strategy config from `app.auth.strategies[name]`
+ *   - `app`    — the owning Application. Carries the signing key, the token
+ *                lifetime and the id the Passport registration is scoped by,
+ *                so none of them can be passed inconsistently.
  */
 export type NexxusAuthStrategyCtor = {
   new (
     config: NexxusBaseAuthStrategyConfig,
-    appId: string,
-    jwtSecret: string,
-    jwtExpiresIn?: string
+    app: NexxusApplication
   ): NexxusAuthStrategy;
   /** Class-level — true for OAuth-style strategies needing a `/callback` route. */
   readonly requiresCallback: boolean;
+  /** Class-level — the detail fields this strategy owns, stored at `$auth_<name>`. */
+  readonly userDetailSchema: NexxusUserDetailSchema;
 };
 
 import * as path from 'node:path';
@@ -95,21 +99,41 @@ import passport from 'passport';
 
 export type NexxusApiHeaders = {
   'nxx-app-id'?: Readonly<string>;
-  'nxx-device-id'?: Readonly<string>;
 };
 
 export interface NexxusApiRequest extends Express.Request {
   headers: NexxusApiHeaders & IncomingHttpHeaders;
   user?: NexxusApiUser;
+  /**
+   * Device this request was made from, taken from the verified token by
+   * `AuthMiddleware`. Undefined when the caller presented no token, or a token
+   * minted before a device was resolved for it.
+   *
+   * This is the ONLY trustworthy source of a device id. It replaced the
+   * `nxx-device-id` header, which was a claim the client wrote and nothing
+   * verified.
+   */
+  deviceId?: string;
+  /**
+   * Verified redirect-flow state, set by an OAuth strategy's `handleCallback`
+   * once the signature has been checked and the nonce redeemed. The passport
+   * verify callback reads it from here rather than re-parsing `req.query.state`,
+   * so what it acts on is the verified payload and not attacker-supplied input.
+   */
+  authState?: {
+    appId: string;
+    userType: string;
+  };
 }
 
-export type NexxusApiUser = Pick<INexxusUser, | 'username' | 'userType' | 'authProviders' | 'details' | 'appId'> & {
-  id: string;
-  iat?: number;
-  exp?: number;
-  aud?: string;
-  iss?: string;
-}
+/**
+ * The principal on a request, as carried by its token.
+ *
+ * Defined in core (`NexxusTokenUser`) because the token shape is a contract
+ * between packages — the API mints, the transport workers verify — and aliased
+ * here so API code reads in API terms.
+ */
+export type NexxusApiUser = NexxusTokenUser;
 
 export interface NexxusApiResponse extends Express.Response {}
 
@@ -216,7 +240,7 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig, {}, NexxusApiS
     }
   ];
 
-  protected static configRootKey: string = "app";
+  protected static configRootKey: string = 'app';
   protected static schemaPath: string = path.join(__dirname, '../../src/schemas/api.schema.json');
 
   /**
@@ -464,7 +488,6 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig, {}, NexxusApiS
       this.registerAuthRoutes();
     }
 
-    new ApplicationRoute(this.express);
     new DeviceRoute(this.express);
     new UserRoute(this.express);
     new SubscriptionRoute(this.express);
@@ -481,9 +504,29 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig, {}, NexxusApiS
       this.server = this.express.listen(this.config.port);
     }
 
-    this.server?.on('listening', () => {
-      NexxusApi.logger.info(`API service is listening on port ${this.config.port}`, NexxusApi.loggerLabel);
+    // AWAIT the socket actually accepting, rather than just scheduling the
+    // listen. `listen()` returns immediately, so without this `init()` resolves
+    // while connections are still being refused — and the next thing it does is
+    // register with Hub, advertising a port this node can't yet serve. A bind
+    // failure (EADDRINUSE) also surfaces here as a rejection instead of an
+    // unhandled 'error' event.
+    await new Promise<void>((resolve, reject) => {
+      const server = this.server!;
+      const onError = (err: Error): void => { server.off('listening', onListening); reject(err); };
+      const onListening = (): void => { server.off('error', onError); resolve(); };
+
+      if (server.listening) {
+        return resolve();
+      }
+
+      server.once('listening', onListening);
+      server.once('error', onError);
     });
+
+    NexxusApi.logger.info(
+      `API service is listening on port ${this.config.port}`,
+      NexxusApi.loggerLabel,
+    );
 
     // Boot the management HTTP server last, once every other subsystem is
     // wired. `getStats()` responses will reflect a fully-initialized node.
@@ -578,7 +621,7 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig, {}, NexxusApiS
     await this.unregisterFromHub();
     this.hubClient = null;
 
-    this.managementServer?.close();
+    await this.managementServer?.close();
     this.managementServer = null;
 
     if (this.server) {
@@ -689,7 +732,7 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig, {}, NexxusApiS
 
     switch (name) {
       case 'local':
-        StrategyCtor = NexxusLocalAuthStrategy as unknown as NexxusAuthStrategyCtor;
+        StrategyCtor = NexxusLocalAuthStrategy;
 
         break;
 
@@ -727,7 +770,7 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig, {}, NexxusApiS
           );
         }
 
-        StrategyCtor = Ctor as NexxusAuthStrategyCtor;
+        StrategyCtor = Ctor;
       }
     }
 
@@ -784,17 +827,27 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig, {}, NexxusApiS
 
       if (requiresCallback) {
         this.express.get(`/auth/${name}/callback`, (req, res, next) => {
-          // OAuth providers redirect here. The state param carries appId by
-          // convention (e.g. Google's state is "<appId>|<userType>"). The
-          // `nxx-app-id` header isn't available on callbacks because they
-          // come from the provider's redirect, not from the client.
+          // OAuth providers redirect here. The `nxx-app-id` header isn't
+          // available on callbacks — they come from the provider's redirect,
+          // not from the client — so the appId rides in the signed `state`.
+          //
+          // This read is UNVERIFIED, and can only be: verifying the signature
+          // needs the app's secret, and finding the app is what we're doing.
+          // So it selects which key to check against, nothing more — a forged
+          // appId picks a different key and the strategy's own `verifyState`
+          // then rejects it.
           const state = req.query.state as string | undefined;
 
           if (!state) {
             return next(new InvalidParametersException('Missing state parameter'));
           }
 
-          const [appId] = state.split('|');
+          const appId = NexxusAuthStrategy.peekStateAppId(state);
+
+          if (!appId) {
+            return next(new InvalidParametersException('Malformed state parameter'));
+          }
+
           const strategy = this.getAppAuthStrategy(appId, name);
 
           if (!strategy) {
@@ -858,6 +911,11 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig, {}, NexxusApiS
         );
       }
 
+      // Detail fields the app's strategies own, folded into every user type's
+      // detail schema below. Built alongside the instances so an app that
+      // enables a strategy gets its `$auth_*` namespace in the same pass.
+      const authDetailSchema: NexxusUserDetailSchema = {};
+
       for (const [strategyName, strategyConfig] of Object.entries(appAuth.strategies)) {
         if (!availableStrategies.includes(strategyName)) {
           throw new FatalErrorException(
@@ -866,12 +924,18 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig, {}, NexxusApiS
         }
 
         const StrategyCtor = this.authStrategyClasses.get(strategyName)!;
-        const instance = new StrategyCtor(
-          strategyConfig as NexxusBaseAuthStrategyConfig,
-          appId,
-          appAuth.jwtSecret,
-          appAuth.jwtExpiresIn
-        );
+        const instance = new StrategyCtor(strategyConfig as NexxusBaseAuthStrategyConfig, app);
+        const ownDetails = StrategyCtor.userDetailSchema;
+
+        // A strategy that learns nothing about the user (local) contributes no
+        // namespace at all, rather than an empty object nothing can be stored in.
+        if (Object.keys(ownDetails).length > 0) {
+          authDetailSchema[authDetailKey(strategyName)] = {
+            type: 'object',
+            required: false,
+            properties: ownDetails
+          };
+        }
 
         // Wire passport.use(passportName, ...) for THIS instance. Each
         // strategy's `passportName` is `${name}:${appId}`, so two apps using
@@ -885,6 +949,11 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig, {}, NexxusApiS
           NexxusApi.loggerLabel
         );
       }
+
+      // Hand the merged namespaces to the Application so every reader of a
+      // detail schema — patch validation, username lookup, device linking —
+      // sees the same shape. Same pattern as `setRoleManagers`.
+      app.setAuthDetailSchema(authDetailSchema);
     }
   }
 
@@ -930,6 +999,66 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig, {}, NexxusApiS
     }
 
     NexxusApi.logger.info(`Loaded ${NexxusApi.loadedApps.size} applications into API service`, NexxusApi.loggerLabel);
+
+    await NexxusApi.loadAclRoles();
+  }
+
+  /**
+   * Load each ACL-enabled app's roles from its `acl` index and attach one
+   * `NexxusAclManager` per role to the app (keyed by role name). The framework
+   * default role is always created in-memory; a persisted role reusing the
+   * default id is ignored (the default is not overridable). Finally, validate
+   * that every `userTypes[*].roles` reference resolves to a loaded role.
+   *
+   * Runs one query per ACL-enabled app, in parallel.
+   */
+  private static async loadAclRoles(): Promise<void> {
+    const aclApps = [...NexxusApi.loadedApps.values()].filter(app => app.isAclEnabled());
+
+    await Promise.all(aclApps.map(async app => {
+      const appId = app.getData().id as string;
+      const dbRoles = await NexxusApi.database.searchItems({ appId, type: MODEL_REGISTRY.acl });
+
+      const defaultRole = new NexxusAclRole({ ...DEFAULT_ACL_ROLE, appId });
+
+      defaultRole.validateAgainstSchema(app);
+
+      const managers: NexxusAclManager[] = [ new NexxusAclManager(defaultRole) ];
+
+      for (const role of dbRoles) {
+        if (role.getName() === DEFAULT_ACL_ROLE_ID) {
+          NexxusApi.logger.warn(
+            `Ignoring role "${DEFAULT_ACL_ROLE_ID}" persisted for app "${appId}" — the default role cannot be overridden`,
+            NexxusApi.loggerLabel,
+          );
+
+          continue;
+        }
+
+        role.validateAgainstSchema(app);
+        managers.push(new NexxusAclManager(role));
+      }
+
+      app.setRoleManagers(managers);
+
+      // Fail fast on dangling role references so a typo surfaces at boot.
+      const userTypes = app.getUserTypes() ?? {};
+
+      for (const [userType, cfg] of Object.entries(userTypes)) {
+        for (const roleName of cfg.roles ?? []) {
+          if (!app.getRoleManager(roleName)) {
+            throw new FatalErrorException(
+              `Application "${appId}" user type "${userType}" references unknown ACL role "${roleName}"`
+            );
+          }
+        }
+      }
+
+      NexxusApi.logger.debug(
+        `Loaded ${managers.length} ACL role(s) for app "${appId}"`,
+        NexxusApi.loggerLabel,
+      );
+    }));
   }
 
   public static getStoredApp(appId: string): NexxusApplication | undefined {

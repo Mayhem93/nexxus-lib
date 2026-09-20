@@ -1,0 +1,43 @@
+name: Tests
+
+on:
+  pull_request:
+    branches: [ main ]
+
+# A new push to the same PR makes the in-flight run redundant.
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Matches `engines.node` in the root package.json.
+          node-version: 24
+          cache: npm
+
+      # `ci` rather than `install`: installs exactly what the lockfile pins and
+      # fails if package.json and the lockfile have drifted.
+      - run: npm ci
+
+      # No build step — vitest resolves `@mayhem93/nexxus-*` to each package's
+      # TypeScript SOURCE (see resolve.alias in vitest.config.ts), so the suite
+      # runs against current code rather than a stale dist.
+      #
+      # No services either: every adapter is faked, so there is nothing to spin
+      # up in a container.
+      #
+      # Tests only, without coverage: this job answers "do the tests pass", and
+      # shouldn't be able to fail for a coverage-tooling reason. The number is
+      # published from main by coverage.yml.
+      - run: npm test

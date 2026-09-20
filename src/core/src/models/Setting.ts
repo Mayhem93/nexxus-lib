@@ -2,7 +2,7 @@ import {
   INexxusBaseModel,
   MODEL_REGISTRY
 } from './BaseModel';
-import { NexxusBuiltinModel } from './BuiltinModel';
+import { NexxusBuiltinModel } from './BaseModel';
 import { NexxusModelDef } from '../common/ModelTypes';
 import { InferModel } from '../common/InferModel';
 import { NEXXUS_BUILTIN_MODEL_SCHEMAS } from '../common/BuiltinSchemas';

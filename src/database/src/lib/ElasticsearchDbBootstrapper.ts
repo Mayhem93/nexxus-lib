@@ -17,7 +17,8 @@ import { NexxusDatabaseAdapter, NexxusDatabaseBootstrapper } from './DatabaseAda
  * more machinery than clarity.
  */
 type EsFieldMapping =
-  | { type: 'keyword' | 'boolean' | 'date' | 'double' | 'long' }
+  | { type: 'keyword' | 'boolean' | 'double' | 'long' }
+  | { type: 'date'; format: string }
   | { type: 'object'; properties?: Record<string, EsFieldMapping>; enabled?: boolean }
   | { properties: Record<string, EsFieldMapping> };
 
@@ -170,6 +171,16 @@ export class NexxusElasticsearchDbBootstrapper extends NexxusDatabaseBootstrappe
         this.buildMapping(userSchema, false),
       );
     }
+
+    // Per-app ACL roles index — only when ACLs are enabled (which implies
+    // auth). One document per role; app-scoped like `user`, so it's a
+    // built-in mapping (no version field).
+    if (app.isAclEnabled()) {
+      await this.createIndexIfMissing(
+        `${NEXXUS_PREFIX_LC}-app-${appId}-acl`,
+        this.buildMapping(NEXXUS_BUILTIN_MODEL_SCHEMAS.acl as NexxusModelDef, false),
+      );
+    }
   }
 
   /**
@@ -228,7 +239,11 @@ export class NexxusElasticsearchDbBootstrapper extends NexxusDatabaseBootstrappe
       case 'int':     return { type: 'long'  };
       case 'float':   return { type: 'double'  };
       case 'boolean': return { type: 'boolean' };
-      case 'date':    return { type: 'date'    };
+      // `epoch_second` is not optional here: Nexxus stores every date as an
+      // integer UNIX timestamp in SECONDS, and an ES date field with no format
+      // reads a bare number as epoch MILLISECONDS — which would silently park
+      // every document in January 1970.
+      case 'date':    return { type: 'date', format: 'epoch_second' };
       case 'array':
         if (def.arrayType === 'object') {
           return def.properties && Object.keys(def.properties).length > 0

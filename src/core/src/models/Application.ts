@@ -2,18 +2,25 @@ import {
   INexxusBaseModel,
   MODEL_REGISTRY
 } from './BaseModel';
-import { NexxusBuiltinModel } from './BuiltinModel';
+import { NexxusBuiltinModel } from './BaseModel';
 import {
   NexxusFieldDef,
-  NexxusModelDef,
-  PrimitiveFieldDef
+  NexxusModelDef
 } from '../common/ModelTypes';
 import { InferModel } from '../common/InferModel';
 import {
   NEXXUS_BUILTIN_MODEL_SCHEMAS,
-  NEXXUS_RESERVED_FIELD_NAMES
+  NEXXUS_RESERVED_FIELD_NAMES,
+  isAppScopedBuiltinModel
 } from '../common/BuiltinSchemas';
-import { NexxusUserDetailSchema } from './User';
+import {
+  NexxusUserDetailSchema,
+  isReservedUserDetailField,
+  NEXXUS_USER_DETAIL_RESERVED_PREFIX
+} from './User';
+import { DEFAULT_ACL_ROLE_ID } from './AclRole';
+
+import type { NexxusAclManager } from '../lib/Acl';
 
 import * as Dot from 'dot-prop';
 
@@ -43,12 +50,20 @@ export interface NexxusApplicationSchema {
 
 export interface NexxusUserTypeConfig {
   private?: boolean; // if true users can only be created through the nexxus hub API; defaults to false if not specified
+  /**
+   * ACL role names granted to users of this type. Each name must resolve to a
+   * role loaded for the app (a persisted `acl` document or the framework
+   * default). The constructor grants the `default` user type the framework
+   * default role automatically.
+   */
+  roles?: string[];
 }
 
 /**
  * Per-application auth configuration. Lives on the Application document so
- * that each tenant carries its own JWT secret, per-strategy settings, and
- * user-shape declarations.
+ * that each tenant carries its own per-strategy settings and user-shape
+ * declarations. The signing key is NOT here — it lives at the application
+ * level (`signingSecret`), because apps with no auth still sign tokens.
  *
  * `strategies` is a map keyed by strategy name (must be a subset of the
  * deployment's `api.auth.availableStrategies`). Each value's shape is
@@ -60,7 +75,6 @@ export interface NexxusUserTypeConfig {
  * under `auth` to express that dependency in the type.
  */
 export interface NexxusApplicationAuthConfig {
-  jwtSecret: string;
   jwtExpiresIn?: string;
   strategies: Record<string, unknown>;
   /**
@@ -77,6 +91,12 @@ export interface NexxusApplicationAuthConfig {
    * stores no extra user details.
    */
   userDetailSchema?: { [userType: string]: NexxusUserDetailSchema };
+  /**
+   * Deployment-wide ACL switch for this app. Defaults to false in the
+   * constructor. When false, the field cache is never populated and ACL
+   * checks are skipped — a guard so apps that don't use ACLs pay nothing.
+   */
+  acl?: boolean
 }
 
 export type INexxusApplication =
@@ -92,6 +112,13 @@ export type INexxusApplication =
   };
 
 export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
+  /**
+   * ACL role managers for this app, keyed by role name. Populated at boot by
+   * the API/worker after construction (roles are separate `acl` documents,
+   * not part of the Application document). Empty until `setRoleManagers` runs.
+   */
+  private roleManagers: Map<string, NexxusAclManager> = new Map();
+
   constructor(data: INexxusApplication) {
     super({ ...data, type: MODEL_REGISTRY.application });
 
@@ -103,6 +130,16 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
     // flags, reserved-name check on declared fields, and the invalid flag
     // combo (subscribable=false + transient=true).
     for (const [modelName, modelDef] of Object.entries(data.schema)) {
+      // App schemas may not redeclare an app-scoped built-in model name
+      // (`user`, `acl`) — those names map to framework-managed per-app
+      // indices (`nxx-app-{appId}-user` / `-acl`) and would collide.
+      if (isAppScopedBuiltinModel(modelName)) {
+        throw new Error(
+          `Application schema: model "${modelName}" uses a reserved app-scoped built-in ` +
+          `name and cannot be declared by an application`
+        );
+      }
+
       if (!modelDef || typeof modelDef !== 'object') {
         throw new Error(`Application schema: model "${modelName}" must be an object`);
       }
@@ -151,30 +188,36 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
       throw new Error('Application "name" is required and must be a string');
     }
 
+    // Required for EVERY application, not just those with auth: device tokens
+    // are signed with it, and those exist whether or not the app has users.
+    if (typeof data.signingSecret !== 'string' || data.signingSecret.length === 0) {
+      throw new Error('Application "signingSecret" is required and must be a non-empty string');
+    }
+
     if (data.defaultLimit !== undefined && (typeof data.defaultLimit !== 'number' || data.defaultLimit <= 10)) {
       throw new Error('Application "defaultLimit" must be a greater than 10 if provided');
     }
 
-    data.defaultLimit = data.defaultLimit ?? 10;
+    // Assign resolved defaults onto `this.data` — `super()` already shallow-copied
+    // `data` into `this.data`, so mutating `data` here would not persist to the
+    // stored model (unlike the nested `schema` flags, which share a reference).
+    this.data.defaultLimit = data.defaultLimit ?? 10;
 
-    if (data.maxLimit !== undefined && (typeof data.maxLimit !== 'number' || data.maxLimit <= 0 || data.maxLimit < data.defaultLimit!)) {
+    if (data.maxLimit !== undefined && (typeof data.maxLimit !== 'number' || data.maxLimit <= 0 || data.maxLimit < this.data.defaultLimit!)) {
       throw new Error('Application "maxLimit" must be a positive number if provided and must be greater than or equal to "defaultLimit"');
     }
 
-    data.maxLimit = data.maxLimit ?? 100;
+    this.data.maxLimit = data.maxLimit ?? 100;
 
     if (data.auth) {
       // Per-app auth block. Per-strategy config shapes are NOT validated here —
       // each strategy's own JSON Schema handles that when the strategy is
       // instantiated by the API at init time. Here we only enforce that the
-      // block itself is coherent: a usable JWT secret, at least one declared
-      // strategy, and a user-detail schema map (possibly empty).
+      // block itself is coherent: at least one declared strategy and a
+      // user-detail schema map (possibly empty). The signing key is validated
+      // above — it belongs to the application, not to this block.
       if (typeof data.auth !== 'object') {
         throw new Error('Application "auth" must be an object when provided');
-      }
-
-      if (typeof data.auth.jwtSecret !== 'string' || data.auth.jwtSecret.length === 0) {
-        throw new Error('Application "auth.jwtSecret" is required and must be a non-empty string when auth is enabled');
       }
 
       if (data.auth.jwtExpiresIn !== undefined && typeof data.auth.jwtExpiresIn !== 'string') {
@@ -186,16 +229,36 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
         || typeof data.auth.strategies !== 'object'
         || Object.keys(data.auth.strategies).length === 0
       ) {
-        throw new Error('Application "auth.strategies" must be a non-empty object when auth is enabled');
+        throw new Error('Application "auth.strategies" must be a non-empty object when auth is enabled, ');
       }
 
       if (!data.auth.userDetailSchema || typeof data.auth.userDetailSchema !== 'object') {
         throw new Error('Application "auth.userDetailSchema" must be provided when auth is enabled');
       }
 
+      // A developer-declared `$` field would be overwritten by the auth-strategy
+      // merge in `getUserDetailSchema` and, worse, would be writable through
+      // `PUT /user` — which is precisely what the reserved prefix prevents.
+      for (const [ userType, detailSchema ] of Object.entries(data.auth.userDetailSchema)) {
+        const reserved = Object.keys(detailSchema ?? {}).filter(isReservedUserDetailField);
+
+        if (reserved.length > 0) {
+          throw new Error(
+            `Application "auth.userDetailSchema.${userType}" declares reserved field(s) "${reserved.join('", "')}" — `
+            + `the "${NEXXUS_USER_DETAIL_RESERVED_PREFIX}" prefix is reserved by Nexxus`
+          );
+        }
+      }
+
       if (data.auth.userTypes !== undefined && typeof data.auth.userTypes !== 'object') {
         throw new Error('Application "auth.userTypes" must be an object when provided');
       }
+
+      if (data.auth.acl !== undefined && typeof data.auth.acl !== 'boolean') {
+        throw new Error('Application "auth.acl" must be a boolean if provided');
+      }
+
+      data.auth.acl = data.auth.acl ?? false;
 
       // Rebuild auth with the default user type force-injected. Fresh object
       // so the caller's `data.auth` isn't mutated. `default` always wins
@@ -204,8 +267,8 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
       this.data.auth = {
         ...data.auth,
         userTypes: data.auth.userTypes
-          ? { ...data.auth.userTypes, default: {} }
-          : { default: {} }
+          ? { ...data.auth.userTypes, default: { roles: [DEFAULT_ACL_ROLE_ID] } }
+          : { default: { roles: [DEFAULT_ACL_ROLE_ID] } }
       };
     }
 
@@ -216,6 +279,47 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
     return this.data.schema;
   }
 
+  /**
+   * Key this application signs and verifies its own tokens with — user tokens
+   * where the app has auth, device tokens either way.
+   *
+   * Guaranteed present: the constructor rejects an application without one, so
+   * callers don't have to handle a missing key.
+   */
+  public getSigningSecret(): string {
+    return this.data.signingSecret;
+  }
+
+  /**
+   * Detail fields contributed by this app's auth strategies, keyed by their
+   * `$auth_<name>` namespace. Populated by whoever instantiates the strategies
+   * (the API, at boot) — core can't know the strategy classes, so this is the
+   * same hand-it-in shape `setRoleManagers` uses for ACL.
+   */
+  private authDetailSchema: NexxusUserDetailSchema = {};
+
+  /**
+   * Declare the auth strategies' own detail fields. Called once per app after
+   * its strategies are instantiated; calling it again replaces the set, so an
+   * app whose strategies change at runtime just re-registers.
+   */
+  public setAuthDetailSchema(schema: NexxusUserDetailSchema): void {
+    this.authDetailSchema = schema;
+  }
+
+  /**
+   * The detail schema for a user type: what the developer declared, plus the
+   * `$auth_*` namespaces the enabled auth strategies own.
+   *
+   * Merged here rather than at each call site so that everything reading a
+   * detail schema — patch validation on `PUT /user`, the filter query behind
+   * username lookup, device linking — sees the same shape. Strategies are
+   * configured per application, not per user type, so every user type gets the
+   * same `$auth_*` fields.
+   *
+   * Returns null for a user type the application never declared; the merge does
+   * NOT invent a schema for one.
+   */
   public getUserDetailSchema(userType: string = 'default'): NexxusUserDetailSchema | null {
     const userDetailSchema = this.data.auth?.userDetailSchema;
 
@@ -223,7 +327,13 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
       return null;
     }
 
-    return userDetailSchema[userType] ?? null;
+    const declared = userDetailSchema[userType];
+
+    if (!declared) {
+      return null;
+    }
+
+    return { ...declared, ...this.authDetailSchema };
   }
 
   /**
@@ -240,15 +350,66 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
   }
 
   /**
+   * Whether this app has ACLs enabled. When false, the Writer skips field-cache
+   * maintenance and the API skips ACL checks.
+   */
+  public isAclEnabled(): boolean {
+    return this.data.auth?.acl === true;
+  }
+
+  /**
+   * Replace this app's ACL role managers. Called at boot by the API/worker
+   * with one manager per role loaded for the app (the framework default plus
+   * any persisted `acl` documents). Keyed by role name for lookup.
+   */
+  public setRoleManagers(managers: NexxusAclManager[]): void {
+    this.roleManagers = new Map(managers.map(manager => [manager.getRoleName(), manager]));
+  }
+
+  /** The manager for a single role by name, or undefined if not loaded. */
+  public getRoleManager(name: string): NexxusAclManager | undefined {
+    return this.roleManagers.get(name);
+  }
+
+  /** All loaded role managers, keyed by role name. */
+  public getRoleManagers(): Map<string, NexxusAclManager> {
+    return this.roleManagers;
+  }
+
+  /**
+   * Top-level field names in `modelType` flagged `acl: true` — the app-declared
+   * fields the Writer mirrors into the Redis field cache (on top of the
+   * always-cached builtin fields: id, userId, createdAt). Empty set for an
+   * unknown model type. Nested acl flags are not resolved here (a later
+   * extension); an object/array field flagged `acl` is cached whole.
+   */
+  public getAclFields(modelType: string): Set<string> {
+    const appModelDef = this.data.schema[modelType];
+    const aclFields = new Set<string>();
+
+    if (!appModelDef) {
+      return aclFields;
+    }
+
+    for (const [fieldName, fieldDef] of Object.entries(appModelDef.fields)) {
+      if (fieldDef.acl === true) {
+        aclFields.add(fieldName);
+      }
+    }
+
+    return aclFields;
+  }
+
+  /**
    * Runtime field schema for one of the developer-declared models in this
    * application's `schema` field. Built-in models (user, application) have
    * their own static `getModelSchema` and are not resolved here.
    *
-   * When the model is `subscribable: false`, every primitive field is
-   * force-marked `filterable: true` recursively — that's how the
-   * "traditional-DB, all-fields-filterable" behaviour lands in downstream
-   * FilterQuery validation without those callers needing to know about
-   * the flag.
+   * When the model is `subscribable: false`, every queryable field (primitives
+   * and primitive-element arrays) is force-marked `filterable: true`
+   * recursively — that's how the "traditional-DB, all-fields-filterable"
+   * behaviour lands in downstream FilterQuery validation without those callers
+   * needing to know about the flag.
    */
   public getAppModelSchema(modelType: string): NexxusModelDef {
     const appModelDef = this.data.schema[modelType];
@@ -264,23 +425,29 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
     }
 
     if (appModelDef.subscribable === false) {
-      NexxusApplication.markAllPrimitivesFilterable(fields);
+      NexxusApplication.markAllFilterable(fields);
     }
 
     return fields;
   }
 
   /**
-   * Recursively set `filterable: true` on every primitive field def in the
-   * given schema. Arrays are skipped (the query DSL doesn't filter into
-   * arrays). Mutates in place — callers pass a clone.
+   * Recursively force `filterable: true` on every queryable field def: every
+   * primitive, and every primitive-element array (membership-queryable via
+   * eq/ne/in). Object fields recurse into their properties; arrays of objects
+   * are left alone (they can't be membership-queried). Mutates in place —
+   * callers pass a clone.
    */
-  private static markAllPrimitivesFilterable(fields: Record<string, NexxusFieldDef>): void {
+  private static markAllFilterable(fields: Record<string, NexxusFieldDef>): void {
     for (const def of Object.values(fields)) {
       if (def.type === 'object') {
-        NexxusApplication.markAllPrimitivesFilterable(def.properties);
-      } else if (def.type !== 'array') {
-        (def as PrimitiveFieldDef).filterable = true;
+        NexxusApplication.markAllFilterable(def.properties);
+      } else if (def.type === 'array') {
+        if (def.arrayType !== 'object') {
+          def.filterable = true;
+        }
+      } else {
+        def.filterable = true;
       }
     }
   }
@@ -350,13 +517,11 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
 
         if (fieldDef.type === 'object') {
           collectFilterableFields(fieldDef.properties, fieldPath);
-        } else if (fieldDef.type === 'array') {
-          // Skip arrays entirely (not filterable)
-          continue;
-        } else {
-          if (fieldDef.filterable) {
-            filterableFields.add(fieldPath);
-          }
+        } else if (fieldDef.filterable) {
+          // Primitive or primitive-element array marked filterable. The array's
+          // own path is collected (membership is matched against the whole
+          // array), not traversed into.
+          filterableFields.add(fieldPath);
         }
       }
     };

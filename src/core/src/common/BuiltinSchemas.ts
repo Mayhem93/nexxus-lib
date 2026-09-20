@@ -5,9 +5,9 @@ import type { NexxusModelDef } from "./ModelTypes";
  * 'type' and 'appId' are excluded as they are handled separately in queries.
  */
 export const NEXXUS_UNIVERSAL_FIELDS = {
-  id:        { type: 'string', required: true },
-  createdAt: { type: 'date',   required: true },
-  updatedAt: { type: 'date',   required: true }
+  id:        { type: 'string', required: true, filterable: true },
+  createdAt: { type: 'date',   required: true, filterable: true },
+  updatedAt: { type: 'date',   required: true, filterable: true }
 } as const satisfies NexxusModelDef;
 
 /**
@@ -31,11 +31,14 @@ export const NEXXUS_RESERVED_FIELD_NAMES: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Schema definitions for built-in (reserved) models. These are the runtime
- * source of truth for built-in model field shapes; the corresponding TS
- * interfaces (INexxusUser, INexxusApplication) are derived from these.
+ * App-scoped built-in models — persisted per application in
+ * `nxx-app-{appId}-{type}` indices, exactly like developer-declared app
+ * models. Their names are RESERVED: an application schema cannot declare a
+ * model of the same name (enforced in the `NexxusApplication` constructor
+ * via `isAppScopedBuiltinModel`), since those names would collide with the
+ * framework-managed per-app indices.
  */
-export const NEXXUS_BUILTIN_MODEL_SCHEMAS = {
+export const NEXXUS_APP_SCOPED_MODEL_SCHEMAS = {
   user: {
     appId:         { type: 'string',  required: true,  filterable: true },
     userType:      { type: 'string',  required: true,  filterable: true },
@@ -45,9 +48,36 @@ export const NEXXUS_BUILTIN_MODEL_SCHEMAS = {
     devices:       { type: 'array',   required: true,  arrayType: 'string' },
     details:       { type: 'object',  required: false, properties: {} },
   },
+  /**
+   * Per-application ACL role. One document per role; the document `id` is the
+   * role name (no separate `name` field), and `statements` is always a JSON-
+   * encoded string (see `NexxusAclRole`). `appId` mirrors `user` since roles
+   * are app-scoped. Only `appId` is filterable — roles are otherwise looked
+   * up by id.
+   */
+  acl: {
+    appId:       { type: 'string', required: true,  filterable: true },
+    description: { type: 'string', required: false },
+    statements:  { type: 'string', required: true },
+  },
+} as const satisfies Record<string, NexxusModelDef>;
+
+/**
+ * Deployment-scoped built-in models — a single index per model
+ * (`nxx-application`, `nxx-setting`), not partitioned by app.
+ */
+export const NEXXUS_DEPLOYMENT_MODEL_SCHEMAS = {
   application: {
     name:               { type: 'string',  required: true,  filterable: true },
     description:        { type: 'string',  required: false },
+    /**
+     * Key this application signs and verifies its own tokens with.
+     *
+     * Application-level rather than under `auth` because signing was never
+     * auth-specific: an app with no users still has to sign device tokens, and
+     * an app with no `auth` block had nowhere to put a key.
+     */
+    signingSecret:      { type: 'string',  required: true },
     /**
      * Per-application auth block. When `authEnabled` is true this must be
      * present and contain a non-empty `strategies` map; when false it should
@@ -62,11 +92,11 @@ export const NEXXUS_BUILTIN_MODEL_SCHEMAS = {
     auth: {
       type: 'object', required: false, nullable: true,
       properties: {
-        jwtSecret:        { type: 'string', required: true },
         jwtExpiresIn:     { type: 'string', required: false },
         strategies:       { type: 'object', required: true,  properties: {} },
         userTypes:        { type: 'object', required: false, properties: {} },
         userDetailSchema: { type: 'object', required: false, properties: {} },
+        acl: { type: 'boolean', required: false }
       },
     },
   },
@@ -81,13 +111,37 @@ export const NEXXUS_BUILTIN_MODEL_SCHEMAS = {
 } as const satisfies Record<string, NexxusModelDef>;
 
 /**
+ * All built-in (reserved) models — the runtime source of truth for built-in
+ * model field shapes; the corresponding TS interfaces (INexxusUser,
+ * INexxusApplication, INexxusAclRole, …) are derived from these.
+ */
+export const NEXXUS_BUILTIN_MODEL_SCHEMAS = {
+  ...NEXXUS_DEPLOYMENT_MODEL_SCHEMAS,
+  ...NEXXUS_APP_SCOPED_MODEL_SCHEMAS,
+};
+
+/**
  * Type helper to get valid built-in model types
  */
 export type NexxusBuiltinModelType = keyof typeof NEXXUS_BUILTIN_MODEL_SCHEMAS;
+
+/**
+ * App-scoped built-in model types (`user`, `acl`) — the names an application
+ * schema may not reuse for its own models.
+ */
+export type NexxusAppScopedModelType = keyof typeof NEXXUS_APP_SCOPED_MODEL_SCHEMAS;
 
 /**
  * Helper to check if a model type is built-in
  */
 export function isBuiltinModel(modelType: string): modelType is NexxusBuiltinModelType {
   return modelType in NEXXUS_BUILTIN_MODEL_SCHEMAS;
+}
+
+/**
+ * Helper to check if a model type is an app-scoped built-in (`user`/`acl`) —
+ * used to reject application schemas that try to redeclare these names.
+ */
+export function isAppScopedBuiltinModel(modelType: string): modelType is NexxusAppScopedModelType {
+  return modelType in NEXXUS_APP_SCOPED_MODEL_SCHEMAS;
 }

@@ -1,5 +1,11 @@
-.github
+# Everything under .github stays local EXCEPT the workflows, which have to be
+# committed for GitHub to run them. Written as `.github/*` rather than
+# `.github`: git does not descend into an excluded directory, so a `!` rule
+# can't re-include anything inside one.
+.github/*
+!.github/workflows/
 node_modules
 dist-*
 *.tsbuildinfo
+coverage
 CLAUDE.md

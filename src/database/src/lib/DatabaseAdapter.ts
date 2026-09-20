@@ -7,6 +7,7 @@ import {
   NexxusApplication,
   NexxusUser,
   NexxusSetting,
+  NexxusAclRole,
   NexxusAppModel,
   NexxusModelTypeName,
   AnyNexxusModel,
@@ -91,10 +92,12 @@ export abstract class NexxusDatabaseAdapter<
   public abstract getItems(options: NexxusDbGetOptions<'application'>): Promise<Array<NexxusApplication | null>>;
   public abstract getItems(options: NexxusDbGetOptions<'user'>): Promise<Array<NexxusUser | null>>;
   public abstract getItems(options: NexxusDbGetOptions<'setting'>): Promise<Array<NexxusSetting | null>>;
+  public abstract getItems(options: NexxusDbGetOptions<'acl'>): Promise<Array<NexxusAclRole | null>>;
   public abstract getItems(options: NexxusDbGetOptions<string>): Promise<Array<NexxusAppModel | null>>;
   public abstract searchItems(options: NexxusDbSearchOptions<'application'>): Promise<NexxusApplication[]>;
   public abstract searchItems(options: NexxusDbSearchOptions<'user'>): Promise<NexxusUser[]>;
   public abstract searchItems(options: NexxusDbSearchOptions<'setting'>): Promise<NexxusSetting[]>;
+  public abstract searchItems(options: NexxusDbSearchOptions<'acl'>): Promise<NexxusAclRole[]>;
   public abstract searchItems(options: NexxusDbSearchOptions<string>): Promise<NexxusAppModel[]>;
   public abstract updateItems(collection: Array<NexxusJsonPatch>, options?: NexxusDbUpdateOptions): Promise<Array<Partial<AnyNexxusModelData>> | void>;
   public abstract deleteItems(collection: Array<NexxusBaseModel>): Promise<void>;

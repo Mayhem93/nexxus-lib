@@ -99,9 +99,32 @@ export class NexxusManagementServer {
    * Stop listening. Existing in-flight requests are allowed to complete
    * before the underlying HTTP server actually closes. Idempotent —
    * calling on a not-running server is a no-op.
+   *
+   * Resolves only once the port is actually released. `server.close()` is
+   * callback-based and returns immediately, so a caller that didn't await this
+   * would report itself shut down while still holding the management port —
+   * enough to make an immediate restart fail with EADDRINUSE.
    */
-  public close(): void {
-    this.server?.close();
+  public close(): Promise<void> {
+    const server = this.server;
+
     this.server = null;
+
+    if (!server) {
+      return Promise.resolve();
+    }
+
+    return new Promise((resolve, reject) => {
+      server.close((err?: NodeJS.ErrnoException) => {
+        // A server that never reached `listening` — `start()` rejected with
+        // EADDRINUSE, say — still has to close cleanly, otherwise the failure
+        // path leaves a caller with no way to tear down what it built.
+        if (err && err.code !== 'ERR_SERVER_NOT_RUNNING') {
+          return reject(err);
+        }
+
+        resolve();
+      });
+    });
   }
 }

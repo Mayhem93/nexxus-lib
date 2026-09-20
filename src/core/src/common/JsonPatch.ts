@@ -174,8 +174,19 @@ export class NexxusJsonPatch {
       throw new InvalidJsonPatchException(`Unsupported JSON Patch operation: ${fullPatch.op}`);
     }
 
+    // Checked before the length comparison below, which would otherwise throw a
+    // raw TypeError on a patch that simply omitted one of them — and patches
+    // arrive from request bodies and MQ payloads, so "simply omitted" happens.
+    if (!Array.isArray(fullPatch.path) || !Array.isArray(fullPatch.value)) {
+      throw new InvalidJsonPatchException(`Patch must carry a path array and a value array`);
+    }
+
     if (fullPatch.path.length !== fullPatch.value.length) {
       throw new InvalidJsonPatchException(`Path and value arrays must have the same length`);
+    }
+
+    if (!fullPatch.metadata || typeof fullPatch.metadata !== 'object') {
+      throw new InvalidJsonPatchException(`Patch must include metadata`);
     }
 
     if (!fullPatch.metadata.type || typeof fullPatch.metadata.type !== 'string') {
@@ -329,18 +340,10 @@ export class NexxusJsonPatch {
         const objDef = fieldDef as NexxusObjectFieldDef;
 
         current = objDef.properties;
-      } else if (fieldDef.type === 'array') {
-        const arrDef = fieldDef as NexxusArrayFieldDef;
-
-        // For arrays of objects, traverse into the object properties
-        if (arrDef.arrayType === 'object' && 'properties' in arrDef) {
-          current = arrDef.properties!;
-        } else {
-          // Can't traverse further into primitive arrays
-          return null;
-        }
       } else {
-        // Can't traverse into primitive types
+        // Arrays and primitives are leaves. You can replace/append/prepend a
+        // whole array, but there is no path syntax to address an element (no
+        // index notation), so we never descend into an array's element fields.
         return null;
       }
     }

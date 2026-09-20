@@ -2,7 +2,8 @@ import { NexxusApiBaseRoute } from '../BaseRoute';
 import {
   RequiredHeadersMiddleware,
   AppExistsMiddleware,
-  AuthMiddleware
+  AuthMiddleware,
+  RequiresDeviceMiddleware
 } from '../middlewares';
 import {
   type NexxusApiRequest,
@@ -14,7 +15,8 @@ import {
   NotFoundException,
   DeviceNotConnectedException
 } from '../Exceptions';
-import { validateModelQueryParams, buildDatabaseFilter } from '../ModelQueryValidation';
+import { NexxusApiModelParams } from '../ModelParams';
+import { NexxusApiAcl } from '../Acl';
 
 import { NexxusFilterQueryType } from '@mayhem93/nexxus-core-lib';
 import {
@@ -53,19 +55,23 @@ export default class SubscriptionRoute extends NexxusApiBaseRoute {
   protected registerRoutes(): void {
     this.router.use(
       RequiredHeadersMiddleware('nxx-app-id') as RequestHandler,
-      RequiredHeadersMiddleware('nxx-device-id') as RequestHandler,
       AppExistsMiddleware() as RequestHandler,
-      AuthMiddleware as RequestHandler
+      AuthMiddleware as RequestHandler,
+      // Subscriptions belong to the calling device, which the token identifies.
+      RequiresDeviceMiddleware as RequestHandler
     );
 
+    // ACL enforcement for subscribe/unsubscribe is wired inside the handlers
+    // (step 3) so it can inject the row constraint into the subscription.
     this.router.post('/', this.subscribe.bind(this) as RequestHandler);
     this.router.delete('/', this.unsubscribe.bind(this) as RequestHandler);
   }
 
   private async subscribe(req: SubscribeRequest, res: NexxusApiResponse): Promise<void> {
-    const deviceId = req.headers['nxx-device-id'] as string;
+    // Non-null: RequiresDeviceMiddleware is wired on this router.
+    const deviceId = req.deviceId!;
 
-    const validated = validateModelQueryParams(req, req.body, req.body.model);
+    const validated = NexxusApiModelParams.validate(req, req.body, req.body.model);
     const { appId, app, model, id, userId, filter } = validated;
 
     if (!app.isSubscribable(model)) {
@@ -73,6 +79,11 @@ export default class SubscriptionRoute extends NexxusApiBaseRoute {
         `Model "${model}" is not subscribable — use the search endpoint (POST /model/${model}/search) instead`
       );
     }
+
+    const aclConstraint = NexxusApiAcl.authorize(app, req, 'subscribe', model);
+    // Fold the row constraint into the stored subscription so the transport
+    // manager (ACL-agnostic) only ever matches rows this principal may read.
+    const effectiveFilter = aclConstraint ? NexxusApiAcl.subscriptionFilter(app, model, req.body.filter, aclConstraint) : filter;
 
     // Pagination — kept inline (only routes returning items use it).
     let limit = req.body.limit;
@@ -100,7 +111,7 @@ export default class SubscriptionRoute extends NexxusApiBaseRoute {
       model,
       modelId: id,
       userId,
-      filter,
+      filter: effectiveFilter,
     });
 
     try {
@@ -120,7 +131,7 @@ export default class SubscriptionRoute extends NexxusApiBaseRoute {
     // Atomic subscribe + return initial data. `forceRefresh` matches the
     // previous getOnly=false behavior — we've just recorded a subscription
     // and want the initial page to be consistent with any in-flight writes.
-    const databaseFilter = buildDatabaseFilter(validated, req.body.filter);
+    const databaseFilter = NexxusApiModelParams.toDatabaseFilter(validated, req.body.filter, aclConstraint ?? undefined);
 
     const results = (await NexxusApi.database.searchItems({
       appId,
@@ -137,9 +148,10 @@ export default class SubscriptionRoute extends NexxusApiBaseRoute {
   }
 
   private async unsubscribe(req: UnsubscribeRequest, res: NexxusApiResponse): Promise<void> {
-    const deviceId = req.headers['nxx-device-id'] as string;
+    // Non-null: RequiresDeviceMiddleware is wired on this router.
+    const deviceId = req.deviceId!;
 
-    const validated = validateModelQueryParams(req, req.body, req.body.model);
+    const validated = NexxusApiModelParams.validate(req, req.body, req.body.model);
     const { appId, app, model, id, userId, filter } = validated;
 
     if (!app.isSubscribable(model)) {
@@ -147,6 +159,13 @@ export default class SubscriptionRoute extends NexxusApiBaseRoute {
         `Model "${model}" is not subscribable — nothing to unsubscribe from`
       );
     }
+
+    // Reconstruct the SAME effective filter subscribe stored (client filter AND
+    // ACL constraint) — the channel key is derived from it, so we must fold the
+    // constraint in the same way to find the record. Gated by the same
+    // `subscribe` permission the subscription required.
+    const aclConstraint = NexxusApiAcl.authorize(app, req, 'subscribe', model);
+    const effectiveFilter = aclConstraint ? NexxusApiAcl.subscriptionFilter(app, model, req.body.filter, aclConstraint) : filter;
 
     // Rebuild the same descriptor the SDK used at subscribe time — the resulting
     // Redis key is derived deterministically from these fields, so matching
@@ -156,7 +175,7 @@ export default class SubscriptionRoute extends NexxusApiBaseRoute {
       model,
       modelId: id,
       userId,
-      filter,
+      filter: effectiveFilter,
     });
 
     let removed: boolean;

@@ -1,5 +1,4 @@
 export { default as RootRoute } from './Root';
-export { default as ApplicationRoute } from './Application';
 export { default as DeviceRoute } from './Device';
 export { default as UserRoute } from './User';
 export { default as SubscriptionRoute } from './Subscription';

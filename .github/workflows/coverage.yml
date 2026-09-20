@@ -1,0 +1,78 @@
+name: Coverage
+
+# Only from main. A badge that reflected whichever branch happened to run last
+# would be worse than no badge — and PRs are already covered by tests.yml.
+on:
+  push:
+    branches: [ main ]
+  # Lets you refresh the badge without pushing (e.g. after changing thresholds).
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # Both required by deploy-pages: it publishes as the workflow's own OIDC
+  # identity, so there is no long-lived token to store or rotate.
+  pages: write
+  id-token: write
+
+# Pages allows one in-flight deployment. Queue rather than cancel, so a run
+# that is midway through publishing isn't left half-done.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  coverage:
+    name: Publish coverage report
+    runs-on: ubuntu-latest
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      # `html` is the browsable report, `json-summary` is what the badge reads,
+      # `text` puts the table in the run log. Passed here rather than added to
+      # vitest.config.ts so local runs keep producing just text + html.
+      - name: Run tests with coverage
+        run: >
+          npx vitest run --coverage
+          --coverage.reporter=html
+          --coverage.reporter=json-summary
+          --coverage.reporter=text
+
+      # Shields' "endpoint" schema: it fetches this JSON and renders it. Writing
+      # it beside the HTML report means one artifact serves both.
+      - name: Build the badge payload
+        run: |
+          PCT=$(jq -r '.total.lines.pct' coverage/coverage-summary.json)
+          COLOR=$(awk -v p="$PCT" 'BEGIN {
+            if (p >= 95)      print "brightgreen";
+            else if (p >= 90) print "green";
+            else if (p >= 80) print "yellowgreen";
+            else if (p >= 70) print "yellow";
+            else if (p >= 60) print "orange";
+            else              print "red";
+          }')
+          jq -n --arg m "${PCT}%" --arg c "$COLOR" \
+            '{schemaVersion: 1, label: "coverage", message: $m, color: $c}' \
+            > coverage/badge.json
+          echo "Coverage: ${PCT}% (${COLOR})" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: coverage
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

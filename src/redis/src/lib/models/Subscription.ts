@@ -208,18 +208,13 @@ export class NexxusRedisSubscription {
       yield { appId, model, userId };
     }
 
-    // Level 4: Add modelId
+    // Level 3: Add modelId
     if (modelId) {
       yield { appId, model, modelId };
-    }
 
-    // Level 5: userId + model combination
-    if (userId) {
-      yield { appId, userId, model };
-
-      // Level 6: userId + model + modelId (most specific)
-      if (modelId) {
-        yield { appId, userId, model, modelId };
+      // Level 4: userId + modelId (most specific)
+      if (userId) {
+        yield { appId, model, modelId, userId };
       }
     }
   }
