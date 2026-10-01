@@ -18,7 +18,7 @@ import * as path from 'node:path';
 export interface NexxusGoogleAuthConfig extends NexxusBaseAuthStrategyConfig {
   clientID: string;
   clientSecret: string;
-  callbackURL: string; // e.g., "http://localhost:3000/auth/google/callback"
+  callbackURL: string; // e.g., "http://localhost:5000/auth/google/callback"
 }
 
 export default class NexxusGoogleAuthStrategy extends NexxusAuthStrategy<NexxusGoogleAuthConfig> {
@@ -65,7 +65,10 @@ export default class NexxusGoogleAuthStrategy extends NexxusAuthStrategy<NexxusG
   protected async verifyProfile(
     req: NexxusApiRequest,
     profile: Profile,
-    done: (err: unknown, user?: NexxusApiUser | false) => void
+    // `info` is Passport's third slot. Used here to pass out whether this
+    // sign-in created the account, which the callback needs to decide whether a
+    // device hint may be honoured.
+    done: (err: unknown, user?: NexxusApiUser | false, info?: { status: 'found' | 'created' }) => void
   ): Promise<void> {
     try {
       // Set by handleCallback AFTER the state signature was verified and its
@@ -137,7 +140,10 @@ export default class NexxusGoogleAuthStrategy extends NexxusAuthStrategy<NexxusG
         user.getData().authProviders.push('google');
       }
 
-      return done(null, NexxusAuthStrategy.convertToApiUser(user));
+      // `status` rides along in Passport's `info` slot because the callback is
+      // the only place that knows whether this sign-in created the account, and
+      // that decides whether a device hint may be honoured at all.
+      return done(null, NexxusAuthStrategy.convertToApiUser(user), { status });
     } catch (error) {
       return done(error);
     }
@@ -204,8 +210,15 @@ export default class NexxusGoogleAuthStrategy extends NexxusAuthStrategy<NexxusG
         return res.status(401).json({ error: info?.message || 'Authentication failed' });
       }
 
-      // Device hint comes from the signed state — a redirect has no body.
-      void this.sendTokenResponse(res, user, { id: payload.deviceId }).catch(next);
+      // A first sign-in CREATED this account moments ago, so it owns no device
+      // and the hint carried in the state cannot name one of its devices —
+      // honouring it would spend a lookup to learn nothing. Only a returning
+      // user gets the hint, which a redirect must carry in the signed state
+      // because the callback has no body.
+      void (info?.status === 'created'
+        ? this.sendSessionForNewUser(res, user)
+        : this.sendSessionForExistingUser(res, user, { id: payload.deviceId })
+      ).catch(next);
     })(req, res, next);
   }
 }

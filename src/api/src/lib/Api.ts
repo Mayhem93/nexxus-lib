@@ -43,7 +43,8 @@ import {
   DeviceRoute,
   UserRoute,
   SubscriptionRoute,
-  ModelRoute
+  ModelRoute,
+  SessionRoute
 } from './routes';
 import {
   NotFoundMiddleware,
@@ -476,6 +477,9 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig, {}, NexxusApiS
     await this.loadApps();
 
     new RootRoute(this.express);
+    // Mounted whether or not any strategy is: applications without
+    // authentication refresh and log out too.
+    new SessionRoute(this.express);
 
     // Cross-validation + per-app instantiation runs whether or not strategies
     // are registered — that's how an Application with `authEnabled: true` but
@@ -722,6 +726,14 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig, {}, NexxusApiS
    * message so operators see "is it installed?" rather than `ERR_MODULE_NOT_FOUND`.
    */
   private async addAuthStrategy(name: string): Promise<void> {
+    // A strategy's routes are `/auth/<name>`, and a third-party strategy's name is
+    // its package name — so one could land on a built-in session route.
+    if (SessionRoute.RESERVED_NAMES.has(name)) {
+      throw new InvalidConfigException(
+        `Auth strategy name "${name}" is reserved: /auth/${name} is a built-in route`
+      );
+    }
+
     if (this.authStrategyClasses.has(name)) {
       NexxusApi.logger.warn(`Auth strategy already registered: ${name}`, NexxusApi.loggerLabel);
 
@@ -886,8 +898,9 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig, {}, NexxusApiS
    *
    * Instantiation:
    *   - For each (app, strategy) pair, construct the strategy with that app's
-   *     per-strategy config. The strategy base class's AJV validation fires
-   *     in the constructor — any malformed config throws here, at startup.
+   *     per-strategy config and register it with Passport. The strategy base
+   *     class's AJV validation fires in the constructor — any malformed config
+   *     throws here, at startup, naming the application and the strategy.
    *   - Cached by `${appId}|${strategyName}` for route handler lookups.
    *
    * Any failure is fatal — the API refuses to start with inconsistent auth
@@ -924,7 +937,24 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig, {}, NexxusApiS
         }
 
         const StrategyCtor = this.authStrategyClasses.get(strategyName)!;
-        const instance = new StrategyCtor(strategyConfig as NexxusBaseAuthStrategyConfig, app);
+        let instance: NexxusAuthStrategy;
+
+        // Both steps can refuse the app's config — the strategy's own schema in
+        // the constructor, the underlying Passport strategy on registration —
+        // and neither error says which application it came from.
+        try {
+          instance = new StrategyCtor(strategyConfig as NexxusBaseAuthStrategyConfig, app);
+
+          // Wire passport.use(passportName, ...) for THIS instance. Each
+          // strategy's `passportName` is `${name}:${appId}`, so two apps using
+          // the same strategy type get isolated Passport registrations.
+          instance.initializePassport();
+        } catch (err) {
+          throw new FatalErrorException(
+            `Application "${appId}", auth strategy "${strategyName}": ${(err as Error).message}`
+          );
+        }
+
         const ownDetails = StrategyCtor.userDetailSchema;
 
         // A strategy that learns nothing about the user (local) contributes no
@@ -936,11 +966,6 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig, {}, NexxusApiS
             properties: ownDetails
           };
         }
-
-        // Wire passport.use(passportName, ...) for THIS instance. Each
-        // strategy's `passportName` is `${name}:${appId}`, so two apps using
-        // the same strategy type get isolated Passport registrations.
-        instance.initializePassport();
 
         this.appAuthStrategies.set(NexxusApi.appAuthStrategyKey(appId, strategyName), instance);
 

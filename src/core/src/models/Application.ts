@@ -75,7 +75,6 @@ export interface NexxusUserTypeConfig {
  * under `auth` to express that dependency in the type.
  */
 export interface NexxusApplicationAuthConfig {
-  jwtExpiresIn?: string;
   strategies: Record<string, unknown>;
   /**
    * Per-user-type config, keyed by user type name. When auth is enabled
@@ -99,12 +98,29 @@ export interface NexxusApplicationAuthConfig {
   acl?: boolean
 }
 
+/**
+ * Per-application session policy: how long the two tokens a session is made of
+ * stay valid, in seconds. Application-level rather than under `auth`, for the
+ * same reason as `signingSecret` — an application without authentication still
+ * issues sessions. The constructor resolves both defaults.
+ */
+export interface NexxusApplicationSessionConfig {
+  /** Access-token (JWT) lifetime. 600–7200; defaults to 3600. */
+  jwtExpiresIn?: number;
+  /**
+   * Refresh-token lifetime. ABSOLUTE: fixed when a session starts and never
+   * extended by rotation. 86400–31536000 (1 to 365 days); defaults to 30 days.
+   */
+  refreshTokenExpiresIn?: number;
+}
+
 export type INexxusApplication =
   & INexxusBaseModel<'application'>
   & InferModel<typeof NEXXUS_BUILTIN_MODEL_SCHEMAS.application>
   & {
     schema: NexxusApplicationSchema;
     auth?: NexxusApplicationAuthConfig;
+    session?: NexxusApplicationSessionConfig;
     //defaults to 10 inside the class constructor
     defaultLimit?: number
     //defaults to 100 inside the class constructor. TODO: make this configurable in the Consumer config
@@ -112,6 +128,12 @@ export type INexxusApplication =
   };
 
 export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
+  /** Access-token lifetime when the application declares none: one hour. */
+  private static readonly DEFAULT_JWT_EXPIRES_IN = 60 * 60;
+
+  /** Refresh-token lifetime when the application declares none: 30 days. */
+  private static readonly DEFAULT_REFRESH_TOKEN_EXPIRES_IN = 30 * 24 * 60 * 60;
+
   /**
    * ACL role managers for this app, keyed by role name. Populated at boot by
    * the API/worker after construction (roles are separate `acl` documents,
@@ -194,8 +216,8 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
       throw new Error('Application "signingSecret" is required and must be a non-empty string');
     }
 
-    if (data.defaultLimit !== undefined && (typeof data.defaultLimit !== 'number' || data.defaultLimit <= 10)) {
-      throw new Error('Application "defaultLimit" must be a greater than 10 if provided');
+    if (data.defaultLimit !== undefined && (typeof data.defaultLimit !== 'number' || data.defaultLimit < 10)) {
+      throw new Error('Application "defaultLimit" must be a greater than or equal to 10 if provided');
     }
 
     // Assign resolved defaults onto `this.data` — `super()` already shallow-copied
@@ -209,6 +231,22 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
 
     this.data.maxLimit = data.maxLimit ?? 100;
 
+    if (data.session !== undefined && (typeof data.session !== 'object' || data.session === null)) {
+      throw new Error('Application "session" must be an object if provided');
+    }
+
+    const jwtExpiresIn = data.session?.jwtExpiresIn ?? NexxusApplication.DEFAULT_JWT_EXPIRES_IN;
+    const refreshTokenExpiresIn = data.session?.refreshTokenExpiresIn ?? NexxusApplication.DEFAULT_REFRESH_TOKEN_EXPIRES_IN;
+
+    // Ten minutes to two hours: the access token can't be revoked, so its
+    // lifetime is the longest a leaked one stays usable.
+    NexxusApplication.assertSeconds('session.jwtExpiresIn', jwtExpiresIn, 600, 7200);
+    // At least a day, so a refresh token always outlives the access token it
+    // renews; at most a year, as a sanity cap.
+    NexxusApplication.assertSeconds('session.refreshTokenExpiresIn', refreshTokenExpiresIn, 86400, 31536000);
+
+    this.data.session = { jwtExpiresIn, refreshTokenExpiresIn };
+
     if (data.auth) {
       // Per-app auth block. Per-strategy config shapes are NOT validated here —
       // each strategy's own JSON Schema handles that when the strategy is
@@ -218,10 +256,6 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
       // above — it belongs to the application, not to this block.
       if (typeof data.auth !== 'object') {
         throw new Error('Application "auth" must be an object when provided');
-      }
-
-      if (data.auth.jwtExpiresIn !== undefined && typeof data.auth.jwtExpiresIn !== 'string') {
-        throw new Error('Application "auth.jwtExpiresIn" must be a string if provided');
       }
 
       if (
@@ -288,6 +322,25 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
    */
   public getSigningSecret(): string {
     return this.data.signingSecret;
+  }
+
+  /** Access-token (JWT) lifetime in seconds. Always set: the constructor resolves the default. */
+  public getJwtExpiresIn(): number {
+    return this.data.session!.jwtExpiresIn!;
+  }
+
+  /**
+   * Refresh-token lifetime in seconds — absolute, never extended by rotation.
+   * Always set: the constructor resolves the default.
+   */
+  public getRefreshTokenExpiresIn(): number {
+    return this.data.session!.refreshTokenExpiresIn!;
+  }
+
+  private static assertSeconds(field: string, value: unknown, min: number, max: number): void {
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < min || value > max) {
+      throw new Error(`Application "${field}" must be a whole number of seconds between ${min} and ${max}`);
+    }
   }
 
   /**

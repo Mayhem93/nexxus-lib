@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { NexxusToken, type NexxusTokenUser } from '@mayhem93/nexxus-core-lib';
 
 import AuthMiddleware from '../../src/api/src/lib/middlewares/Auth';
@@ -251,12 +251,20 @@ describe('AuthMiddleware — rejected tokens', () => {
   it('distinguishes an EXPIRED token from an invalid one', async () => {
     // Expiry is the one failure a client can act on by re-authenticating, so it
     // must not be flattened into a generic "invalid".
-    const app = seedApp(makeAuthApp({
-      auth: { strategies: { local: {} }, userDetailSchema: { default: {} }, jwtExpiresIn: '1ms' },
-    }));
-    const token = NexxusToken.issue(app, { appId: 'app1', deviceId: 'd1', user: USER });
+    const app = seedApp(makeAuthApp());
 
-    await new Promise(resolve => setTimeout(resolve, 20));
+    // Minted two hours ago, so its one-hour lifetime has already run out. Only
+    // `Date` is faked, and only around the mint — the server runs on real time.
+    vi.useFakeTimers({ toFake: [ 'Date' ] });
+    vi.setSystemTime(Date.now() - 2 * 60 * 60 * 1000);
+
+    let token: string;
+
+    try {
+      token = NexxusToken.issue(app, { appId: 'app1', deviceId: 'd1', user: USER });
+    } finally {
+      vi.useRealTimers();
+    }
 
     const res = await server.request('/', bearer(token));
 

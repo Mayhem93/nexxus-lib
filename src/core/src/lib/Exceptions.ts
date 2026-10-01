@@ -8,7 +8,8 @@ export enum NexxusExceptions {
   INVALID_SCHEMA_DATA = "InvalidSchemaDataException",
   INVALID_USER_MODEL = "InvalidUserModelException",
   TOKEN_EXPIRED = "TokenExpiredException",
-  INVALID_TOKEN = "InvalidTokenException"
+  INVALID_TOKEN = "InvalidTokenException",
+  SESSION_ENDED = "SessionEndedException"
 };
 
 export class NexxusException extends Error {
@@ -80,7 +81,7 @@ export class InvalidUserModelException extends NexxusException {
 /**
  * A token was well-formed and correctly signed, but its lifetime has passed.
  * Separate from `InvalidTokenException` because it's the one verification
- * failure a client can act on by re-authenticating.
+ * failure a client can act on by refreshing its token.
  */
 export class TokenExpiredException extends NexxusException {
   constructor(message: string) {
@@ -95,5 +96,16 @@ export class TokenExpiredException extends NexxusException {
 export class InvalidTokenException extends NexxusException {
   constructor(message: string) {
     super(NexxusExceptions.INVALID_TOKEN, message);
+  }
+}
+
+/**
+ * A token verified, but the session it belongs to is over — logged out, or past
+ * its refresh deadline. Separate from the two above because it calls for a
+ * different response: neither refreshing nor retrying helps, only a new session.
+ */
+export class SessionEndedException extends NexxusException {
+  constructor(message: string) {
+    super(NexxusExceptions.SESSION_ENDED, message);
   }
 }

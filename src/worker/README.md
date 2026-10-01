@@ -1,590 +1,251 @@
-# @mayhem93/nexxus-worker
+# @mayhem93/nexxus-worker-lib
 
-> Background workers for Nexxus - Process queued operations and route real-time notifications
+> The Nexxus workers as a library: the Writer, the Transport Manager and the websockets transport, plus the base classes they're built on.
 
 ---
 
 ## Overview
 
-The **Worker package** contains the background processing infrastructure that handles asynchronous operations in Nexxus. Workers consume messages from queues, perform business logic, and publish results to downstream queues in a pipeline architecture.
+Each worker is its own process. It connects to the deployment's database, message queue and Redis, consumes one queue, and serves every application stored in the database.
 
-**Key Responsibility:** Execute database writes, route notifications based on subscriptions, and deliver updates to connected clients via transport workers.
+The ready-to-run workers are [nexxus-worker-writer](https://github.com/Mayhem93/nexxus-worker-writer), [nexxus-worker-transport-manager](https://github.com/Mayhem93/nexxus-worker-transport-manager) and [nexxus-worker-websockets-transport](https://github.com/Mayhem93/nexxus-worker-websockets-transport) (Docker images `razvanbotea/nexxus-worker-*`), built on this package.
 
----
+How a change travels:
 
-## Features
+1. The API publishes each model write to the `writer` queue. Transient models skip the Writer and go to `transport-manager` directly.
+2. The **Writer** applies the write to the database and publishes the change to `transport-manager`.
+3. The **Transport Manager** finds every device subscribed to the change, and publishes a `device_message` to each device's transport queue.
+4. The **transport** delivers it — the websockets transport over the device's open connection.
 
-### 🔄 Pipeline Architecture
-
-- **Chain workers** in sequence for multi-stage processing
-- **Parallel execution** across multiple worker instances
-- **Independent scaling** per worker type
-- **Custom workers** can be inserted at any pipeline stage
-
-### ⚡ Built-in Workers
-
-- **Writer Worker** - Persists app model changes to database
-- **Transport Manager Worker** - Routes notifications to appropriate devices
-- **WebSocket Worker** - Delivers updates to WebSocket connections
-
-### 🎯 Worker Characteristics
-
-- **Stateless** - No shared state between instances
-- **Idempotent** - Safe to retry operations
-- **Queue-based** - Decoupled from other services
-- **Fault-tolerant** - Handles failures gracefully
+On logout, the API publishes `device_logout` to the device's transport queue, and the transport closes the device's connection.
 
 ---
 
-## Architecture
-
-```
-                    ┌─────────────────┐
-                    │   API Server    │
-                    └────────┬────────┘
-                             │ publish
-                             ↓
-                    ┌─────────────────┐
-                    │  Writer Queue   │
-                    └────────┬────────┘
-                             │ consume
-                             ↓
-                    ┌─────────────────┐
-                    │ Writer Worker   │───→ Database
-                    └────────┬────────┘
-                             │ publish
-                             ↓
-              ┌──────────────────────────┐
-              │ Transport Manager Queue  │
-              └────────────┬─────────────┘
-                           │ consume
-                           ↓
-              ┌──────────────────────────┐
-              │ Transport Manager Worker │───→ Redis
-              └────────────┬─────────────┘     (subscriptions)
-                           │ publish
-                           ↓
-              ┌──────────────────────────┐
-              │ WebSocket Transport Queue│
-              └────────────┬─────────────┘
-                           │ consume
-                           ↓
-              ┌──────────────────────────┐
-              │   WebSocket Worker       │───→ Connected Clients
-              └──────────────────────────┘
-```
-
----
-
-## Built-in Workers
-
-### Writer Worker
-
-**Queue:** `writer`
-
-**Purpose:** Persist app model CRUD operations to database
-
-**Input Payloads:**
-
-- `NexxusModelCreatedPayload` - Create new model instance
-- `NexxusModelUpdatedPayload` - Update existing model (array of JsonPatches)
-- `NexxusModelDeletedPayload` - Delete model instance
-
-**Process:**
-
-1. Consume message from `writer` queue
-2. Validate payload and model schema
-3. Execute database operation (create/update/delete)
-4. Publish change event to `transport-manager` queue
-
-**Output Queue:** `transport-manager`
-
-**Scaling:** Multiple instances for parallel writes
-
----
-
-### Transport Manager Worker
-
-**Queue:** `transport-manager`
-
-**Purpose:** Determine which devices should receive notifications
-
-**Input Payloads:**
-
-- `NexxusModelCreatedPayload`
-- `NexxusModelUpdatedPayload`
-- `NexxusModelDeletedPayload`
-
-**Process:**
-
-1. Consume change event from `transport-manager` queue
-2. Generate subscription patterns from change metadata
-3. Query Redis for matching subscriptions (filtered & unfiltered)
-4. For filtered subscriptions, test change against FilterQuery
-5. Collect device IDs grouped by transport type
-6. Publish device-specific messages to transport queues
-
-**Output Queues:**
-
-- `websockets-transport` (with slim metadata)
-- `mqtt-transport` (future)
-- Other custom transport queues
-
-**Key Logic:**
-
-```typescript
-// Subscription pattern generation
-Input: { appId: 'myapp', userId: 'user123', model: 'task', modelId: 'task-456' }
-
-Patterns generated:
-- { appId: 'myapp', model: 'task' }
-- { appId: 'myapp', model: 'task', modelId: 'task-456' }
-- { appId: 'myapp', userId: 'user123', model: 'task' }
-- { appId: 'myapp', userId: 'user123', model: 'task', modelId: 'task-456' }
-```
-
-**Filter Testing:**
-
-```typescript
-// Subscription has filter: { "priority": { "$eq": "high" } }
-// Change: { priority: "high", status: "todo" }
-// Result: MATCH → Include device in notification
-```
-
-**Scaling:** Multiple instances process different changes in parallel
-
----
-
-### WebSocket Worker
-
-**Queue:** `websockets-transport`
-
-**Purpose:** Push real-time updates to WebSocket connections
-
-**Input Payload:**
-
-```typescript
-{
-  event: 'device_message',
-  deviceIds: ['device-123', 'device-456'],
-  data: {
-    event: 'model_updated',
-    data: [{
-      op: 'replace',
-      path: ['status'],
-      value: ['completed'],
-      metadata: {
-        channels: ['app:myapp:model:task', 'app:myapp:user:user123:model:task']
-      }
-    }]
-  }
-}
-```
-
-**Process:**
-
-1. Consume device message from `websockets-transport` queue
-2. Look up active WebSocket connections by device ID
-3. Send JSON payload to each connected client
-4. Handle disconnected clients (ignore, clean up subscriptions)
-
-**Connection Management:**
-
-- Tracks active WebSocket connections
-- Maps device IDs to WebSocket instances
-- Removes subscriptions on disconnect
-- Supports multiple connections per device
-
-**Scaling:** Sticky sessions or shared connection registry required
-
----
-
-## Worker Pipeline Flow
-
-### Create Operation
-
-```
-1. Client: POST /model/task
-   ↓
-2. API: Publish to writer queue
-   Payload: { event: 'model_created', data: { appId, userId, type, id, ...fields } }
-   ↓
-3. Writer Worker: Consume from writer queue
-   - Execute: database.createItem(data)
-   - Publish to transport-manager queue (same payload)
-   ↓
-4. Transport Manager: Consume from transport-manager queue
-   - Query Redis for subscriptions
-   - Filter by channel patterns and FilterQuery
-   - Group devices by transport
-   - Publish to websockets-transport queue
-   Payload: { event: 'device_message', deviceIds: [...], data: {...} }
-   ↓
-5. WebSocket Worker: Consume from websockets-transport queue
-   - Find active connections for deviceIds
-   - Send to each client: { event: 'model_created', data: {...} }
-```
-
-### Update Operation
-
-```
-1. Client: PATCH /model/task/123
-   ↓
-2. API: Publish to writer queue
-   Payload: { event: 'model_updated', data: [JsonPatch1, JsonPatch2] }
-   ↓
-3. Writer Worker: Consume from writer queue
-   - Execute: database.updateItem(patches)
-   - Publish to transport-manager queue (same payload)
-   ↓
-4. Transport Manager: Consume from transport-manager queue
-   - For each patch, check subscriptions
-   - Test against FilterQuery (if filtered)
-   - Collect matching devices
-   - Transform to slim metadata:
-     Full: { op, path, value, metadata: { appId, userId, type, id } }
-     Slim: { op, path, value, metadata: { channels: [...] } }
-   - Publish to transport queues
-   ↓
-5. WebSocket Worker: Consume from websockets-transport queue
-   - Deliver slim patches to clients
-```
-
----
-
-## Custom Worker Pipeline
-
-### Adding a Custom Worker
-
-You can insert custom workers at any point in the pipeline for additional processing.
-
-**Example: Email Notification Worker**
-
-```
-Writer Worker
-    ├─→ Transport Manager Queue (existing)
-    └─→ Email Worker Queue (custom)
-          ↓
-       Email Worker
-          - Check if change triggers email
-          - Send notification email
-          - Log delivery status
-```
-
-**Queue Configuration:**
-
-```typescript
-{
-  queues: {
-    'writer': { /* config */ },
-    'transport-manager': { /* config */ },
-    'email-notifications': { /* config */ },  // Custom queue
-    'websockets-transport': { /* config */ }
-  }
-}
-```
-
----
-
-### Custom Worker Types
-
-**Pre-processing Worker:**
-
-- Position: Before Writer Worker
-- Purpose: Validate, transform, or enrich data before persistence
-
-**Post-processing Worker:**
-
-- Position: After Writer Worker (parallel to Transport Manager)
-- Purpose: Trigger side effects (emails, webhooks, analytics)
-
-**Filter Worker:**
-
-- Position: Before Transport Manager
-- Purpose: Additional filtering logic, rate limiting, aggregation
-
-**Transform Worker:**
-
-- Position: After Transport Manager
-- Purpose: Format notifications per transport (SMS, push, email)
-
----
-
-## Worker Lifecycle
-
-### Initialization
-
-1. Load configuration (database, message queue, redis)
-2. Connect to dependencies (DB, Redis, RabbitMQ)
-3. Subscribe to queue(s)
-4. Start consuming messages
-
-### Message Processing
-
-1. Receive message from queue
-2. Deserialize payload
-3. Execute business logic
-4. Publish to downstream queue(s)
-5. Acknowledge message (auto/manual)
-
-### Graceful Shutdown
-
-1. Stop accepting new messages
-2. Wait for in-flight messages to complete
-3. Disconnect from dependencies
-4. Exit process
-
----
-
-## Scaling Strategies
-
-### Horizontal Scaling
-
-**Run multiple instances per worker type:**
+## Installation
 
 ```bash
-# Writer Workers (3 instances)
-worker-1: node writer.js
-worker-2: node writer.js
-worker-3: node writer.js
-
-# Transport Manager Workers (2 instances)
-tm-1: node transport-manager.js
-tm-2: node transport-manager.js
-
-# WebSocket Workers (sticky sessions required)
-ws-1: node websocket.js
-ws-2: node websocket.js
+npm install @mayhem93/nexxus-worker-lib @mayhem93/nexxus-core-lib @mayhem93/nexxus-database-lib @mayhem93/nexxus-message-queue-lib @mayhem93/nexxus-redis
 ```
 
-**Message Distribution:**
+The four packages after the workers are peer dependencies. Requires Node.js 24 or later.
 
-- RabbitMQ distributes messages across instances (round-robin)
-- Each instance processes a subset of messages
-- No coordination needed (stateless workers)
+---
 
-## Package Structure
+## Running a worker
 
+```js
+import { NexxusConfigManager } from '@mayhem93/nexxus-core-lib';
+import { NexxusRedis } from '@mayhem93/nexxus-redis';
+import { NexxusBaseWorker, NexxusWriterWorker } from '@mayhem93/nexxus-worker-lib';
+
+const configManager = new NexxusConfigManager('./nexxus-writer.conf.json');
+
+await configManager.validateServices([ NexxusRedis, NexxusWriterWorker ]);
+
+const config = configManager.getConfig('app');
+
+// Built-in class names resolve directly; anything else is imported as an npm package.
+const LoggerClass = await NexxusBaseWorker.resolveFactoryService(configManager, config.logger);
+const DbClass     = await NexxusBaseWorker.resolveConstructableService(configManager, config.database);
+const MqClass     = await NexxusBaseWorker.resolveConstructableService(configManager, config.message_queue);
+
+// Validates the config sections the resolved classes declare.
+await configManager.validateServices();
+
+const logger = await LoggerClass.create({ configManager });
+const worker = new NexxusWriterWorker({
+  configManager,
+  logger,
+  database:     new DbClass({ configManager, logger }),
+  messageQueue: new MqClass({ configManager, logger }),
+  redis:        new NexxusRedis({ configManager, logger }),
+});
+
+await worker.init();
+
+process.once('SIGTERM', () => worker.close());
+process.once('SIGINT',  () => worker.close());
 ```
-src/
-├── workers/
-│   ├── WriterWorker.ts          # Database persistence
-│   ├── TransportManager.ts      # Notification routing
-│   └── WebSocketWorker.ts       # WebSocket delivery
-│
-├── base/
-│   └── BaseWorker.ts            # Abstract worker class
-│
-└── index.ts                     # Public exports
-```
+
+`NexxusTransportManagerWorker` and `NexxusWebsocketsTransportWorker` start the same way.
+
+`init()`, in order:
+
+1. Connects to the database, message queue and Redis, and waits until all three are up.
+2. Loads every application, with its ACL roles.
+3. A websockets transport picks its slot and creates its queue — see [Websockets transport](#websockets-transport).
+4. Starts consuming its queue.
+5. Starts the management server on `app.management.port`.
+6. Registers with the Hub, when `app.hub` is set.
+7. A transport then starts its listener: the websockets transport opens its WebSocket server on `app.port`.
+
+`init()` rejects, and the worker doesn't start, when an ACL role doesn't validate against its application's schema, a user type names a role that doesn't exist, or a websockets transport's slot or port is already taken.
+
+While the database, the message queue or Redis is disconnected, the worker stops consuming. It resumes once all three are connected again.
+
+`close()` deregisters from the Hub, stops the management server and disconnects from the database, message queue and Redis. A websockets transport also deletes its slot queue and closes its WebSocket server.
 
 ---
 
 ## Configuration
 
-### Worker Configuration
+Every worker reads the `app` section of the config file. The `database`, `message_queue`, `redis` and `logger` sections belong to the adapters — see their packages for every key. How the file is found, and layered with environment variables, is described in [`nexxus-core-lib`](../core/README.md#configuration-management).
 
-```typescript
+```jsonc
 {
-  workers: {
-    writer: {
-      enabled: true,
-      instances: 3,           // Number of worker instances
-      queue: 'writer',
-      prefetch: 10,          // Messages to process concurrently
-      autoAck: false         // Manual acknowledgment
-    },
-    transportManager: {
-      enabled: true,
-      instances: 2,
-      queue: 'transport-manager',
-      prefetch: 5
-    },
-    websocket: {
-      enabled: true,
-      instances: 2,
-      queue: 'websockets-transport',
-      prefetch: 20,
-      port: 8080            // WebSocket server port
-    }
-  }
+  "app": {
+    "port": 7000,
+    "logger": "WinstonNexxusLogger",
+    "database": "NexxusElasticsearchDb",
+    "message_queue": "NexxusRabbitMq",
+    "management": { "port": 9004, "token": "<management token>" },
+    "hub": { "endpoint": "http://hub.internal:9000", "token": "<hub token>" }
+  },
+  "database":      { "host": "localhost", "port": 9200 },
+  "message_queue": { "host": "localhost", "port": 5672, "user": "nexxus", "password": "<password>" },
+  "redis":         { "host": "localhost", "port": 6379 },
+  "logger":        { "level": "info", "logType": "json", "transports": [ { "type": "stdout" } ] }
 }
 ```
 
----
+| Key | Required | Meaning |
+| --- | --- | --- |
+| `logger` | yes | Logger class: `WinstonNexxusLogger`, or an npm package name. |
+| `database` | yes | Database adapter: `NexxusElasticsearchDb`, or an npm package name. |
+| `message_queue` | yes | Message-queue adapter: `NexxusRabbitMq`, or an npm package name. |
+| `management.port`, `management.token` | yes | Port and bearer token of the management server. |
+| `hub.endpoint`, `hub.token` | no | Hub to register with. Without it the worker runs standalone. |
+| `port` | websockets transport only | Port of the WebSocket server. |
 
-### Database Configuration
-
-```typescript
-{
-  database: {
-    adapter: 'elasticsearch',
-    nodes: ['http://localhost:9200']
-  }
-}
-```
+No worker reads environment variables of its own.
 
 ---
 
-### Message Queue Configuration
+## Built-in workers
 
-```typescript
-{
-  messageQueue: {
-    adapter: 'rabbitmq',
-    url: 'amqp://localhost:5672',
-    options: {
-      prefetch: 10,
-      reconnectDelay: 5000
-    }
-  }
-}
-```
+| Worker | Consumes | Hub role | Instances |
+| --- | --- | --- | --- |
+| `NexxusWriterWorker` | `writer` | `writer` | Any number, sharing the queue. |
+| `NexxusTransportManagerWorker` | `transport-manager` | `transport-manager` | Any number, sharing the queue. |
+| `NexxusWebsocketsTransportWorker` | `websockets-transport_<slot>` | `websockets-transport` | Any number, one queue each. |
 
----
+### Writer
 
-### Redis Configuration
+- **Create** — validates the record against the model's schema, stores it, and publishes `model_created`.
+- **Update** — validates each patch, adds one that sets `updatedAt`, and applies them. It publishes `model_updated` with the record's filterable fields as they are after the update. An update for a record that doesn't exist is dropped, with a warning.
+- **Delete** — removes the record and publishes `model_deleted`.
+- On applications with access control, it also keeps the Redis copy of the fields ACL conditions are checked against.
 
-```typescript
-{
-  redis: {
-    mode: 'cluster',
-    nodes: [
-      { host: 'redis-1.example.com', port: 6379 },
-      { host: 'redis-2.example.com', port: 6379 }
-    ]
-  }
-}
-```
+### Transport Manager
 
----
+For each change, it collects:
 
-## WebSocket Protocol
+- every device with a subscription to a channel the change falls under, and
+- every device with a filtered subscription whose filter matches the changed record: the new record for a create, its filterable fields after an update, its identity fields for a delete.
 
-### Client Connection
+Devices are grouped by transport queue and by the channels they matched, and each group gets one `device_message`.
 
-```
-ws://localhost:8080
-```
+### Websockets transport
 
-**Authentication:**
-
-- JWT token passed as query parameter
-- Validated on connection
-- Device ID extracted from token
+- Each instance consumes its own queue, `websockets-transport_<slot>`. The slot is the lowest number the Hub doesn't list as taken. Without a Hub the slot is 0, and a second instance fails to start.
+- A connected device is recorded in Redis as online on that queue, which is where the Transport Manager sends its events. On disconnect it is marked offline.
+- Messages of 2 KB or more are compressed for clients that support `permessage-deflate`. The server answers pings and sends none.
 
 ---
 
-### Message Format (Server → Client)
+## Websockets protocol
 
-**Model Created:**
+Every frame is JSON: `{ "event": "<name>", "data": { … } }`.
+
+### Client → server
+
+| `event` | `data` | Reply |
+| --- | --- | --- |
+| `register` | `{ "token": "<access token>" }` | `register` with `{ "success": true }`, or `error` |
+| `refresh_access_token` | `{ "token": "<new access token>" }` | `refresh_access_token` with `{ "success": true }`, or `error` |
+
+- **`register`** binds the connection to the device the access token names; the token comes from the API. If it fails, the connection stays open and `register` can be sent again. A second `register` on a registered connection is ignored.
+- **`refresh_access_token`** moves a registered connection onto a new access token from `POST /auth/refresh`, without reconnecting. Send it before the current token expires. The new token must name the same device and application.
+- Any other `event` is ignored, without a reply.
+
+### Server → client
+
+| `event` | `data` |
+| --- | --- |
+| `model_created` | `{ "event", "model": { …the record }, "metadata": { "channels" } }` |
+| `model_updated` | `{ "event", "model": { "id", "type", "appId", "userId", "version" }, "patches": [ { "op", "path", "value" } ], "metadata": { "channels" } }` |
+| `model_deleted` | `{ "event", "model": { "id", "type", "appId", "userId" }, "metadata": { "channels" } }` |
+| `error` | `{ "message", "code" }` |
+
+- `metadata.channels` lists the channel ids, as returned by `POST /subscription`, that the event matched.
+- `model.version` on `model_updated` is the record's version after the update. Apply the patches when it is one more than your copy's version; on a larger gap, read the record again.
+- An `error` frame doesn't say which frame it answers.
+
+| `code` | Meaning |
+| --- | --- |
+| `TOKEN_EXPIRED` | The token sent has expired. Get a new one from `POST /auth/refresh` and send it again. |
+| `SESSION_ENDED` | The device's session is over, and refreshing won't help. Start a new session. |
+| `INVALID_PARAMETERS` | Malformed frame, or a token that doesn't verify. |
+| `DEVICE_NOT_FOUND` | The device the token names no longer exists. |
+| `INTERNAL_SERVER_ERROR` | Unexpected server error. |
+
+### Connection lifecycle
+
+- Subscribe over HTTP with `POST /subscription` once the connection is registered; the API answers `409` for a device that isn't connected.
+- When the connection closes, the device's subscriptions are removed. After reconnecting, register and subscribe again.
+- Nothing is delivered past the access token's expiry: the next event closes the connection with code `4002`.
+
+| Close code | Reason | Client |
+| --- | --- | --- |
+| `4001` | `logged_out` | The session was ended with `POST /auth/logout`. Don't reconnect with it. |
+| `4002` | `token_expired` | Refresh the token, reconnect, and register again. |
+
+---
+
+## Custom workers and transports
+
+The built-in workers are subclasses of the exported base classes.
+
+- **`NexxusBaseWorker`** — set `queueName` and `nodeRole`, a static `schemaPath` for the worker's `app` config, and implement `processMessage(msg)`. `publish(queue, payload)` sends to another queue; `getOwnStats()` adds fields to `/stats`. Nothing built in publishes to a custom queue.
+- **`NexxusVolatileTransportWorker`** — for transports that hold a connection per device. Implement `initTransport()`, `sendToDevice(deviceId, data)` and `disconnectDevice(deviceId, reason)`. `authenticateDevice(token)`, `authenticateRefreshedToken(token, deviceId, appId)`, `registerDevice(deviceId)` and `unregisterDevice(deviceId)` cover token checks and the device's Redis state. Slot queues come with it.
+- **`NexxusPersistentTransportWorker`** — for push services (APNs, FCM, …). All instances share one queue. Implement `initTransport()` and `sendToDevice(deviceId, data)`. No push transport ships yet.
+
+---
+
+## Management server and Hub
+
+The management server answers `GET /stats` on `app.management.port`, with `Authorization: Bearer <app.management.token>`; a missing or wrong token gets `401`.
 
 ```json
-{
-  "event": "model_created",
-  "data": {
-    "appId": "myapp",
-    "userId": "user123",
-    "type": "task",
-    "id": "task-456",
-    "title": "New Task",
-    "status": "todo"
-  }
-}
+{ "uptime": 812.4, "queueName": "websockets-transport_0", "loadedApps": 3, "initialized": true, "logger": { },
+  "registeredClients": 120, "unregisteredClients": 2, "totalConnections": 122 }
 ```
 
-**Model Updated (Slim Metadata):**
+The last three fields are the websockets transport's.
 
-```json
-{
-  "event": "model_updated",
-  "data": [
-    {
-      "op": "replace",
-      "path": ["status"],
-      "value": ["completed"],
-      "metadata": {
-        "channels": [
-          "app:myapp:model:task",
-          "app:myapp:user:user123:model:task"
-        ]
-      }
-    }
-  ]
-}
-```
-
-**Model Deleted:**
-
-```json
-{
-  "event": "model_deleted",
-  "data": {
-    "appId": "myapp",
-    "userId": "user123",
-    "type": "task",
-    "id": "task-456"
-  }
-}
-```
+With `app.hub` set, a worker registers with the Hub under its role — a websockets transport with its slot too — retrying until the Hub answers, and deregisters on `close()`. An unreachable Hub doesn't stop the worker.
 
 ---
 
-### Connection Lifecycle
+## Known limitations
 
-**Connect:**
-
-1. Client opens WebSocket connection
-2. Server validates JWT token
-3. Server registers device in Redis
-4. Connection established
-
-**Disconnect:**
-
-1. Client closes connection (or network failure)
-2. Server detects disconnect
-3. Server removes device subscriptions from Redis
-4. Server deletes device entry from Redis
+- Applications and their ACL roles are read once, at startup. Restart every worker after creating or changing an application or a role; until then, the websockets transport refuses tokens of a new application.
+- With the built-in Elasticsearch adapter, only the first 100 applications are loaded.
+- A delete carries only the record's identity fields, so a filtered subscription whose filter tests any other field isn't told about it.
 
 ---
 
-## Dependencies
+## Related packages
 
-**Runtime:**
-
-- `ws` (WebSocket library)
-- `@mayhem93/nexxus-core` (models, FilterQuery, JsonPatch, payloads)
-- `@mayhem93/nexxus-database` (database operations)
-- `@mayhem93/nexxus-message-queue` (queue operations)
-- `@mayhem93/nexxus-redis` (subscription lookups)
-
-**DevDependencies:**
-
-- TypeScript
-- Node.js type definitions
+- [`@mayhem93/nexxus-api-lib`](../api/) — the API that publishes model writes and issues the tokens transports accept.
+- [`@mayhem93/nexxus-core-lib`](../core/) — models, FilterQuery, JsonPatch, queue payload types, configuration, logging.
+- [`@mayhem93/nexxus-database-lib`](../database/), [`@mayhem93/nexxus-message-queue-lib`](../message_queue/), [`@mayhem93/nexxus-redis`](../redis/) — the adapters workers are constructed with.
 
 ---
 
 ## Status
 
-🚧 **Work in Progress** - Additional workers and features planned.
-
-**Coming Soon:**
-
-- MQTT transport worker
-- SSE transport worker
-- Worker monitoring dashboard
-- Custom worker scaffolding tool
-
----
-
-## Related Packages
-
-- **[@mayhem93/nexxus-core](../core/)** - Payload types, FilterQuery, JsonPatch
-- **[@mayhem93/nexxus-api](../api/)** - Publishes to writer queue
-- **[@mayhem93/nexxus-database](../database/)** - Used by Writer Worker
-- **[@mayhem93/nexxus-redis](../redis/)** - Used by Transport Manager
-- **[@mayhem93/nexxus-message-queue](../message_queue/)** - Queue infrastructure
+🚧 Pre-alpha. Queue payloads, the websockets protocol and config keys can still change between versions; breaking changes land without deprecation shims.
 
 ---
 

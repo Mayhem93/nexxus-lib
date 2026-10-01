@@ -127,6 +127,16 @@ describe('NexxusGoogleAuthStrategy — declared metadata', () => {
     expect(() => new NexxusGoogleAuthStrategy({ clientID: 'x' } as never, googleApp()))
       .toThrow(/Invalid config for auth strategy "NexxusGoogleAuthStrategy"/);
   });
+
+  it('rejects OAuth credentials that are present but empty', () => {
+    // `required` only checks that the key exists, so a blank value would get
+    // past it and fail later: inside Passport for clientID, at Google for the
+    // other two.
+    for (const field of [ 'clientID', 'clientSecret', 'callbackURL' ] as const) {
+      expect(() => new NexxusGoogleAuthStrategy({ ...CONFIG, [field]: '' }, googleApp()))
+        .toThrow(`/${field}: must NOT have fewer than 1 characters`);
+    }
+  });
 });
 
 describe('NexxusGoogleAuthStrategy.handleAuth', () => {

@@ -13,6 +13,7 @@ enum ApiExceptions {
   NO_AUTH_PRESENT = "NoAuthPresentException",
   USER_AUTH_FAILED = "UserAuthenticationFailedException",
   USER_TOKEN_EXPIRED = "UserTokenExpiredException",
+  INVALID_REFRESH_TOKEN = "InvalidRefreshTokenException",
   USER_ALREADY_EXISTS = "UserAlreadyExistsException"
 };
 
@@ -127,6 +128,20 @@ export class UserTokenExpiredException extends NexxusApiException {
 
   constructor(message: string) {
     super(ApiExceptions.USER_TOKEN_EXPIRED, message);
+  }
+}
+
+/**
+ * A refresh token that can't be exchanged: malformed, unknown, expired, replayed,
+ * or naming another application's device. One exception for all of them, because
+ * to a client they mean the same thing — sign in again. Not a
+ * `UserAuthenticationFailedException`: a zero-auth device has no user.
+ */
+export class InvalidRefreshTokenException extends NexxusApiException {
+  public readonly statusCode = 401;
+
+  constructor(message: string) {
+    super(ApiExceptions.INVALID_REFRESH_TOKEN, message);
   }
 }
 

@@ -3,11 +3,16 @@ name: Tests
 on:
   pull_request:
     branches: [ main ]
+  # The README badge asks for `?branch=main`, and a pull_request run belongs to
+  # its head branch — without a run on main itself the badge reads "no status".
+  push:
+    branches: [ main ]
 
-# A new push to the same PR makes the in-flight run redundant.
+# A new push to the same PR makes the in-flight run redundant. Runs on main are
+# never cancelled, so every commit there gets a result.
 concurrency:
   group: tests-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read

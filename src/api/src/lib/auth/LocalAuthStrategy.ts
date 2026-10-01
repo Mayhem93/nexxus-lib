@@ -91,8 +91,10 @@ export default class NexxusLocalAuthStrategy extends NexxusAuthStrategy {
       }
 
       // The client passes back the device id it stored at its last login, so a
-      // returning user reuses their device instead of accruing a new one.
-      void this.sendTokenResponse(res, user, req.body?.device).catch(next);
+      // returning user reuses their device instead of accruing a new one. This
+      // is the hint's one legitimate use: the account already exists, so it may
+      // already own the device being named.
+      void this.sendSessionForExistingUser(res, user, req.body?.device).catch(next);
     })(req, res, next);
   }
 

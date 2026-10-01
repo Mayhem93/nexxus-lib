@@ -165,6 +165,8 @@ describe('openapi.yaml', () => {
       'GET /device/list',
       'GET /model/{id}',
       'GET /user/me',
+      'POST /auth/logout',
+      'POST /auth/refresh',
       'POST /auth/{strategy}',
       'POST /device/register',
       'POST /model',

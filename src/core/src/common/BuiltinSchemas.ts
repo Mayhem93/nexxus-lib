@@ -79,6 +79,19 @@ export const NEXXUS_DEPLOYMENT_MODEL_SCHEMAS = {
      */
     signingSecret:      { type: 'string',  required: true },
     /**
+     * Session policy: how long the two tokens a session is made of stay valid,
+     * in seconds. Application-level for the same reason as `signingSecret` — an
+     * app without authentication still issues sessions. Bounds and defaults are
+     * enforced by the `NexxusApplication` constructor.
+     */
+    session: {
+      type: 'object', required: false,
+      properties: {
+        jwtExpiresIn:          { type: 'int', required: false },
+        refreshTokenExpiresIn: { type: 'int', required: false }
+      },
+    },
+    /**
      * Per-application auth block. When `authEnabled` is true this must be
      * present and contain a non-empty `strategies` map; when false it should
      * be absent or have an empty `strategies`. The conditional rule isn't
@@ -92,7 +105,6 @@ export const NEXXUS_DEPLOYMENT_MODEL_SCHEMAS = {
     auth: {
       type: 'object', required: false, nullable: true,
       properties: {
-        jwtExpiresIn:     { type: 'string', required: false },
         strategies:       { type: 'object', required: true,  properties: {} },
         userTypes:        { type: 'object', required: false, properties: {} },
         userDetailSchema: { type: 'object', required: false, properties: {} },

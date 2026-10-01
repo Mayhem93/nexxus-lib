@@ -56,6 +56,9 @@ const build = async (): Promise<any> => {
 
   workers.push(w);
 
+  // The parts of `init()` these tests need, in its order: the queue is
+  // connected before the slot is picked.
+  await h.mq.connect();
   await w.beforeConsume(); // picks slot 0 → queueName 'websockets-transport_0'
   await w.initTransport();
 
@@ -66,11 +69,19 @@ const build = async (): Promise<any> => {
 const tokenFor = (deviceId: string, over: Record<string, unknown> = {}): string =>
   NexxusToken.issue(app, { appId: 'app1', deviceId, ...over });
 
-/** Seed a device document in the in-memory redis so NexxusDevice ops resolve. */
+/**
+ * Seed a device document in the in-memory redis so NexxusDevice ops resolve.
+ * It has a live session unless told otherwise — registration refuses a device
+ * whose session has ended. Pass `session: undefined` to seed one that has.
+ */
 const seedDevice = (id: string, over: Record<string, unknown> = {}) => {
   h.redisClient.store.set(NexxusDevice.getKey(id), {
     type: 'json',
-    value: { id, appId: 'app1', name: 'D', type: 'unknown', subscriptions: [], ...over },
+    value: {
+      id, appId: 'app1', name: 'D', type: 'unknown', subscriptions: [],
+      session: { hash: 'not-read-by-the-transport', expiresAt: Math.floor(Date.now() / 1000) + 86400 },
+      ...over,
+    },
   } as never);
 };
 
@@ -113,13 +124,13 @@ const waitFor = async (predicate: () => boolean, label: string): Promise<void> =
 const register = (token: unknown) => JSON.stringify({ event: 'register', data: { token } });
 
 /** Register a device end-to-end and hand back its live socket. */
-const registered = async (w: any, deviceId = 'd1'): Promise<WebSocket> => {
+const registered = async (w: any, deviceId = 'd1', token = tokenFor(deviceId)): Promise<WebSocket> => {
   seedDevice(deviceId);
 
   const client = await connect();
   const reply = nextFrame(client);
 
-  client.send(register(tokenFor(deviceId)));
+  client.send(register(token));
 
   expect(await reply).toEqual({ event: 'register', data: { success: true } });
 
@@ -259,21 +270,26 @@ describe('NexxusWebsocketsTransportWorker registration', () => {
     });
   });
 
-  it('tells a client with an expired token to re-authenticate', async () => {
+  it('tells a client with an expired token to refresh it and register again', async () => {
     await build();
     seedDevice('d1');
 
     // Same signing key, so the signature is fine — only `exp` has passed. The
     // client needs to go get a new token, which is a different instruction from
     // "your token is invalid".
-    const shortLived = new NexxusApplication({
-      id: 'app1', type: 'application', signingSecret: SIGNING_SECRET, name: 'A',
-      schema: { runs: { fields: { note: { type: 'string' } } } },
-      auth: { jwtExpiresIn: '1ms', strategies: { local: {} }, userDetailSchema: { default: {} } },
-    } as never);
-    const expired = NexxusToken.issue(shortLived, { appId: 'app1', deviceId: 'd1' });
+    //
+    // Minted two hours ago, so its one-hour lifetime has already run out. Only
+    // `Date` is faked, and only around the mint — the socket runs on real time.
+    vi.useFakeTimers({ toFake: [ 'Date' ] });
+    vi.setSystemTime(Date.now() - 2 * 60 * 60 * 1000);
 
-    await new Promise(resolve => setTimeout(resolve, 20));
+    let expired: string;
+
+    try {
+      expired = NexxusToken.issue(app, { appId: 'app1', deviceId: 'd1' });
+    } finally {
+      vi.useRealTimers();
+    }
 
     const client = await connect();
     const reply = nextFrame(client);
@@ -283,8 +299,8 @@ describe('NexxusWebsocketsTransportWorker registration', () => {
     expect(await reply).toEqual({
       event: 'error',
       data: {
-        message: 'Token has expired — re-authenticate and reconnect.',
-        code: 'INVALID_PARAMETERS',
+        message: 'Token has expired — refresh it and register again.',
+        code: 'TOKEN_EXPIRED',
       },
     });
   });
@@ -746,5 +762,203 @@ describe('NexxusWebsocketsTransportWorker.close', () => {
     // Second time round the ws server is already down, so its close callback
     // hands back an error rather than resolving.
     await expect(w.close()).rejects.toThrow(/not running/i);
+  });
+});
+
+/**
+ * A token for `deviceId` minted `minutesAgo` minutes in the past. The app's
+ * lifetime is one hour, so 50 minutes ago means it runs out 10 minutes from now.
+ * Only `Date` is faked, and only around the mint.
+ */
+const tokenMintedAgo = (deviceId: string, minutesAgo: number): string => {
+  vi.useFakeTimers({ toFake: [ 'Date' ] });
+  vi.setSystemTime(Date.now() - minutesAgo * 60 * 1000);
+
+  try {
+    return tokenFor(deviceId);
+  } finally {
+    vi.useRealTimers();
+  }
+};
+
+/**
+ * Run `fn` as if it were `minutesAhead` minutes from now. Only `Date` is faked,
+ * and only for the synchronous part of the call — which is where the expiry
+ * check, the send and the close all happen.
+ */
+const asIfLater = <T>(minutesAhead: number, fn: () => T): T => {
+  vi.useFakeTimers({ toFake: [ 'Date' ] });
+  vi.setSystemTime(Date.now() + minutesAhead * 60 * 1000);
+
+  try {
+    return fn();
+  } finally {
+    vi.useRealTimers();
+  }
+};
+
+const refreshAccessToken = (token: unknown) => JSON.stringify({ event: 'refresh_access_token', data: { token } });
+
+/** Resolves with the code and reason the server closed `ws` with. */
+const closeOf = (ws: WebSocket): Promise<{ code: number; reason: string }> =>
+  new Promise(resolve => ws.once('close', (code, reason) => resolve({ code, reason: reason.toString() })));
+
+describe('NexxusWebsocketsTransportWorker access-token refresh', () => {
+  it('moves the connection onto a refreshed token without dropping it', async () => {
+    const w = await build();
+    const client = await registered(w, 'd1', tokenMintedAgo('d1', 50));
+    const ack = nextFrame(client);
+
+    client.send(refreshAccessToken(tokenFor('d1')));
+
+    expect(await ack).toEqual({ event: 'refresh_access_token', data: { success: true } });
+
+    // 30 minutes on: past the token it registered with, well inside the new one.
+    const delivered = nextFrame(client);
+
+    await asIfLater(30, () => w.sendToDevice('d1', CREATED));
+
+    expect(await delivered).toMatchObject({ event: 'model_created' });
+  });
+
+  it('refuses a token for another device, and keeps the connection on the one it has', async () => {
+    const w = await build();
+    const client = await registered(w);
+    const reply = nextFrame(client);
+
+    client.send(refreshAccessToken(tokenFor('d2')));
+
+    expect(await reply).toEqual({
+      event: 'error',
+      data: {
+        message: 'Invalid token: Token names a different device than the one this connection registered as',
+        code: 'INVALID_PARAMETERS',
+      },
+    });
+
+    // Still registered, still receiving.
+    const delivered = nextFrame(client);
+
+    await w.sendToDevice('d1', CREATED);
+
+    expect(await delivered).toMatchObject({ event: 'model_created' });
+  });
+
+  it('refuses an expired token', async () => {
+    const w = await build();
+    const client = await registered(w);
+    const reply = nextFrame(client);
+
+    client.send(refreshAccessToken(tokenMintedAgo('d1', 120)));
+
+    expect(await reply).toEqual({
+      event: 'error',
+      data: { message: 'Token has expired — refresh it and send it again.', code: 'TOKEN_EXPIRED' },
+    });
+  });
+
+  it('asks an unregistered connection to register first', async () => {
+    await build();
+
+    const client = await connect();
+    const reply = nextFrame(client);
+
+    client.send(refreshAccessToken(tokenFor('d1')));
+
+    expect(await reply).toEqual({
+      event: 'error',
+      data: { message: 'Register before refreshing the access token.', code: 'INVALID_PARAMETERS' },
+    });
+  });
+});
+
+describe('NexxusWebsocketsTransportWorker ending a connection', () => {
+  /**
+   * A well-behaved client refreshes in place before expiry, so this only ever
+   * catches one that didn't. It gets nothing past its token's lifetime.
+   */
+  it('disconnects a connection whose token has expired instead of delivering to it', async () => {
+    const w = await build();
+    const client = await registered(w, 'd1', tokenMintedAgo('d1', 50));
+    const closed = closeOf(client);
+    let delivered = false;
+
+    client.on('message', () => { delivered = true; });
+
+    await asIfLater(30, () => w.sendToDevice('d1', CREATED));
+
+    expect(await closed).toEqual({ code: 4002, reason: 'token_expired' });
+    expect(delivered).toBe(false);
+    // Torn down like any other disconnect.
+    await waitFor(() => storedDevice('d1').status === 'offline', 'the device to go offline');
+  });
+
+  it('disconnects a device on device_logout', async () => {
+    const w = await build();
+    const client = await registered(w);
+    const closed = closeOf(client);
+
+    await w.processMessage({ payload: { event: 'device_logout', deviceIds: [ 'd1' ] } });
+
+    expect(await closed).toEqual({ code: 4001, reason: 'logged_out' });
+    await waitFor(() => storedDevice('d1').status === 'offline', 'the device to go offline');
+  });
+
+  it('leaves everyone else alone on a device_logout for a device with no connection here', async () => {
+    const w = await build();
+    const bystander = await registered(w);
+    let closed = false;
+
+    bystander.on('close', () => { closed = true; });
+
+    await expect(w.processMessage({ payload: { event: 'device_logout', deviceIds: [ 'ghost' ] } }))
+      .resolves.toBeUndefined();
+
+    expect(closed).toBe(false);
+  });
+
+  /**
+   * A client that has just logged out may close its own socket while the
+   * worker closes it too. Teardown must still run exactly once.
+   */
+  it('tears a connection down exactly once when both ends close it', async () => {
+    const w = await build();
+    const client = await registered(w);
+    const unregister = vi.spyOn(w, 'unregisterDevice');
+    const closed = closeOf(client);
+
+    client.close();
+    await w.disconnectDevice('d1', 'logged_out');
+    await w.disconnectDevice('d1', 'logged_out');
+    await closed;
+
+    await waitFor(() => w.wsToNexxusClientMap.size === 0, 'the connection to be torn down');
+
+    expect(unregister).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('NexxusWebsocketsTransportWorker registration after a session ends', () => {
+  /**
+   * A logged-out device keeps an access token that is valid until it expires.
+   * Registration refusing it is what stops the device reconnecting — on this
+   * node or any other — after a logout closed its socket.
+   */
+  it('refuses a device whose session has ended or expired', async () => {
+    await build();
+
+    for (const session of [ undefined, { hash: 'h', expiresAt: Math.floor(Date.now() / 1000) - 1 } ]) {
+      seedDevice('d1', { session });
+
+      const client = await connect();
+      const reply = nextFrame(client);
+
+      client.send(register(tokenFor('d1')));
+
+      expect(await reply).toEqual({
+        event: 'error',
+        data: { message: 'The session this token belongs to has ended.', code: 'SESSION_ENDED' },
+      });
+    }
   });
 });

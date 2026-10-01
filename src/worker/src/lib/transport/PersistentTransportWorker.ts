@@ -21,7 +21,7 @@ export type NexxusPersistentTransportWorkerStats = NexxusBaseTransportWorkerStat
  * Queue topology: all instances consume from a SHARED queue (no per-node suffix),
  * so they act as competing consumers — more instances simply mean more throughput
  * to the 3rd-party API. This is the default behavior inherited from
- * NexxusBaseTransportWorker; beforeConsume() is intentionally not overridden.
+ * NexxusBaseWorker; beforeConsume() is intentionally not overridden.
  *
  * Lifecycle: unlike volatile transports, device registration typically happens
  * out-of-band (via the API when the user supplies their push token), not via a
@@ -31,7 +31,7 @@ export type NexxusPersistentTransportWorkerStats = NexxusBaseTransportWorkerStat
  *
  * Concrete subclasses must implement initTransport() (open HTTP/2 connection to
  * APNs, initialize an FCM client, etc.) and sendToDevice() (translate the
- * canonical NexxusTransportWorkerPayload data to the 3rd-party's wire format
+ * canonical NexxusTransportDeviceMessagePayload data to the 3rd-party's wire format
  * and POST it).
  */
 export abstract class NexxusPersistentTransportWorker<

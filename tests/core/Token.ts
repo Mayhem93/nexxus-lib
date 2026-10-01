@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   NexxusToken,
   NexxusApplication,
@@ -22,10 +22,8 @@ const makeApp = (overrides: Record<string, unknown> = {}): NexxusApplication => 
   ...overrides,
 } as INexxusApplication);
 
-/** Minimal auth block, for the cases that need `jwtExpiresIn`. */
-const withExpiry = (jwtExpiresIn: string): NexxusApplication => makeApp({
-  auth: { jwtExpiresIn, strategies: { local: {} }, userDetailSchema: { default: {} } },
-});
+/** An application declaring its own access-token lifetime, in seconds. */
+const withExpiry = (jwtExpiresIn: number): NexxusApplication => makeApp({ session: { jwtExpiresIn } });
 
 /** The smallest valid thing to mint: a device, no principal. */
 const deviceOnly: NexxusTokenMint = { appId: 'app1', deviceId: 'd1' };
@@ -80,14 +78,14 @@ describe('NexxusToken.issue', () => {
     expect(decode(NexxusToken.issue(makeApp(), deviceOnly)).iss).toBe('nexxus');
   });
 
-  it('defaults to a 7 day lifetime when the application declares none', () => {
+  it('defaults to a one-hour lifetime when the application declares none', () => {
     const claims = decode(NexxusToken.issue(makeApp(), deviceOnly));
 
-    expect(claims.exp - claims.iat).toBe(7 * 24 * 60 * 60);
+    expect(claims.exp - claims.iat).toBe(60 * 60);
   });
 
   it('honours the application\'s configured lifetime', () => {
-    const claims = decode(NexxusToken.issue(withExpiry('15m'), deviceOnly));
+    const claims = decode(NexxusToken.issue(withExpiry(15 * 60), deviceOnly));
 
     expect(claims.exp - claims.iat).toBe(15 * 60);
   });
@@ -112,11 +110,21 @@ describe('NexxusToken.verify — signature and audience', () => {
     expect(() => NexxusToken.verify(other, token)).not.toThrow();
   });
 
-  it('distinguishes expiry from every other failure', async () => {
-    const app = withExpiry('1ms');
-    const token = NexxusToken.issue(app, deviceOnly);
+  it('distinguishes expiry from every other failure', () => {
+    const app = makeApp();
 
-    await new Promise(resolve => setTimeout(resolve, 20));
+    // Minted two hours ago, so its one-hour lifetime has already run out. Only
+    // `Date` is faked, and only around the mint.
+    vi.useFakeTimers({ toFake: [ 'Date' ] });
+    vi.setSystemTime(Date.now() - 2 * 60 * 60 * 1000);
+
+    let token: string;
+
+    try {
+      token = NexxusToken.issue(app, deviceOnly);
+    } finally {
+      vi.useRealTimers();
+    }
 
     // Expiry is the one verification failure a client can act on by
     // re-authenticating, so it must not be lumped in with "invalid".

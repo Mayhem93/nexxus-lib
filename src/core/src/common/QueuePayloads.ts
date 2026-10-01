@@ -73,15 +73,31 @@ export type NexxusTransportModelUpdatedPayload = {
 };
 
 /**
- * Canonical payload consumed by ALL transport workers (volatile and persistent alike).
- * The shape is identical across transports; each transport translates the inner `data`
- * into its own wire format inside its `sendToDevice` implementation.
+ * Deliver a model event to devices. The shape is identical across transports; each
+ * transport translates the inner `data` into its own wire format inside its
+ * `sendToDevice` implementation.
  */
-export type NexxusTransportWorkerPayload = {
+export type NexxusTransportDeviceMessagePayload = {
   event: 'device_message';
   deviceIds: Array<string>;
   data: NexxusTransportModelCreatedPayload | NexxusTransportModelUpdatedPayload | NexxusTransportModelDeletedPayload;
 };
+
+/**
+ * These devices' sessions were ended by logout: drop their live connections. Sent
+ * by the API straight to the queue named in each device's `transport`, and only
+ * for volatile devices — a persistent transport holds no connection to drop.
+ */
+export type NexxusTransportDeviceLogoutPayload = {
+  event: 'device_logout';
+  deviceIds: Array<string>;
+};
+
+/**
+ * Canonical payload consumed by ALL transport workers (volatile and persistent
+ * alike), discriminated on `event`.
+ */
+export type NexxusTransportWorkerPayload = NexxusTransportDeviceMessagePayload | NexxusTransportDeviceLogoutPayload;
 
 // Map of built-in queue names to their payloads
 export interface NexxusBuiltInQueuePayloadMap {

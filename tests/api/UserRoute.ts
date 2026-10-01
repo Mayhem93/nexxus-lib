@@ -73,6 +73,7 @@ describe('POST /user/register', () => {
     // and authenticate.
     expect(NexxusToken.verify(app, res.body.token).user).toMatchObject({ username: 'ann' });
     expect(res.body.device.id).toEqual(expect.any(String));
+    expect(res.body.refreshToken).toMatch(new RegExp(`^${res.body.device.id}\\.`));
   });
 
   it('stores the password hashed', async () => {
@@ -87,10 +88,10 @@ describe('POST /user/register', () => {
   });
 
   /**
-   * `userType` and `device` are request parameters, not profile fields. Left in
-   * the rest-spread they rode into `details` and were persisted — a device
-   * registration hint stored as if it were part of someone's profile, and
-   * handed back by `/user/me`.
+   * `userType` is a request parameter, not a profile field. Left in the
+   * rest-spread it rode into `details` and was persisted — a request parameter
+   * stored as if it were part of someone's profile, and handed back by
+   * `/user/me`.
    */
   it('keeps request parameters out of the stored profile', async () => {
     await serve(makeAuthApp({
@@ -98,7 +99,7 @@ describe('POST /user/register', () => {
     }));
 
     await send('POST', '/user/register', {
-      username: 'ann', password: 'hunter2', userType: 'default', device: { id: 'd1' }, age: 30,
+      username: 'ann', password: 'hunter2', userType: 'default', age: 30,
     }, APP_ONLY);
 
     expect((dbState.created[0]![0] as NexxusUser).getData().details).toEqual({ age: 30 });
@@ -130,32 +131,39 @@ describe('POST /user/register', () => {
   });
 
   /**
-   * A second account registering on a shared machine passes the device id the
-   * client still has in local storage. It must NOT be honoured: the device
-   * belongs to the first user, it's listed under them, and handing it over
-   * would silently move it between accounts.
+   * Registration takes no `device` at all — an account created moments ago owns
+   * none, so there is nothing to hint at. A client still sending one (JSON
+   * carries no types, and older SDKs did) gets told, rather than having it
+   * silently swallowed: `device` is not a declared detail, so the closed schema
+   * refuses it like any other undeclared field.
    */
-  it('ignores a device hint naming another user\'s device', async () => {
-    await serve(makeAuthApp());
-
-    const ann = await send('POST', '/user/register', { username: 'ann', password: 'p' }, APP_ONLY);
-
-    dbState.searchResult = [];
-
-    const bob = await send('POST', '/user/register',
-      { username: 'bob', password: 'p', device: { id: ann.body.device.id } }, APP_ONLY);
-
-    expect(bob.status).toBe(200);
-    expect(bob.body.device.id).not.toBe(ann.body.device.id);
-  });
-
-  it('names the new device from the hint', async () => {
+  it('rejects a device sent on registration', async () => {
     await serve(makeAuthApp());
 
     const res = await send('POST', '/user/register',
-      { username: 'ann', password: 'p', device: { name: 'Ann\'s Laptop' } }, APP_ONLY);
+      { username: 'ann', password: 'p', device: { id: 'd1' } }, APP_ONLY);
 
-    expect(res.body.device.name).toBe('Ann\'s Laptop');
+    expect(res.status).toBe(400);
+    expect(dbState.created).toHaveLength(0);
+  });
+
+  /**
+   * The account's first device is created by registration itself, and its id is
+   * written into `devices` by the same insert — not appended afterwards by a
+   * patch, which is what left a window where the account existed with no device.
+   */
+  it('creates the first device and stores it on the user in one write', async () => {
+    await serve(makeAuthApp());
+
+    const res = await send('POST', '/user/register', { username: 'ann', password: 'p' }, APP_ONLY);
+    const stored = (dbState.created[0]![0] as NexxusUser).getData();
+
+    expect(res.status).toBe(200);
+    expect(stored.devices).toEqual([ res.body.device.id ]);
+    // The device names the user, and the user names the device.
+    expect(NexxusToken.verify(app, res.body.token).deviceId).toBe(res.body.device.id);
+    // No follow-up patch appending the id.
+    expect(dbState.updateCalls).toHaveLength(0);
   });
 
   it('409s a username already taken', async () => {

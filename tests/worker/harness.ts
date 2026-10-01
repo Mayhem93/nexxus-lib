@@ -95,11 +95,21 @@ export const mqState: {
 export class FakeMq extends NexxusMessageQueueAdapter<any, any, any> {
   protected reconnectDelayMs = 5;
 
+  /**
+   * The real adapter refuses queue operations until `connect()` has succeeded,
+   * so the fake does too — a fake that answers anyway lets a test call them in
+   * an order production can't, which is how a worker booting in the wrong order
+   * once passed every test here.
+   */
+  private open = false;
+
   protected async doConnect(): Promise<void> {
     if (mqState.connectImpl) mqState.connectImpl();
+
+    this.open = true;
   }
 
-  protected async doDisconnect(): Promise<void> {}
+  protected async doDisconnect(): Promise<void> { this.open = false; }
   protected isFatalConnectError(): boolean { return false; }
 
   protected async doConsume(queueName: string, cb: (m: NexxusQueueMessage<any>) => Promise<void>): Promise<void> {
@@ -113,11 +123,21 @@ export class FakeMq extends NexxusMessageQueueAdapter<any, any, any> {
     mqState.published.push({ queue: queueName, message, metadata });
   }
 
-  public async queueExists(): Promise<boolean> { return mqState.queueExistsResult; }
+  public async queueExists(): Promise<boolean> {
+    if (!this.open) throw new Error('FakeMq: call connect() before queueExists()');
 
-  public async createVolatileQueue(name: string): Promise<void> { mqState.createdQueues.push(name); }
+    return mqState.queueExistsResult;
+  }
+
+  public async createVolatileQueue(name: string): Promise<void> {
+    if (!this.open) throw new Error('FakeMq: call connect() before createVolatileQueue()');
+
+    mqState.createdQueues.push(name);
+  }
 
   public async deleteQueue(name: string): Promise<void> {
+    if (!this.open) throw new Error('FakeMq: call connect() before deleteQueue()');
+
     if (mqState.deleteQueueImpl) await mqState.deleteQueueImpl();
 
     mqState.deletedQueues.push(name);

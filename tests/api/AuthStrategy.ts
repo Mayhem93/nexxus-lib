@@ -45,7 +45,6 @@ class TestStrategy extends NexxusAuthStrategy {
 
   public sign(payload: NexxusAuthStatePayload): string { return this.signState(payload); }
   public verify(state: string): NexxusAuthStatePayload | null { return this.verifyState(state); }
-  public token(user: NexxusApiUser, deviceId: string): string { return this.generateToken(user, deviceId); }
   public namespaceKey(): string { return this.authDetailKey; }
   public details(userType: string, d: Record<string, any>): Record<string, any> {
     return this.validateUserDetails(userType, d);
@@ -504,27 +503,7 @@ describe('NexxusAuthStrategy.findOrCreateUser', () => {
   });
 });
 
-describe('NexxusAuthStrategy.generateToken', () => {
-  beforeEach(() => { installApiStatics(); });
-
-  it('mints a token this application can verify', () => {
-    const app = authApp();
-    const claims = NexxusToken.verify(app, new TestStrategy({}, app).token(USER, 'd1'));
-
-    expect(claims).toMatchObject({ appId: 'app1', deviceId: 'd1' });
-    expect(claims.user).toMatchObject({ id: 'u1' });
-  });
-
-  it('binds the token to the application it was issued by, not the user\'s appId', () => {
-    const app2 = seedApp(makeAuthApp({ id: 'app2' }));
-    const token = new TestStrategy({}, app2).token(USER, 'd1');
-
-    // USER.appId says app1; the issuing strategy serves app2 and wins.
-    expect(NexxusToken.verify(app2, token).appId).toBe('app2');
-  });
-});
-
-describe('NexxusAuthStrategy.sendTokenResponse', () => {
+describe('NexxusAuthStrategy.sendSessionForExistingUser', () => {
   let server: TestServer;
   let strategy: TestStrategy;
 
@@ -535,7 +514,7 @@ describe('NexxusAuthStrategy.sendTokenResponse', () => {
 
     server = await startTestServer(app => {
       app.post('/login', (async (req, res) => {
-        await strategy.sendTokenResponse(res, USER, req.body?.device);
+        await strategy.sendSessionForExistingUser(res, USER, req.body?.device);
       }) as RequestHandler);
     });
   });
@@ -548,17 +527,18 @@ describe('NexxusAuthStrategy.sendTokenResponse', () => {
     body: JSON.stringify(device ? { device } : {}),
   });
 
-  it('returns a token, the device it is bound to, and the user', async () => {
+  it('returns both tokens, the device they are bound to, and the user', async () => {
     const res = await login();
 
     expect(res.status).toBe(200);
     expect(res.body.device.id).toEqual(expect.any(String));
+    expect(res.body.refreshToken).toMatch(new RegExp(`^${res.body.device.id}\\.`));
     expect(res.body.user).toEqual({ id: 'u1', username: 'ann' });
   });
 
   it('binds the token to the resolved device', async () => {
-    // Every strategy funnels through here, so none of them can forget to bind a
-    // token to a device.
+    // Every authentication of an existing user funnels through here, so none of
+    // them can forget to bind a token to a device.
     const res = await login();
     const claims = NexxusToken.verify(authApp(), res.body.token);
 

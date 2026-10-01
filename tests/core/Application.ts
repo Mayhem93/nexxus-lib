@@ -146,8 +146,46 @@ describe('NexxusApplication auth + acl', () => {
     expect(() => new NexxusApplication(withAuth({ acl: 'yes' }))).toThrow(/"auth.acl" must be a boolean/);
   });
 
-  it('rejects a non-string jwtExpiresIn', () => {
-    expect(() => new NexxusApplication(withAuth({ jwtExpiresIn: 999 }))).toThrow(/jwtExpiresIn/);
+  it('defaults the session lifetimes to one hour and 30 days, auth or not', () => {
+    for (const data of [ makeData(), withAuth() ]) {
+      const app = new NexxusApplication(data);
+
+      expect(app.getJwtExpiresIn()).toBe(60 * 60);
+      expect(app.getRefreshTokenExpiresIn()).toBe(30 * 24 * 60 * 60);
+    }
+  });
+
+  it('keeps the session lifetimes an application declares', () => {
+    const app = new NexxusApplication(makeData({ session: { jwtExpiresIn: 900, refreshTokenExpiresIn: 7 * 86400 } }));
+
+    expect(app.getJwtExpiresIn()).toBe(900);
+    expect(app.getRefreshTokenExpiresIn()).toBe(7 * 86400);
+  });
+
+  it('bounds session.jwtExpiresIn to 600–7200 whole seconds, inclusive', () => {
+    for (const bad of [ 599, 7201, 900.5, '3600' ]) {
+      expect(() => new NexxusApplication(makeData({ session: { jwtExpiresIn: bad } })))
+        .toThrow(/"session.jwtExpiresIn" must be a whole number of seconds between 600 and 7200/);
+    }
+
+    expect(new NexxusApplication(makeData({ session: { jwtExpiresIn: 600 } })).getJwtExpiresIn()).toBe(600);
+    expect(new NexxusApplication(makeData({ session: { jwtExpiresIn: 7200 } })).getJwtExpiresIn()).toBe(7200);
+  });
+
+  it('bounds session.refreshTokenExpiresIn to 1–365 days of whole seconds, inclusive', () => {
+    for (const bad of [ 86399, 31536001, 86400.5 ]) {
+      expect(() => new NexxusApplication(makeData({ session: { refreshTokenExpiresIn: bad } })))
+        .toThrow(/"session.refreshTokenExpiresIn" must be a whole number of seconds between 86400 and 31536000/);
+    }
+
+    expect(new NexxusApplication(makeData({ session: { refreshTokenExpiresIn: 86400 } })).getRefreshTokenExpiresIn()).toBe(86400);
+    expect(new NexxusApplication(makeData({ session: { refreshTokenExpiresIn: 31536000 } })).getRefreshTokenExpiresIn()).toBe(31536000);
+  });
+
+  it('rejects a session block that is not an object', () => {
+    for (const bad of [ 'nope', null ]) {
+      expect(() => new NexxusApplication(makeData({ session: bad }))).toThrow(/"session" must be an object/);
+    }
   });
 
   it('rejects a non-object auth block', () => {

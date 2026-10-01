@@ -2,9 +2,9 @@
   "$id": "nexxus-google-auth-strategy",
   "type": "object",
   "properties": {
-    "clientID":     { "type": "string" },
-    "clientSecret": { "type": "string" },
-    "callbackURL":  { "type": "string" }
+    "clientID":     { "type": "string", "minLength": 1 },
+    "clientSecret": { "type": "string", "minLength": 1 },
+    "callbackURL":  { "type": "string", "minLength": 1 }
   },
   "required": [ "clientID", "clientSecret", "callbackURL" ],
   "additionalProperties": false

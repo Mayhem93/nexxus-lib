@@ -13,8 +13,8 @@ import {
 } from '../middlewares';
 import { InvalidParametersException, NotFoundException } from '../Exceptions';
 import { resolveDevice } from '../DeviceRegistration';
+import { NexxusApiSession } from '../Session';
 
-import { NexxusToken } from '@mayhem93/nexxus-core-lib';
 import { NexxusDevice, NexxusDeviceProps, RedisKeyNotFoundException } from '@mayhem93/nexxus-redis';
 
 import type { Router, RequestHandler } from 'express';
@@ -82,14 +82,17 @@ export default class DeviceRoute extends NexxusApiBaseRoute {
     // explicit "register another device" path, so it always creates.
     const nxxDevice = await resolveDevice(app, userId, { name: req.body.name });
 
-    // A token bound to the NEW device. Without it the caller has a device id it
+    // A session for the NEW device. Without it the caller has a device id it
     // can't use — every device-scoped route reads the device from the token, so
-    // registering and receiving the credential have to be one step.
-    const token = NexxusToken.issue(app, { appId, deviceId: nxxDevice.getValue().id, user: req.user });
+    // registering and receiving the credentials have to be one step. On an
+    // application without authentication this is the only way to get a session
+    // at all, which is why issuing lives outside the auth strategies.
+    const { token, refreshToken } = await NexxusApiSession.issue(app, nxxDevice, req.user);
 
     res.status(200).send({
       message: 'Device registered successfully!',
       token,
+      refreshToken,
       device: {
         id: nxxDevice.getValue().id,
         appId: nxxDevice.getValue().appId,

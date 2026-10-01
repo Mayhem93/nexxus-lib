@@ -74,6 +74,7 @@ describe('POST /device/register', () => {
     // A token for the NEW device, not the one that authorized the call —
     // otherwise the caller holds an id it cannot use.
     expect(NexxusToken.verify(app, res.body.token).deviceId).toBe(res.body.device.id);
+    expect(res.body.refreshToken).toMatch(new RegExp(`^${res.body.device.id}\\.`));
     expect(res.body.device.id).not.toBe('d-existing');
   });
 
@@ -85,6 +86,31 @@ describe('POST /device/register', () => {
     expect(res.status).toBe(200);
     expect(res.body.device.userId).toBeUndefined();
     expect(NexxusToken.verify(app, res.body.token).user).toBeUndefined();
+  });
+
+  /**
+   * The zero-auth reissue gap: this route used to hand out only an access token,
+   * so a device on an application without authentication could renew it only by
+   * registering again — a new device every time the token expired.
+   */
+  it('gives a zero-auth device a refresh token, so it can renew without re-registering', async () => {
+    await serve(makeApp());
+
+    const res = await post('/device/register', { name: 'Kiosk' }, APP_ONLY);
+
+    expect(res.body.refreshToken).toMatch(new RegExp(`^${res.body.device.id}\\.`));
+    expect((await NexxusDevice.get(res.body.device.id)).hasActiveSession()).toBe(true);
+  });
+
+  it('leaves the calling device\'s own session alone', async () => {
+    await serve(makeAuthApp());
+    await seedDevice({ id: 'd-existing', userId: 'u1' });
+    await NexxusDevice.setSession('d-existing', 'callers-secret', Math.floor(Date.now() / 1000) + 3600);
+
+    await post('/device/register', { name: 'Laptop' }, as('d-existing', USER));
+
+    // A new device gets a session of its own; the one making the call keeps its.
+    expect(await NexxusDevice.rotateSession('d-existing', 'callers-secret', 'next')).toBe('rotated');
   });
 
   it('carries the principal into the new device\'s token', async () => {

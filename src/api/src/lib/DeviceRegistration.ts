@@ -69,7 +69,6 @@ async function findReusableDevice(
  * authentication simply has no owner to be listed under.
  */
 async function linkDeviceToUser(
-  app: NexxusApplication,
   appId: string,
   userId: string,
   deviceId: string
@@ -83,10 +82,16 @@ async function linkDeviceToUser(
   const updatedAtPatch = new NexxusJsonPatch({
     op: 'replace',
     path: [ 'updatedAt' ],
-    value: [ new Date().toISOString() ],
+    value: [ new Date() ],
     metadata: { appId, id: userId, type: 'user' }
   });
-  const userSchema = NexxusUser.getModelSchema(app.getUserDetailSchema());
+  // No detail schema, deliberately. Both paths above are built-in user fields,
+  // and this function is reached with a userId but no user type — the previous
+  // `getUserDetailSchema()` silently meant "the DEFAULT type's schema", which is
+  // the wrong one for every other type and `null` for an application that never
+  // declares a `default` (nothing requires one). Passing nothing validates the
+  // fields these patches actually touch and can't go stale.
+  const userSchema = NexxusUser.getModelSchema();
 
   devicesPatch.validate(userSchema);
   updatedAtPatch.validate(userSchema);
@@ -94,8 +99,17 @@ async function linkDeviceToUser(
   await NexxusApi.database.updateItems([ devicesPatch, updatedAtPatch ]);
 }
 
-async function createDevice(
-  app: NexxusApplication,
+/**
+ * Persist a device. Nothing else — in particular, the owning user's document is
+ * NOT touched.
+ *
+ * Separate from `createDeviceForUser` because the two callers need the link to
+ * happen at different times. An account that already exists gets the id
+ * appended by patch; an account being created in the same request writes the id
+ * inline with the rest of the user, so a patch would be a second write against a
+ * document the caller is about to author anyway.
+ */
+export async function createDevice(
   appId: string,
   userId: string | undefined,
   name?: string
@@ -110,8 +124,26 @@ async function createDevice(
 
   await device.save();
 
+  return device;
+}
+
+/**
+ * Create a device for an account that ALREADY EXISTS, and record it on that
+ * account. This is the "another installation of an existing user" path —
+ * `/device/register`, a login that finds no device to reuse, and a first OAuth
+ * sign-in (where the user row was written by the verify step before we get here).
+ *
+ * Registration does not use this: it has no stored user to patch yet.
+ */
+export async function createDeviceForUser(
+  appId: string,
+  userId: string | undefined,
+  name?: string
+): Promise<NexxusDevice> {
+  const device = await createDevice(appId, userId, name);
+
   if (userId) {
-    await linkDeviceToUser(app, appId, userId, device.getValue().id);
+    await linkDeviceToUser(appId, userId, device.getValue().id);
   }
 
   return device;
@@ -120,9 +152,12 @@ async function createDevice(
 /**
  * Find or create the device a request is coming from, and return it.
  *
- * Called on every path that mints a token — registration, login, OAuth
- * callback, explicit device registration — so that a token always carries a
- * device, and so "which device is this?" stops being a header the client writes.
+ * ONLY for an account that already exists — authenticating with `local`, a
+ * returning OAuth user, or `/device/register`. A hint asks to reuse a device the
+ * caller owns, and an account created moments ago owns none, so registration and
+ * first OAuth sign-in call `createDevice`/`createDeviceForUser` instead. Handing
+ * this a brand-new user's id would spend a Redis lookup to conclude what the
+ * caller already knew.
  *
  * The three cases:
  *
@@ -162,5 +197,5 @@ export async function resolveDevice(
     );
   }
 
-  return createDevice(app, appId, userId, hint.name);
+  return createDeviceForUser(appId, userId, hint.name);
 }

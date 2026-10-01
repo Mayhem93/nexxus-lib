@@ -34,6 +34,13 @@ The multi-tenant app definition. Its `schema` field is where an app declares its
   "type": "application",          // always "application" for this model
   "name": "My Chat App",          // required
   "description": "Realtime chat", // optional
+  "signingSecret": "…",           // required — signs this app's tokens, with or without auth
+
+  // OPTIONAL. Token lifetimes in seconds; both have defaults.
+  "session": {
+    "jwtExpiresIn": 3600,               // access token: 600–7200, default 3600
+    "refreshTokenExpiresIn": 2592000    // refresh token: 86400–31536000, default 30 days; absolute
+  },
 
   // Developer-defined models for THIS app. Each entry is a set of field
   // definitions plus two per-model flags (see "Application models" below).
@@ -51,8 +58,6 @@ The multi-tenant app definition. Its `schema` field is where an app declares its
   // OPTIONAL. Present only when this app uses authentication. When absent,
   // the app has no Users (see the User model).
   "auth": {
-    "jwtSecret": "…",                 // required when auth is present
-    "jwtExpiresIn": "7d",             // optional, defaults to "7d"
     "strategies": {                   // must be a subset of api.auth.availableStrategies
       "local": { /* strategy-specific config, validated by the strategy itself */ }
     },
@@ -124,7 +129,7 @@ Anything an app declares under `Application.schema`. Each entry has the shape:
 **Per-model flags:**
 
 - **`subscribable`** (default `true`) — whether the subscribe route accepts this model. `false` gives a "traditional database" shape: search works, subscribe/unsubscribe are rejected, and *every* primitive field is treated as filterable automatically.
-- **`transient`** (default `false`) — create-only. `true` makes update/delete routes reject the model. Meant for notification-shaped records that are produced once and consumed via subscribe/search.
+- **`transient`** (default `false`) — create-only and never stored. `true` makes update/delete routes reject the model, and a created record goes straight to subscribers without being written to the database, so search and get never return it. Meant for notification-shaped records.
 - The combination `subscribable: false && transient: true` is **invalid** (a create-only model that also can't be subscribed to has no observable shape) and is rejected at construction.
 
 ### Reserved field names

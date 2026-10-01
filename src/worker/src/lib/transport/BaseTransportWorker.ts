@@ -1,5 +1,6 @@
 import {
   NexxusBaseQueuePayload,
+  NexxusTransportDeviceMessagePayload,
   NexxusTransportWorkerPayload
 } from '@mayhem93/nexxus-core-lib';
 import { NexxusQueueMessage } from '@mayhem93/nexxus-message-queue-lib';
@@ -42,20 +43,11 @@ export abstract class NexxusBaseTransportWorker<
       return;
     }
 
-    await this.beforeConsume();
     await super.init();
     await this.initTransport();
 
     this.initialized = true;
   }
-
-  /**
-   * Hook called before this.queueName is bound to the message queue consumer.
-   * Subclasses can mutate this.queueName or do any other pre-consume setup
-   * (e.g. NexxusVolatileTransportWorker uses this to append the worker ID suffix).
-   * Default: no-op.
-   */
-  protected async beforeConsume(): Promise<void> {}
 
   /**
    * Subclass binds its transport-specific listener or service connection.
@@ -71,11 +63,31 @@ export abstract class NexxusBaseTransportWorker<
    * `data` is the canonical transport payload's data union; subclass discriminates
    * on `data.event` via a switch and TS narrows each case to the matching variant.
    */
-  protected abstract sendToDevice(deviceId: string, data: NexxusTransportWorkerPayload['data']): Promise<void>;
+  protected abstract sendToDevice(deviceId: string, data: NexxusTransportDeviceMessagePayload['data']): Promise<void>;
+
+  /**
+   * End the live connections of devices whose sessions were ended by logout.
+   *
+   * Only a volatile transport holds a connection to end, and the API sends
+   * `device_logout` to volatile transports only — so reaching this default means
+   * a message went somewhere it has no meaning.
+   */
+  protected async handleDeviceLogout(deviceIds: Array<string>): Promise<void> {
+    NexxusBaseTransportWorker.logger.warn(
+      `Received device_logout for ${deviceIds.length} device(s), but this transport holds no connections`,
+      (this.constructor as typeof NexxusBaseTransportWorker).loggerLabel
+    );
+  }
 
   protected async processMessage(msg: NexxusQueueMessage<NexxusTransportWorkerPayload>): Promise<void> {
     const payload = msg.payload;
     const label = (this.constructor as typeof NexxusBaseTransportWorker).loggerLabel;
+
+    if (payload.event === 'device_logout') {
+      await this.handleDeviceLogout(payload.deviceIds);
+
+      return;
+    }
 
     if (payload.event !== 'device_message') {
       NexxusBaseTransportWorker.logger.warn(

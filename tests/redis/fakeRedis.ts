@@ -4,9 +4,12 @@
  * count of NEW members, SCARD reflects the set, HINCRBY returns the new value,
  * etc.) so multi-step lifecycles (partition counting, scope decrement-to-zero
  * cleanup) are exercised for real. TTL is not modeled (expire is a no-op that
- * only reports whether the key exists). The JSON namespace supports the two
- * paths the models use: '$' (whole doc) and '$.subscriptions'.
+ * only reports whether the key exists). The JSON namespace supports the paths
+ * the models use: '$' (whole doc), '$.subscriptions' and '$.session'. EVAL
+ * supports the one script the models run, the device-session compare-and-set.
  */
+import { NEXXUS_DEVICE_SESSION_CAS_SCRIPT } from '../../src/redis/src/lib/models/Device';
+
 type Entry =
   | { type: 'hash'; value: Map<string, string> }
   | { type: 'set'; value: Set<string> }
@@ -16,6 +19,13 @@ type Entry =
 
 export class FakeRedis {
   public store = new Map<string, Entry>();
+
+  /**
+   * Runs at the start of the next `eval`, before the script reads anything —
+   * lets a test land a competing write between a caller's read and its
+   * compare-and-set.
+   */
+  public beforeEval: (() => void) | null = null;
 
   private hash(key: string): Map<string, string> {
     let e = this.store.get(key);
@@ -167,6 +177,33 @@ export class FakeRedis {
     return this.store.delete(key) ? 1 : 0;
   }
 
+  // ---- SCRIPTING ----
+  /**
+   * Emulates the device-session compare-and-set with the script's own return
+   * contract: 1 swapped, 0 the stored hash moved on (or there is no session),
+   * -1 no such device. Any other script is refused, so a new one can't silently
+   * hit a fake that does nothing.
+   */
+  async eval(script: string, opts: { keys: string[]; arguments: string[] }): Promise<number> {
+    if (script !== NEXXUS_DEVICE_SESSION_CAS_SCRIPT) {
+      throw new Error('FakeRedis.eval: unsupported script');
+    }
+
+    this.beforeEval?.();
+
+    const e = this.store.get(opts.keys[0]!);
+
+    if (!e) return -1;
+
+    const doc = (e as { value: any }).value;
+
+    if (doc.session?.hash !== opts.arguments[0]) return 0;
+
+    doc.session = JSON.parse(opts.arguments[1]!);
+
+    return 1;
+  }
+
   // ---- JSON ----
   public json = {
     get: async (key: string, opts?: { path?: string }): Promise<any> => {
@@ -180,12 +217,48 @@ export class FakeRedis {
         return obj.subscriptions ?? null;
       }
 
+      // Faithful to real RedisJSON: a JSONPath read returns an ARRAY of matches,
+      // empty when the path matches nothing.
+      if (opts?.path === '$.session') {
+        return obj.session === undefined ? [] : [ obj.session ];
+      }
+
       return obj;
     },
-    set: async (key: string, _path: string, value: any): Promise<string> => {
-      this.store.set(key, { type: 'json', value });
+    set: async (key: string, path: string, value: any, opts?: { condition?: 'NX' | 'XX' }): Promise<string | null> => {
+      const e = this.store.get(key);
+
+      if (path === '$') {
+        if (opts?.condition === 'NX' && e) return null;
+        if (opts?.condition === 'XX' && !e) return null;
+
+        this.store.set(key, { type: 'json', value });
+
+        return 'OK';
+      }
+
+      // Real RedisJSON refuses to create a new document from a nested path.
+      if (!e) {
+        throw new Error('ERR new objects must be created at the root');
+      }
+
+      (e as { value: any }).value[path.replace('$.', '')] = value;
 
       return 'OK';
+    },
+    del: async (key: string, opts?: { path?: string }): Promise<number> => {
+      const e = this.store.get(key);
+
+      if (!e) return 0;
+
+      const field = (opts?.path ?? '$').replace('$.', '');
+      const doc = (e as { value: any }).value;
+
+      if (!(field in doc)) return 0;
+
+      delete doc[field];
+
+      return 1;
     },
     mSet: async (updates: Array<{ key: string; path: string; value: any }>): Promise<string | null> => {
       for (const u of updates) {
