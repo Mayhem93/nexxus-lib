@@ -21,6 +21,8 @@ import { EventEmitter } from 'node:events';
 export type ClientEventMap = {
   /** Carries the raw token; the worker verifies it and resolves the device. */
   register: [ token: string ];
+  /** Carries a fresh access token for an already-registered connection. */
+  refresh_access_token: [ token: string ];
 }
 
 export interface NexxusWsBaseEvent {
@@ -38,6 +40,14 @@ export type NexxusWsClientMessage = {
      */
     token: string;
   };
+  refresh_access_token: {
+    /**
+     * A fresh access token from `/auth/refresh`, for the device this connection
+     * registered as. Sent before the current one expires, so the connection
+     * never has to drop and re-register to keep going.
+     */
+    token: string;
+  };
   // Add more client events here
 };
 
@@ -46,6 +56,9 @@ export type NexxusWsServerMessage = {
   register: {
     success: boolean;
     message?: string;
+  };
+  refresh_access_token: {
+    success: boolean;
   };
   model_created: NexxusTransportModelCreatedPayload;
   model_updated: NexxusTransportModelUpdatedPayload;
@@ -57,11 +70,11 @@ export type NexxusWsServerMessage = {
   // Add more server events here
 };
 
-// Helper types for type-safe messaging
+// Helper types for type-safe messaging. Distributive over `E`, so the default is
+// a discriminated union and a `switch` on `event` narrows `data` with it.
 export type NexxusWsClientEvent<E extends keyof NexxusWsClientMessage = keyof NexxusWsClientMessage> = {
-  event: E;
-  data: NexxusWsClientMessage[E];
-};
+  [K in E]: { event: K; data: NexxusWsClientMessage[K] };
+}[E];
 
 export type NexxusWsServerEvent<E extends keyof NexxusWsServerMessage = keyof NexxusWsServerMessage> = {
   event: E;
@@ -71,6 +84,14 @@ export type NexxusWsServerEvent<E extends keyof NexxusWsServerMessage = keyof Ne
 export class NexxusWsClient extends EventEmitter<ClientEventMap> {
   private socket : WebSocket;
   private deviceId?: string;
+  /** The application the registering token named. A refreshed token must name the same one. */
+  private appId?: string;
+  /**
+   * `exp` of the token this connection currently rests on, in UNIX seconds. Set
+   * at registration and moved forward by each token refresh; nothing is delivered past
+   * it.
+   */
+  private tokenExpiresAt?: number;
   /** True between emitting `register` and the worker confirming or failing it. */
   private registering: boolean = false;
   public readonly id: string;
@@ -135,14 +156,46 @@ export class NexxusWsClient extends EventEmitter<ClientEventMap> {
     return this.deviceId;
   }
 
+  public getAppId() : string | undefined {
+    return this.appId;
+  }
+
+  /**
+   * Whether the token this connection rests on has expired. False for a client
+   * that hasn't registered — it has no token yet, and receives nothing anyway.
+   */
+  public isTokenExpired(): boolean {
+    return this.tokenExpiresAt !== undefined && Math.floor(Date.now() / 1000) >= this.tokenExpiresAt;
+  }
+
   /**
    * Called by the transport worker once the device's Redis state is written and
    * the client is actually routable. Registration is only true from here on:
    * see the note in `registerDevice`.
    */
-  public confirmRegistration(deviceId: string): void {
+  public confirmRegistration(deviceId: string, appId: string, tokenExpiresAt: number): void {
     this.deviceId = deviceId;
+    this.appId = appId;
+    this.tokenExpiresAt = tokenExpiresAt;
     this.registering = false;
+  }
+
+  /** Called by the transport worker once a refreshed access token has been verified. */
+  public confirmTokenRefresh(tokenExpiresAt: number): void {
+    this.tokenExpiresAt = tokenExpiresAt;
+  }
+
+  /**
+   * Close the connection with a code and reason the client can act on.
+   * Idempotent: a socket already closing or closed — the client may be closing
+   * it at the same moment — is left alone.
+   */
+  public close(code: number, reason: string): void {
+    if (this.socket.readyState === WebSocket.CLOSING || this.socket.readyState === WebSocket.CLOSED) {
+      return;
+    }
+
+    this.socket.close(code, reason);
   }
 
   /**
@@ -160,8 +213,14 @@ export class NexxusWsClient extends EventEmitter<ClientEventMap> {
           await this.registerDevice(message);
 
           break;
+        case 'refresh_access_token':
+          this.refreshAccessToken(message);
+
+          break;
         default:
-          NexxusBaseWorker.logger.warn(`Unknown client event: ${message.event}`, 'NexxusWsClient');
+          // Unreachable by type, reachable at runtime: the frame came off the
+          // wire, and a client can name any event it likes.
+          NexxusBaseWorker.logger.warn(`Unknown client event: ${(message as NexxusWsBaseEvent).event}`, 'NexxusWsClient');
       }
     } catch (e : unknown) {
       let err = e as Error;
@@ -253,5 +312,24 @@ export class NexxusWsClient extends EventEmitter<ClientEventMap> {
     // worker has no route to it — and every retry would be refused as "already
     // registered", stranding the device until it reconnects on its own.
     this.emit('register', token);
+  }
+
+  /**
+   * Hand a refreshed access token to the worker, which verifies it and moves this
+   * connection's expiry forward. Only a registered connection has a token to
+   * refresh; before that, the client should register.
+   */
+  private refreshAccessToken(msg: NexxusWsClientEvent<'refresh_access_token'>) {
+    if (!this.isRegistered()) {
+      throw new NexxusWsInvalidParametersException('Register before refreshing the access token.');
+    }
+
+    const token = msg.data.token;
+
+    if (!token || typeof token !== 'string' || token.trim() === '') {
+      throw new NexxusWsInvalidParametersException('Invalid or missing token.');
+    }
+
+    this.emit('refresh_access_token', token);
   }
 }

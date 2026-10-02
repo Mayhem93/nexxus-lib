@@ -1,5 +1,8 @@
 import { NexxusApi, NexxusApiUser } from '../Api';
-import { resolveDevice, type NexxusDeviceHint } from '../DeviceRegistration';
+
+import type { NexxusDevice } from '@mayhem93/nexxus-redis';
+import { resolveDevice, createDeviceForUser, type NexxusDeviceHint } from '../DeviceRegistration';
+import { NexxusApiSession } from '../Session';
 
 import { InvalidParametersException } from '../Exceptions';
 
@@ -7,8 +10,6 @@ import {
   NexxusUser,
   NexxusFilterQuery,
   NexxusApplication,
-  NexxusToken,
-  NexxusTokenMint,
   NexxusSchemaValidator,
   InvalidSchemaDataException,
   NexxusJsonPatch,
@@ -291,50 +292,58 @@ export default abstract class NexxusAuthStrategy<T extends NexxusBaseAuthStrateg
   initializePassport(): void {}
 
   /**
-   * Generate a token for this Application from a user object.
+   * Write the session response for a device the caller has already decided on:
+   * issue its tokens and hand back tokens, device and user.
    *
-   * Signing itself lives in core (`NexxusToken`) so the transport workers, which
-   * verify these tokens but have no strategies, share exactly one implementation.
+   * Takes a device, not a hint, so a caller that has no business reusing one
+   * cannot express the idea. `/user/register` uses this directly — it creates
+   * the account's first device itself, alongside the user.
    */
-  protected generateToken(user: NexxusApiUser, deviceId: string): string {
-    const claims: NexxusTokenMint = { appId: this.appId, deviceId, user };
-
-    return NexxusToken.issue(this.app, claims);
-  }
-
-  /**
-   * Complete a successful authentication: resolve the calling device, mint a
-   * token bound to it, and send both back.
-   *
-   * The device is resolved HERE, in the one place every strategy funnels
-   * through, so no strategy can forget to bind a token to a device. The client
-   * should store `device.id` and pass it back as the hint next time it
-   * authenticates — that's what keeps a token expiring from turning into a new
-   * device record every week.
-   *
-   * Public because `/user/register` finishes the same way: it creates a user
-   * and then hands back a usable session rather than making the client turn
-   * straight around and log in.
-   */
-  public async sendTokenResponse(
-    res: Response,
-    user: NexxusApiUser,
-    deviceHint?: NexxusDeviceHint
-  ): Promise<void> {
-    const device = await resolveDevice(this.app, user.id, deviceHint);
-    const deviceId = device.getValue().id;
+  public async sendSession(res: Response, user: NexxusApiUser, device: NexxusDevice): Promise<void> {
+    const { token, refreshToken } = await NexxusApiSession.issue(this.app, device, user);
+    const { id, name } = device.getValue();
 
     res.json({
-      token: this.generateToken(user, deviceId),
-      device: {
-        id: deviceId,
-        name: device.getValue().name
-      },
+      token,
+      refreshToken,
+      device: { id, name },
       user: {
         id: user.id,
         username: user.username
       }
     });
+  }
+
+  /**
+   * Complete an authentication for an account that ALREADY EXISTS.
+   *
+   * The only entry point that accepts a hint, because it is the only situation
+   * in which one can mean anything: the caller may already own a device, and
+   * reusing it is what stops a new record appearing every time a token expires.
+   * A client stores `device.id` from the response and sends it back here next
+   * time.
+   *
+   * New accounts have nothing to reuse and must not reach this — see
+   * `sendSessionForNewUser`.
+   */
+  public async sendSessionForExistingUser(
+    res: Response,
+    user: NexxusApiUser,
+    deviceHint?: NexxusDeviceHint
+  ): Promise<void> {
+    await this.sendSession(res, user, await resolveDevice(this.app, user.id, deviceHint));
+  }
+
+  /**
+   * Complete an authentication that just CREATED the account, where the user
+   * row is already stored — a first OAuth sign-in, whose verify step writes the
+   * user before the callback runs.
+   *
+   * No hint parameter: there is no device to reuse, so the signature refuses to
+   * carry the question.
+   */
+  public async sendSessionForNewUser(res: Response, user: NexxusApiUser): Promise<void> {
+    await this.sendSession(res, user, await createDeviceForUser(this.appId, user.id));
   }
 
   /** This strategy's namespace inside a user's `details`. */
@@ -422,7 +431,10 @@ export default abstract class NexxusAuthStrategy<T extends NexxusBaseAuthStrateg
    * Find user by username (email)
    */
   public async findUserByUsername(username: string): Promise<NexxusUser | null> {
-    const fq = new NexxusFilterQuery({ username }, NexxusUser.getModelSchema(this.app.getUserDetailSchema()));
+    // No detail schema: this filters on `username` alone, and the user type —
+    // which selects the detail schema — is not knowable until the user is found.
+    // `getUserDetailSchema()` here silently meant "the DEFAULT type's schema".
+    const fq = new NexxusFilterQuery({ username }, NexxusUser.getModelSchema());
 
     const res = await NexxusApi.database.searchItems({
       appId: this.appId,
@@ -451,6 +463,19 @@ export default abstract class NexxusAuthStrategy<T extends NexxusBaseAuthStrateg
     details?: Record<string, any>;
     /** This strategy's own fields, stored under `$auth_<name>`. */
     authDetails?: Record<string, any>;
+    /**
+     * Pre-minted user id, for a caller that needs to know it BEFORE the user
+     * exists — registration creates the account's device first, and a device
+     * records its owner. Omit and one is generated.
+     */
+    id?: string;
+    /**
+     * The account's first device, written into `devices` with the rest of the
+     * user. A caller that supplies this has already created that device and
+     * must NOT also link it: the id is stored by this write, not by a patch
+     * afterwards.
+     */
+    deviceId?: string;
   }): Promise<NexxusUser> {
     const userType = data.userType || 'default';
     const details = this.validateUserDetails(userType, data.details || {});
@@ -460,13 +485,14 @@ export default abstract class NexxusAuthStrategy<T extends NexxusBaseAuthStrateg
     }
 
     const userData: INexxusUser = {
+      ...(data.id ? { id: data.id } : {}),
       type: 'user',
       appId: this.appId,
       userType,
       username: data.username,
       password: data.password ? await NexxusAuthStrategy.hashPassword(data.password) : null,
       authProviders: data.authProviders,
-      devices: [],
+      devices: data.deviceId ? [ data.deviceId ] : [],
       details
     };
     const user = new NexxusUser(userData);

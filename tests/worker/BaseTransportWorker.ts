@@ -1,14 +1,19 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { NexxusBaseTransportWorker, NexxusBaseWorker } from '@mayhem93/nexxus-worker-lib';
-import { makeHarness, logger, resetWorkerStatics, type WorkerHarness } from './harness';
+import { makeHarness, logger, mqState, resetWorkerStatics, type WorkerHarness } from './harness';
 
 class FakeTransport extends NexxusBaseTransportWorker<any> {
   protected queueName: any = 'websockets-transport';
   protected nodeRole = 'websockets-transport';
   public order: string[] = [];
   public sent: Array<{ deviceId: string; data: any }> = [];
+  /** What the worker could rely on at the moment `beforeConsume` ran. */
+  public atBeforeConsume: { available: boolean; consuming: boolean } | null = null;
 
-  protected async beforeConsume(): Promise<void> { this.order.push('beforeConsume'); }
+  protected async beforeConsume(): Promise<void> {
+    this.order.push('beforeConsume');
+    this.atBeforeConsume = { available: this.isAvailable, consuming: mqState.consumed.length > 0 };
+  }
   protected async initTransport(): Promise<void> { this.order.push('initTransport'); }
   protected async sendToDevice(deviceId: string, data: any): Promise<void> { this.sent.push({ deviceId, data }); }
 
@@ -41,11 +46,14 @@ const deviceMessage = (deviceIds: string[]) => ({
 });
 
 describe('NexxusBaseTransportWorker.init', () => {
-  it('runs beforeConsume, then the base init, then initTransport', async () => {
+  it('runs beforeConsume once every service is connected and before consuming, then initTransport', async () => {
     const w = worker();
 
     await w.init();
 
+    // A volatile transport picks its slot in beforeConsume: it asks the broker
+    // which slot queues exist, then renames the queue about to be consumed.
+    expect(w.atBeforeConsume).toEqual({ available: true, consuming: false });
     expect(w.order).toEqual(['beforeConsume', 'initTransport']);
     expect(w.any().initialized).toBe(true);
   });
@@ -72,6 +80,15 @@ describe('NexxusBaseTransportWorker.processMessage', () => {
 
     expect(w.sent.map(s => s.deviceId)).toEqual(['d1', 'd2']);
     expect(w.sent[0].data).toEqual({ event: 'update', some: 'thing' });
+  });
+
+  it('warns on device_logout — only a volatile transport has connections to drop', async () => {
+    const w = worker();
+
+    await w.any().processMessage({ payload: { event: 'device_logout', deviceIds: [ 'd1' ] } });
+
+    expect(w.sent).toHaveLength(0);
+    expect(logger.has('warning', /device_logout for 1 device\(s\), but this transport holds no connections/)).toBe(true);
   });
 
   it('warns and drops an unknown event type', async () => {

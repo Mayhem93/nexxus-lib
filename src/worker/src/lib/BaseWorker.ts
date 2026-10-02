@@ -237,7 +237,7 @@ export abstract class NexxusBaseWorker<
     services.redis.on('disconnect', () => this.markServiceDown('redis'));
 
     // Construct the Hub client eagerly so subclasses that need Hub access
-    // earlier than `init()` (e.g. NexxusVolatileTransportWorker's
+    // before `init()` registers the node (e.g. NexxusVolatileTransportWorker's
     // `beforeConsume()` for slot picking) can use it. No side effects at
     // construction time — the retry loop only starts on the first call to
     // registerNode / listNodesByRole.
@@ -345,6 +345,7 @@ export abstract class NexxusBaseWorker<
     NexxusBaseWorker.logger.info('All upstream services connected', NexxusBaseWorker.loggerLabel);
 
     await NexxusBaseWorker.loadApps();
+    await this.beforeConsume();
     await NexxusBaseWorker.messageQueue.consumeMessages(this.queueName, this.processMessage.bind(this) as any);
 
     this.initialized = true;
@@ -562,6 +563,15 @@ export abstract class NexxusBaseWorker<
   }
 
   protected abstract processMessage(payload: NexxusQueueMessage<TPayload>) : Promise<void>;
+
+  /**
+   * Hook called during `init()` once every upstream service is connected, and
+   * before this.queueName is bound to the message queue consumer. Subclasses can
+   * mutate this.queueName or do any other pre-consume setup (e.g.
+   * NexxusVolatileTransportWorker picks its slot here, which asks the broker
+   * which slot queues already exist). Default: no-op.
+   */
+  protected async beforeConsume(): Promise<void> {}
 
   protected static async loadApps(): Promise<void> {
     const results = await NexxusBaseWorker.database.searchItems({ type: MODEL_REGISTRY.application });

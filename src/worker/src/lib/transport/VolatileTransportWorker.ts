@@ -2,7 +2,8 @@ import {
   FatalErrorException,
   InvalidTokenException,
   NexxusHubNode,
-  NexxusToken
+  NexxusToken,
+  SessionEndedException
 } from '@mayhem93/nexxus-core-lib';
 import { NexxusDevice } from '@mayhem93/nexxus-redis';
 
@@ -20,6 +21,17 @@ import {
 export type NexxusVolatileTransportWorkerConfig = NexxusBaseTransportWorkerConfig & {};
 
 export type NexxusVolatileTransportWorkerStats = NexxusBaseTransportWorkerStats & {};
+
+/** Why a transport ends a device's connection. It travels to the client with the close. */
+export type NexxusDeviceDisconnectReason = 'logged_out' | 'token_expired';
+
+/** What a verified device token proves about the connection presenting it. */
+export type NexxusVolatileDeviceIdentity = {
+  deviceId: string;
+  appId: string;
+  /** The token's `exp`, in UNIX seconds. The connection may not outlive it. */
+  expiresAt: number;
+};
 export abstract class NexxusVolatileTransportWorker<
   T extends NexxusVolatileTransportWorkerConfig,
   Ev extends NexxusBaseWorkerEvents = {},
@@ -137,30 +149,26 @@ export abstract class NexxusVolatileTransportWorker<
   }
 
   /**
-   * Verify a device token presented during a subclass's connection handshake and
-   * return the device id it proves.
+   * Verify a device token and return what it proves. CPU only — no Redis — so it
+   * is cheap enough to run on every in-place access-token refresh.
    *
-   * This lives on the volatile base because a volatile transport is the only
-   * place a client presents a credential — persistent transports register
-   * out-of-band through the API, and their `unregisterDevice` is triggered by
-   * the push provider, so neither has a token to check. Every volatile
-   * transport (websockets today, MQTT or SSE tomorrow) inherits one
-   * implementation rather than each re-deriving what a valid device is.
+   * This and the methods built on it live on the volatile base because a
+   * volatile transport is the only place a client presents a credential —
+   * persistent transports register out-of-band through the API, and their
+   * `unregisterDevice` is triggered by the push provider, so neither has a token
+   * to check. Every volatile transport (websockets today, MQTT or SSE tomorrow)
+   * inherits one implementation rather than each re-deriving what a valid device
+   * is.
    *
    * The application is found by reading `appId` off the UNVERIFIED token — the
    * worker has no other context from a bare socket — which only selects the key
    * to verify against. A forged appId picks a different key and fails the
-   * signature check below.
+   * signature check.
    *
-   * Existence in Redis is checked too: the token proves the device's identity,
-   * not that its record survived. A device reaped from Redis holds a
-   * structurally valid token that nothing can be done with.
-   *
-   * Throws `InvalidTokenException` / `TokenExpiredException` from core, or
-   * `RedisKeyNotFoundException` when the record is gone — the subclass maps
-   * these onto its own protocol's error shape.
+   * Throws `InvalidTokenException` / `TokenExpiredException` from core — the
+   * subclass maps these onto its own protocol's error shape.
    */
-  protected async authenticateDevice(token: string): Promise<string> {
+  protected verifyDeviceToken(token: string): NexxusVolatileDeviceIdentity {
     const appId = NexxusToken.peekAppId(token);
 
     if (!appId) {
@@ -175,11 +183,67 @@ export abstract class NexxusVolatileTransportWorker<
 
     // `deviceId` is a plain string, not `string | undefined`: verify() checks
     // the claim shape, so there is nothing left to re-check here.
-    const { deviceId } = NexxusToken.verify(app, token);
+    const { deviceId, exp } = NexxusToken.verify(app, token);
 
-    await NexxusDevice.get(deviceId);
+    return { deviceId, appId, expiresAt: exp };
+  }
 
-    return deviceId;
+  /**
+   * Verify the token a connection REGISTERS with, and return what it proves.
+   *
+   * Beyond the signature, Redis is checked for two things the token can't prove:
+   * that the device's record still exists, and that its session is still alive.
+   * A device that logged out keeps an access token that is valid until it
+   * expires — refusing it here is what stops that device reconnecting and
+   * registering again, on this node or any other.
+   *
+   * Throws as `verifyDeviceToken` does, plus `RedisKeyNotFoundException` when the
+   * device's record is gone and `SessionEndedException` when its session is over.
+   */
+  protected async authenticateDevice(token: string): Promise<NexxusVolatileDeviceIdentity> {
+    const identity = this.verifyDeviceToken(token);
+    const device = await NexxusDevice.get(identity.deviceId);
+
+    if (!device.hasActiveSession()) {
+      throw new SessionEndedException('The session this token belongs to has ended.');
+    }
+
+    return identity;
+  }
+
+  /**
+   * Verify a refreshed access token that a registered connection presents in
+   * order to keep going, and return its expiry.
+   *
+   * No Redis. A logout drops the connection itself (`device_logout`), so there is
+   * nothing a session lookup would add on every refresh. The token must name the
+   * device AND application the connection registered as; otherwise refreshing
+   * would be a way to become a different device mid-connection.
+   */
+  protected authenticateRefreshedToken(token: string, deviceId: string, appId: string): number {
+    const identity = this.verifyDeviceToken(token);
+
+    if (identity.deviceId !== deviceId || identity.appId !== appId) {
+      throw new InvalidTokenException('Token names a different device than the one this connection registered as');
+    }
+
+    return identity.expiresAt;
+  }
+
+  /**
+   * End a device's live connection on this node, telling the client why.
+   *
+   * Idempotent: a device with no connection here — already closed, or never on
+   * this node — is left alone. Teardown (subscriptions, Redis state) must stay on
+   * the subclass's ordinary disconnect path, so a connection ended here and one
+   * the client closes itself are cleaned up exactly once, the same way.
+   */
+  protected abstract disconnectDevice(deviceId: string, reason: NexxusDeviceDisconnectReason): Promise<void>;
+
+  protected async handleDeviceLogout(deviceIds: Array<string>): Promise<void> {
+    for (const deviceId of deviceIds) {
+      await this.disconnectDevice(deviceId, 'logged_out');
+    }
   }
 
   /**

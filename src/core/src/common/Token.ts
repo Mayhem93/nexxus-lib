@@ -78,24 +78,20 @@ export type NexxusVerifiedClaims = (NexxusDeviceClaims | NexxusUserClaims) & Nex
  * the expiry policy and the audience can never drift apart at a call site.
  */
 export class NexxusToken {
-  /** Token lifetime used when the application doesn't declare one. */
-  private static readonly DEFAULT_EXPIRES_IN = '7d';
-
   private static readonly ISSUER = 'nexxus';
 
   /**
-   * Sign `claims` with the application's key.
+   * Sign `claims` with the application's key, for the application's
+   * `session.jwtExpiresIn` seconds.
    *
    * `aud` is taken from the application rather than from the claims, so a token
    * is always stamped with the app that actually issued it.
    */
   public static issue(app: NexxusApplication, claims: NexxusTokenMint): string {
-    const data = app.getData();
-
     return jwt.sign(claims, app.getSigningSecret(), {
-      expiresIn: (data.auth?.jwtExpiresIn ?? NexxusToken.DEFAULT_EXPIRES_IN) as jwt.SignOptions['expiresIn'],
+      expiresIn: app.getJwtExpiresIn(),
       issuer: NexxusToken.ISSUER,
-      audience: data.id as string,
+      audience: app.getData().id as string,
     });
   }
 

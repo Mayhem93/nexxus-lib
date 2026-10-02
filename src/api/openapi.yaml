@@ -2,7 +2,7 @@ openapi: 3.1.1
 
 info:
   title: Nexxus API
-  version: 0.0.10
+  version: 0.0.11
   summary: HTTP surface of a Nexxus deployment.
   description: |
     Nexxus is a config-driven, real-time backend-as-a-service. This document
@@ -29,10 +29,18 @@ info:
 
     ### Authentication
 
-    A bearer token is issued by `/user/register`, `/auth/{strategy}` and
-    `/device/register`. It always names a **device**, and additionally names a
-    **user** when the application has authentication enabled. There is no
-    device header — the device is part of the token.
+    A session is two tokens, issued by `/user/register`, `/auth/{strategy}` and
+    `/device/register`:
+
+    - **`token`** — the access token, sent as `Authorization: Bearer`. It always
+      names a **device**, and additionally names a **user** when the application
+      has authentication enabled. It expires after the application's
+      `session.jwtExpiresIn` (one hour by default). There is no device header —
+      the device is part of the token.
+    - **`refreshToken`** — exchanged at `POST /auth/refresh` for the next pair,
+      before the access token expires. Each refresh replaces it. It stops working
+      `session.refreshTokenExpiresIn` after the session was issued (30 days by
+      default), or at `POST /auth/logout`.
 
     ### Dates
 
@@ -50,7 +58,7 @@ servers:
         default: https
         
       host:
-        default: localhost:3000
+        default: localhost:5000
 
 tags:
   - name: Meta
@@ -230,6 +238,107 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /auth/refresh:
+    post:
+      tags: [ Authentication ]
+      summary: Refresh a session
+      description: |
+        Exchanges a refresh token for a new access token and a new refresh token.
+        Works the same for every application, including those without
+        authentication. No `Authorization` header is needed.
+
+        Each refresh replaces the refresh token: store the new one and discard the
+        old. The old one is still accepted for a few seconds; presenting it after
+        that ends the session.
+
+        The new access token carries the user as currently stored, so it reflects
+        changes made through `PUT /user`.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/AppId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ refreshToken ]
+              properties:
+                refreshToken:
+                  type: string
+      responses:
+        '200':
+          description: The next pair of tokens.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+                    description: The new access token.
+                  refreshToken:
+                    type: string
+                    description: The new refresh token. The one sent is replaced.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: |
+            The refresh token can't be exchanged: malformed, unknown, expired,
+            already replaced, or ended by logout. Sign in again.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Error'
+                  - type: object
+                    properties:
+                      error:
+                        const: InvalidRefreshTokenException
+        '404':
+          $ref: '#/components/responses/AppNotFound'
+
+  /auth/logout:
+    post:
+      tags: [ Authentication ]
+      summary: End a session
+      description: |
+        Ends the session a refresh token belongs to, and closes the device's live
+        transport connection if it has one. Works the same for every application,
+        including those without authentication.
+
+        Answers `200` to any request that carries a refresh token, whether or not
+        a session ended.
+
+        The access token stays valid until it expires.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/AppId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ refreshToken ]
+              properties:
+                refreshToken:
+                  type: string
+      responses:
+        '200':
+          description: The request was processed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/AppNotFound'
+
   /user/register:
     post:
       tags: [ Users ]
@@ -238,6 +347,13 @@ paths:
         Creates a user account and returns a session, so no separate login
         call is needed. Requires an application with authentication and a
         configured `local` strategy.
+
+        Always creates the account's first device and binds the returned token to
+        it. There is no `device` parameter: a new account owns none, so there is
+        nothing to reuse or name yet. Rename it afterwards with `PUT /device`.
+
+        Reusing a device applies only when authenticating an account that already
+        exists — see `POST /auth/{strategy}`.
 
         Any property beyond the ones listed is stored as a user **detail** and
         must be declared in the application's `auth.userDetailSchema`. An
@@ -262,14 +378,11 @@ paths:
                   type: string
                   description: Must be a user type the application declares.
                   default: default
-                device:
-                  $ref: '#/components/schemas/DeviceHint'
               additionalProperties: true
               examples:
                 - username: ann@example.com
                   password: correct-horse-battery-staple
-                  device:
-                    id: 0f8b1e2a-...
+                  age: 31
       responses:
         '200':
           $ref: '#/components/responses/Session'
@@ -299,7 +412,8 @@ paths:
         Returns the user the token names.
 
         Reads the token, not the stored record. A change made through
-        `PUT /user` appears here only after the client authenticates again.
+        `PUT /user` appears here once the client refreshes its session
+        (`POST /auth/refresh`) or signs in again.
       parameters:
         - $ref: '#/components/parameters/AppId'
       responses:
@@ -411,7 +525,10 @@ paths:
                     type: string
                   token:
                     type: string
-                    description: A new token, bound to the device just created.
+                    description: A new access token, bound to the device just created.
+                  refreshToken:
+                    type: string
+                    description: The new device's refresh token.
                   device:
                     $ref: '#/components/schemas/Device'
         '400':
@@ -948,8 +1065,9 @@ components:
       scheme: bearer
       bearerFormat: JWT
       description: |
-        Issued by `/user/register`, `/auth/{strategy}` and `/device/register`.
-        Names a device, and a user where the application has authentication.
+        The access token. Issued by `/user/register`, `/auth/{strategy}`,
+        `/device/register` and `/auth/refresh`. Names a device, and a user where
+        the application has authentication.
 
   parameters:
     AppId:
@@ -1184,7 +1302,8 @@ components:
   responses:
     Session:
       description: |
-        A token, the device it is bound to, and the user it names.
+        The session's two tokens, the device they are bound to, and the user they
+        name.
       content:
         application/json:
           schema:
@@ -1192,6 +1311,10 @@ components:
             properties:
               token:
                 type: string
+                description: The access token.
+              refreshToken:
+                type: string
+                description: Exchanged at `POST /auth/refresh` for the next pair.
               device:
                 type: object
                 properties:
@@ -1236,7 +1359,8 @@ components:
     Unauthorized:
       description: |
         No token was presented on an application that requires one, or the token
-        is invalid or expired.
+        is invalid or expired. An expired access token
+        (`UserTokenExpiredException`) is renewed through `POST /auth/refresh`.
       content:
         application/json:
           schema:

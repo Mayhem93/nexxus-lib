@@ -15,6 +15,7 @@ import {
   UserAuthenticationFailedException,
   NoAuthPresentException,
   UserTokenExpiredException,
+  InvalidRefreshTokenException,
   UserAlreadyExistsException,
 } from '../../src/api/src/lib/Exceptions';
 
@@ -22,7 +23,7 @@ import {
  * Every exception's `statusCode` and `name` reach the client verbatim — the
  * error middleware renders `{ error: err.name, message }` at `err.statusCode` —
  * so this table IS the API's error contract, not an implementation detail. A
- * table rather than thirteen near-identical blocks because the mapping is the
+ * table rather than a dozen near-identical blocks because the mapping is the
  * thing being asserted, and a table shows it at a glance.
  */
 const CONTRACT: Array<[new (message: string) => NexxusApiException, number, string]> = [
@@ -31,6 +32,7 @@ const CONTRACT: Array<[new (message: string) => NexxusApiException, number, stri
   [ UserAuthenticationFailedException, 401, 'UserAuthenticationFailedException' ],
   [ NoAuthPresentException,            401, 'NoAuthPresentException' ],
   [ UserTokenExpiredException,         401, 'UserTokenExpiredException' ],
+  [ InvalidRefreshTokenException,      401, 'InvalidRefreshTokenException' ],
   [ AccessDeniedException,             403, 'AccessDeniedException' ],
   [ NotFoundException,                 404, 'NotFoundException' ],
   [ ApplicationNotFoundException,      404, 'ApplicationNotFoundException' ],

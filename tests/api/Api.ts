@@ -319,12 +319,15 @@ describe('NexxusApi.init', () => {
     // Each answers with its OWN rejection, which proves it is mounted and
     // reachable rather than falling through to NotFound. All 400 here because
     // this application has no authentication: the routes are reached, and each
-    // one objects to what the request is missing.
+    // one objects to what the request is missing. The session routes are here
+    // too, with no strategy configured at all — zero-auth apps refresh as well.
     for (const [ path, init ] of [
       [ '/device', {} ],
       [ '/user/me', {} ],
       [ '/model/m1', {} ],
       [ '/subscription', { method: 'DELETE' } ],
+      [ '/auth/refresh', { method: 'POST' } ],
+      [ '/auth/logout', { method: 'POST' } ],
     ] as Array<[ string, RequestInit ]>) {
       const res = await request(path, { ...init, headers: { 'nxx-app-id': 'app1' } });
 
@@ -522,6 +525,16 @@ describe('NexxusApi — auth strategy registration', () => {
       .then(h => h.api.init())).rejects.toThrow(/make sure it's installed/);
   });
 
+  it('refuses a strategy named after a built-in session route', async () => {
+    // `/auth/refresh` and `/auth/logout` belong to every application; a strategy
+    // under either name would claim the route.
+    for (const name of [ 'refresh', 'logout' ]) {
+      const { api } = await makeApi({ auth: { availableStrategies: [ name ] } });
+
+      await expect(api.init()).rejects.toThrow(`Auth strategy name "${name}" is reserved`);
+    }
+  });
+
   it('instantiates one strategy per application', async () => {
     const { api } = await makeApi({ auth: { availableStrategies: [ 'local' ] } });
 
@@ -573,6 +586,21 @@ describe('NexxusApi — auth strategy registration', () => {
     // The strategy's own AJV validation fires in its constructor, so bad config
     // is a boot failure rather than a surprise on the first login.
     await expect(api.init()).rejects.toThrow(/Invalid config for auth strategy/);
+  });
+
+  it('names the application, the strategy and the field when a strategy config is refused', async () => {
+    const { api } = await makeApi({ auth: { availableStrategies: [ 'google' ] } });
+
+    dbState.searchImpl = (o) => (o.type === 'application'
+      ? [ makeAuthApp({ auth: { strategies: { google: { ...GOOGLE_CONFIG, clientID: '' } }, userDetailSchema: { default: {} } } }) ]
+      : []);
+
+    // One application's bad config stops the whole API, so the error has to
+    // say which one to fix.
+    await expect(api.init()).rejects.toThrow(
+      'Application "app1", auth strategy "google": ' +
+      'Invalid config for auth strategy "NexxusGoogleAuthStrategy": /clientID: must NOT have fewer than 1 characters'
+    );
   });
 
   it('hands each app the detail namespaces its strategies own', async () => {

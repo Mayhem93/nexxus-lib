@@ -2,23 +2,27 @@ import {
   ConfigCliArgs,
   ConfigEnvVars,
   NexxusQueueName,
-  NexxusTransportWorkerPayload,
+  NexxusTransportDeviceMessagePayload,
   InvalidTokenException,
-  TokenExpiredException
+  TokenExpiredException,
+  SessionEndedException
 } from '@mayhem93/nexxus-core-lib';
 import { RedisDeviceInvalidParamsException, RedisKeyNotFoundException } from '@mayhem93/nexxus-redis';
 
 import {
   NexxusVolatileTransportWorker,
   NexxusVolatileTransportWorkerConfig,
-  NexxusVolatileTransportWorkerStats
+  NexxusVolatileTransportWorkerStats,
+  type NexxusDeviceDisconnectReason
 } from './VolatileTransportWorker';
 import { NexxusBaseWorkerEvents, NexxusBaseWorkerStats, NexxusWorkerServices } from '../BaseWorker';
 import { NexxusWsClient } from './ws/Client';
 import {
   NexxusWsInternalServerException,
   NexxusWsInvalidParametersException,
-  NexxusWsDeviceNotFoundException
+  NexxusWsDeviceNotFoundException,
+  NexxusWsTokenExpiredException,
+  NexxusWsSessionEndedException
 } from './ws/Exceptions';
 
 import { WebSocketServer, type WebSocket } from 'ws';
@@ -58,6 +62,17 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
   protected static cliArgs: ConfigCliArgs = [];
   protected static envVars: ConfigEnvVars = [];
   protected static schemaPath: string = path.join(__dirname, '../../../src/schemas/websockets-transport-worker.schema.json');
+
+  /**
+   * WebSocket close codes for each reason a device is disconnected, in the
+   * 4000–4999 range reserved for applications. The client branches on the code:
+   * `logged_out` means don't reconnect; `token_expired` means refresh, then
+   * reconnect. The reason string travels alongside for traceability.
+   */
+  private static readonly CLOSE_CODES: Readonly<Record<NexxusDeviceDisconnectReason, number>> = {
+    logged_out: 4001,
+    token_expired: 4002
+  };
 
   private server! : WebSocketServer;
   private unregisteredClients: Set<NexxusWsClient> = new Set();
@@ -119,7 +134,7 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
     this.server.on('connection', this.handleConnection.bind(this));
   }
 
-  protected sendToDevice(deviceId: string, data: NexxusTransportWorkerPayload['data']): Promise<void> {
+  protected async sendToDevice(deviceId: string, data: NexxusTransportDeviceMessagePayload['data']): Promise<void> {
     const client = this.registeredClients.get(deviceId);
 
     if (!client) {
@@ -132,7 +147,17 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
         NexxusWebsocketsTransportWorker.loggerLabel
       );
 
-      return Promise.resolve();
+      return;
+    }
+
+    // Checked here, when there is something to deliver, rather than on a timer:
+    // a well-behaved client refreshes its access token in place before expiry,
+    // so this only ever catches one that didn't. It gets nothing past its
+    // token's lifetime, and is disconnected with the reason.
+    if (client.isTokenExpired()) {
+      await this.disconnectDevice(deviceId, 'token_expired');
+
+      return;
     }
 
     switch (data.event) {
@@ -150,8 +175,32 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
           NexxusWebsocketsTransportWorker.loggerLabel
         );
     }
+  }
 
-    return Promise.resolve();
+  protected async disconnectDevice(deviceId: string, reason: NexxusDeviceDisconnectReason): Promise<void> {
+    const client = this.registeredClients.get(deviceId);
+
+    if (!client) {
+      // Already gone — the client may have closed it at the same moment.
+      NexxusWebsocketsTransportWorker.logger.debug(
+        `No live connection to end for device ID: "${deviceId}" (${reason})`,
+        { deviceId, reason },
+        NexxusWebsocketsTransportWorker.loggerLabel
+      );
+
+      return;
+    }
+
+    NexxusWebsocketsTransportWorker.logger.info(
+      `Disconnecting device ID: "${deviceId}" (${reason})`,
+      { deviceId, reason, clientId: client.id },
+      NexxusWebsocketsTransportWorker.loggerLabel
+    );
+
+    // Only closes the socket. Teardown happens in `handleDisconnect`, the same
+    // path as a client-initiated close, so it runs exactly once whoever closes
+    // first.
+    client.close(NexxusWebsocketsTransportWorker.CLOSE_CODES[reason], reason);
   }
 
   private handleConnection(ws: WebSocket): void {
@@ -175,13 +224,15 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
       try {
         // The device is a claim inside the token, not a value the client chose,
         // so a client can only ever register the device its own token names.
-        deviceId = await this.authenticateDevice(token);
+        const identity = await this.authenticateDevice(token);
+
+        deviceId = identity.deviceId;
 
         await this.registerDevice(deviceId);
 
         this.unregisteredClients.delete(client);
         this.registeredClients.set(deviceId, client);
-        client.confirmRegistration(deviceId);
+        client.confirmRegistration(deviceId, identity.appId, identity.expiresAt);
         client.sendMessage('register', { success: true });
 
         NexxusWebsocketsTransportWorker.logger.info(`Client "${clientId}" registered with device ID: "${deviceId}"`,
@@ -192,8 +243,15 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
         // Leaves the client unregistered and free to try again.
         client.failRegistration();
 
+        // TOKEN_EXPIRED and SESSION_ENDED get their own codes because they call
+        // for different responses — refresh, versus start a new session — and
+        // the client shouldn't have to parse a message to tell them apart.
         if (e instanceof TokenExpiredException) {
-          client.sendError(new NexxusWsInvalidParametersException('Token has expired — re-authenticate and reconnect.'));
+          // No reconnect needed: this socket stays open and `register` can be
+          // sent again on it once the client holds a fresh token.
+          client.sendError(new NexxusWsTokenExpiredException('Token has expired — refresh it and register again.'));
+        } else if (e instanceof SessionEndedException) {
+          client.sendError(new NexxusWsSessionEndedException(e.message));
         } else if (e instanceof InvalidTokenException) {
           client.sendError(new NexxusWsInvalidParametersException(`Invalid token: ${(e as Error).message}`));
         } else if (e instanceof RedisKeyNotFoundException) {
@@ -205,6 +263,40 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
           client.sendError(new NexxusWsInternalServerException('An unexpected error occurred while registering the device.'));
 
           NexxusWebsocketsTransportWorker.logger.error(`Unexpected error during client registration for device ID "${deviceId}"`, { error: e, deviceId }, NexxusWebsocketsTransportWorker.loggerLabel);
+        }
+      }
+    });
+
+    // A registered connection moving onto a fresh access token without dropping:
+    // the client got it from `/auth/refresh` and sends it here before the current
+    // one expires. Verification is CPU-only; nothing here touches Redis.
+    client.on('refresh_access_token', token => {
+      // Non-null: the client only emits this once registered.
+      const deviceId = client.getDeviceId()!;
+
+      try {
+        const expiresAt = this.authenticateRefreshedToken(token, deviceId, client.getAppId()!);
+
+        client.confirmTokenRefresh(expiresAt);
+        client.sendMessage('refresh_access_token', { success: true });
+      } catch (e : Error | unknown) {
+        // The connection keeps the token it had: a rejected refresh doesn't cut
+        // it short, and the expiry check still ends it on time if no valid one
+        // arrives.
+        // No SESSION_ENDED here: a refresh never reads the session (no Redis),
+        // and a logged-out device has its socket closed with 4001 instead.
+        if (e instanceof TokenExpiredException) {
+          client.sendError(new NexxusWsTokenExpiredException('Token has expired — refresh it and send it again.'));
+        } else if (e instanceof InvalidTokenException) {
+          client.sendError(new NexxusWsInvalidParametersException(`Invalid token: ${e.message}`));
+        } else {
+          client.sendError(new NexxusWsInternalServerException('An unexpected error occurred while refreshing the access token.'));
+
+          NexxusWebsocketsTransportWorker.logger.error(
+            `Unexpected error refreshing the access token of device ID "${deviceId}"`,
+            { error: e, deviceId },
+            NexxusWebsocketsTransportWorker.loggerLabel
+          );
         }
       }
     });

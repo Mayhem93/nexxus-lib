@@ -211,9 +211,11 @@ describe('POST /subscription', () => {
 
     await server.close();
     await serve(makeApp({ schema: SCHEMA }));
-    await connectedDevice();
+    // Its own unowned device: `save()` only creates, so the owned `d1` above
+    // can't be recycled into this plain app.
+    await connectedDevice('d2');
 
-    const plain = await subscribe({ model: 'runs' });
+    const plain = await subscribe({ model: 'runs' }, as(undefined, 'd2'));
 
     // A constrained subscription is a DIFFERENT channel from an unconstrained
     // one, because the key is derived from the effective filter.

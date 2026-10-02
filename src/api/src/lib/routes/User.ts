@@ -17,7 +17,7 @@ import {
   RequiresUserMiddleware
 } from '../middlewares';
 import { NexxusAuthStrategy } from '../auth';
-import { type NexxusDeviceHint } from '../DeviceRegistration';
+import { createDevice } from '../DeviceRegistration';
 
 import {
   InvalidJsonPatchException,
@@ -28,13 +28,19 @@ import {
 } from '@mayhem93/nexxus-core-lib';
 
 import type { Router, RequestHandler } from 'express';
+import { randomUUID } from 'node:crypto';
 
 type UserRegisterRequestBody = {
   username: string;
   password: string;
   userType?: string;
-  /** Optional hint so a client with an existing device keeps it. */
-  device?: NexxusDeviceHint;
+  /**
+   * No `device` here, deliberately. Registration always creates the account's
+   * first device and takes no say in it: a hint asks to reuse something the
+   * caller already owns, and wanting a device is the reason to register at all.
+   * Only authenticating an existing account may hint. To rename the device
+   * afterwards, `PUT /device`.
+   */
   [key: string]: any; // Additional user fields specified by app schema
 };
 
@@ -105,11 +111,15 @@ export default class UserRoute extends NexxusApiBaseRoute {
 
   private async register(req: UserRegisterRequest, res: NexxusApiResponse): Promise<void> {
     const appId = req.headers['nxx-app-id'] as string;
-    // `userType` and `device` are pulled out alongside the credentials because
-    // they are request parameters, not profile fields — left in the rest they'd
-    // ride into `details` and be persisted on the user document (a device
-    // registration hint stored as if it were part of someone's profile).
-    const { username, password, userType: _userType, device: _device, ...details } = req.body;
+    // `userType` is pulled out alongside the credentials because it is a request
+    // parameter, not a profile field — left in the rest it would ride into
+    // `details` and be persisted as if it were part of someone's profile.
+    //
+    // `device` is NOT stripped any more, and that is the point: it is no longer a
+    // parameter of this route, so it falls into `details` and the closed schema
+    // rejects it like any other undeclared field. A client still sending one is
+    // told so rather than having it silently swallowed.
+    const { username, password, userType: _userType, ...details } = req.body;
     // Non-null: AppExistsMiddleware is wired on this router.
     const app = NexxusApi.getStoredApp(appId)!;
 
@@ -144,8 +154,20 @@ export default class UserRoute extends NexxusApiBaseRoute {
       throw new UserAlreadyExistsException('User with this username already exists');
     }
 
-    // Create new user
+    // The account's first device, created BEFORE the user so its id can be
+    // written into `devices` by the same insert. Registering is how a client
+    // gets a device in the first place, so this is not optional and takes no
+    // input — a brand-new account has nothing to reuse and nothing to hint at.
+    //
+    // Device first, user second: if the user insert fails, the loose device is
+    // unreachable (nothing references it) rather than the account existing with
+    // a username taken and no device.
+    const userId = randomUUID();
+    const device = await createDevice(appId, userId);
+
     const user = await localStrategy.createUser({
+      id: userId,
+      deviceId: device.getValue().id,
       username,
       userType: req.body.userType,
       password,
@@ -154,13 +176,11 @@ export default class UserRoute extends NexxusApiBaseRoute {
     });
 
     // Finish like a login rather than making the client immediately turn around
-    // and authenticate: this resolves the calling device and hands back a token
-    // bound to it, so a freshly registered client is usable straight away.
-    await localStrategy.sendTokenResponse(
-      res,
-      NexxusAuthStrategy.convertToApiUser(user),
-      req.body.device
-    );
+    // and authenticate, so a freshly registered client is usable straight away.
+    // The device is already decided, so this only issues its tokens and writes
+    // the response — the id travels outward from here, and the client hints with
+    // it when it later authenticates.
+    await localStrategy.sendSession(res, NexxusAuthStrategy.convertToApiUser(user), device);
   }
 
   private async update(req: UserUpdateRequest, res: NexxusApiResponse): Promise<void> {
