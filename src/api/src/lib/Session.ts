@@ -103,7 +103,7 @@ export class NexxusApiSession {
     let user: NexxusApiUser | undefined;
 
     if (userId) {
-      const [ stored ] = await NexxusApi.database.getItems({ ids: [ userId ], type: 'user', appId });
+      const stored = (await NexxusApi.database.getItems({ ids: [ userId ], type: 'user', appId })).get(userId);
 
       if (!stored) {
         // The account is gone, so its devices can't go on minting tokens for it.

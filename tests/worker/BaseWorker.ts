@@ -3,7 +3,7 @@ import { NexxusBaseWorker } from '@mayhem93/nexxus-worker-lib';
 import { NexxusApplication, NexxusAclRole, DEFAULT_ACL_ROLE_ID, WinstonNexxusLogger } from '@mayhem93/nexxus-core-lib';
 import { NexxusElasticsearchDb } from '@mayhem93/nexxus-database-lib';
 import { NexxusRabbitMq } from '@mayhem93/nexxus-message-queue-lib';
-import { makeHarness, logger, dbState, mqState, resetWorkerStatics, type WorkerHarness } from './harness';
+import { makeHarness, logger, dbState, mqState, resetWorkerStatics, fakeDelivery, type WorkerHarness } from './harness';
 
 const tick = (ms = 10) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -20,6 +20,17 @@ class FakeWorker extends NexxusBaseWorker<any> {
 
 class StatsWorker extends FakeWorker {
   protected async getOwnStats(): Promise<any> { return { custom: 42 }; }
+}
+
+/** Fails while any service is down, the way a handler whose database is unreachable does. */
+class ServiceBoundWorker extends FakeWorker {
+  protected async processMessage(msg: any): Promise<void> {
+    if (!this.isAvailable) {
+      throw new Error('database unreachable');
+    }
+
+    this.processed.push(msg);
+  }
 }
 
 const workers: NexxusBaseWorker<any>[] = [];
@@ -215,6 +226,40 @@ describe('NexxusBaseWorker init / close', () => {
 
     await tick(30);
     await expect(fetch(`http://127.0.0.1:${h.port}/stats`, { headers: { Authorization: 'Bearer tok' } })).rejects.toThrow();
+  });
+
+  it('stops consuming before it disconnects the services messages depend on', async () => {
+    const w = worker();
+
+    await w.init();
+
+    const stop = vi.spyOn(h.mq, 'stopConsuming');
+    const dbDisconnect = vi.spyOn(h.db, 'disconnect');
+
+    await w.close();
+
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(stop.mock.invocationCallOrder[0]).toBeLessThan(dbDisconnect.mock.invocationCallOrder[0]!);
+  });
+
+  it('holds a message that failed during an outage, and processes it once every service is back', async () => {
+    const w = worker(ServiceBoundWorker);
+
+    await w.init();
+    h.db.emit('disconnect'); // the outage starts
+
+    const d = fakeDelivery({ event: 'model_created' });
+
+    mqState.consumed[0].deliver(d);
+    await tick(20);
+
+    // Not retried away, not dead-lettered: the outage isn't the message's fault.
+    expect(d.settled).toEqual([]);
+
+    h.db.emit('connect'); // the outage ends
+
+    await vi.waitFor(() => expect(d.settled).toEqual([ 'ack' ]));
+    expect(w.processed).toHaveLength(1);
   });
 
   it('warns when an upstream fails to close cleanly', async () => {

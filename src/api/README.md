@@ -155,9 +155,9 @@ These live on each application's document (see [`nexxus-core-lib`](../core/READM
 | `GET` | `/auth/{strategy}/callback` | Where an OAuth provider redirects back; completes the sign-in. |
 | `POST` | `/auth/refresh` | Exchanges a refresh token for a new token pair. |
 | `POST` | `/auth/logout` | Ends the session a refresh token belongs to. |
-| `POST` | `/user/register` | Creates an account with a username and password, and signs it in. |
+| `POST` | `/user/register` | Creates an account with a username and password, and signs it in. With a username that exists and its password, signs in to that account. |
 | `GET` | `/user/me` | The signed-in user. |
-| `PUT` | `/user` | Updates the signed-in user. |
+| `PUT` | `/user` | Updates the signed-in user. The username can't be changed, and a password can only be replaced. |
 | `POST` | `/device/register` | Creates a device and returns a session for it. |
 | `GET` | `/device/list` | The signed-in user's devices. |
 | `GET` | `/device` | The calling device. |
@@ -189,6 +189,10 @@ Every error has the same body, with the HTTP status set to match:
 
 While the database, the message queue or Redis is disconnected, every request is answered `503 ServiceUnavailableException`. Requests are served again as soon as it reconnects.
 
+A request the database fails is answered `500 ServerErrorException` with a generic message; the database's own error is only logged.
+
+A model write the message queue doesn't confirm is answered `503 ServiceUnavailableException` instead of `202`.
+
 Each request is logged at `info` when it completes, with its method, URL, status and duration. Errors with a `5xx` status are logged at `error`, others at `info`.
 
 ---
@@ -199,13 +203,14 @@ Each request is logged at `info` when it completes, with its method, URL, status
 
 - **`token`** is the access token, sent as `Authorization: Bearer <token>`. It names the device, and also the user on an application with authentication. It lasts the application's `session.jwtExpiresIn` (default 1 hour); after that, requests get `401 UserTokenExpiredException`.
 - **`refreshToken`** goes to `POST /auth/refresh`, which returns a new `token` and `refreshToken`. The session ends `session.refreshTokenExpiresIn` after it started (default 30 days), however often it is refreshed. After that, `/auth/refresh` answers `401 InvalidRefreshTokenException`, and the user signs in again.
+- **`accountCreated`** is `true` when the request created the account — a new registration, or a first sign-in through an OAuth provider — and `false` for any other sign-in. `/device/register` doesn't send it.
 - A refresh token works once. The one it replaced is still accepted for 10 seconds, so a retried refresh succeeds; presented any later, it ends the session.
 - `POST /auth/logout` ends the session and closes the device's live transport connection. It answers `200` whether or not the refresh token was valid.
 - Applications without authentication refresh and log out the same way.
 
 Which device a session is bound to:
 
-- `/user/register`, and a first sign-in through an OAuth provider, create the account's first device.
+- `/user/register` always creates a device, including when it signs in to an existing account. So does a first sign-in through an OAuth provider.
 - `POST /auth/local`, and later OAuth sign-ins, reuse the device sent as `"device": { "id": "…" }` when it belongs to the user, and create one otherwise.
 - `POST /device/register` always creates a device. On an application without authentication, it is how a client gets a session.
 
@@ -221,6 +226,8 @@ Which device a session is bound to:
 | `google` | `clientID`, `clientSecret` and `callbackURL`, all required and non-empty. | `POST /auth/google` redirects to Google, which redirects back to `GET /auth/google/callback`; that response carries the session. `callbackURL` must be this API's callback URL, registered with Google. |
 
 Signing in with Google creates the account on first use, or links Google to the existing account with the same email. Only verified Google emails are accepted.
+
+One account per username: two registrations, or a registration and a first sign-in through an OAuth provider, for the same username at the same moment end with a single account, which the second request finds. A request still waiting after a few seconds is answered `503 ServiceUnavailableException`.
 
 ### Third-party strategies
 
@@ -250,7 +257,7 @@ export default class GithubAuthStrategy extends Auth.NexxusAuthStrategy<GithubCo
 - At startup, one instance is created per application that enables the strategy, with that application's config.
 - `name` must be exactly the string listed in `availableStrategies`.
 - `userDetailSchema` fields are stored on the user under `details.$auth_<name>`, and are never sent to clients.
-- To finish a sign-in, call `sendSessionForExistingUser(res, user, deviceHint)` or `sendSessionForNewUser(res, user)`. `findOrCreateUser()` returns the user, and whether it was just created.
+- To finish a sign-in, call `sendSessionForNewUser(res, user)` when it created the account, and `sendSessionForExistingUser(res, user, deviceHint)` otherwise; the response's `accountCreated` is `true` or `false` to match. `findOrCreateUser()` returns the user, and whether it was just created.
 - Pass failures to `next()` as this package's exceptions: `UserAuthenticationFailedException` is answered `401`, `InvalidParametersException` `400`. Any other error is answered `500`.
 - A redirect flow can carry data through the provider with `signState()` and `verifyState()`. `NexxusAuthNonce` from `@mayhem93/nexxus-redis` makes it single-use.
 

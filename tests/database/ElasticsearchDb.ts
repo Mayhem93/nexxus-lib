@@ -8,7 +8,7 @@ import {
   NexxusFilterQuery,
 } from '@mayhem93/nexxus-core-lib';
 import { errors } from '@elastic/elasticsearch';
-import { NexxusElasticsearchDb } from '@mayhem93/nexxus-database-lib';
+import { NexxusElasticsearchDb, NexxusDatabaseItemsFailedException } from '@mayhem93/nexxus-database-lib';
 import { makeDb, logger } from './helpers';
 import { state, resetEs } from './esFake';
 
@@ -136,11 +136,28 @@ describe('NexxusElasticsearchDb.createItems', () => {
     await expect(db().createItems([bogus as never])).rejects.toThrow(/Unsupported model type: weird/);
   });
 
-  it('logs when the bulk response reports errors', async () => {
-    state.bulkResult = { errors: true, items: [{ index: { error: { type: 'mapper_parsing_exception' } } }] };
-    await db().createItems([application()]);
+  it('throws for an item it could not write — terminal when the data itself was refused', async () => {
+    state.bulkResult = {
+      errors: true,
+      items: [{ index: { status: 400, error: { type: 'mapper_parsing_exception', reason: 'failed to parse field [count]' } } }],
+    };
 
-    expect(logger.has('error', /Failed to create items/)).toBe(true);
+    const err = await db().createItems([application()]).catch((e: unknown) => e) as NexxusDatabaseItemsFailedException;
+
+    expect(err).toBeInstanceOf(NexxusDatabaseItemsFailedException);
+    expect(err.message).toBe('createItems failed for "app1" (mapper_parsing_exception: failed to parse field [count])');
+    expect(err.terminal).toBe(true);
+  });
+
+  it('is not terminal when the database may take the same data later', async () => {
+    state.bulkResult = {
+      errors: true,
+      items: [{ index: { status: 429, error: { type: 'cluster_block_exception', reason: 'index has read-only-allow-delete block' } } }],
+    };
+
+    const err = await db().createItems([application()]).catch((e: unknown) => e) as NexxusDatabaseItemsFailedException;
+
+    expect(err.terminal).toBe(false);
   });
 });
 
@@ -180,29 +197,47 @@ describe('NexxusElasticsearchDb.searchItems', () => {
 });
 
 describe('NexxusElasticsearchDb.getItems', () => {
-  it('mgets and maps found docs, dropping missing/errored ones', async () => {
+  it('answers every requested id: the model, or null when it does not exist', async () => {
     state.mget = () => ({
       docs: [
-        { found: true, _source: { id: 'app1', type: 'application', signingSecret: 's', name: 'A', schema: { runs: { fields: { n: { type: 'string' } } } } } },
-        { found: false, _id: 'missing' },
-        { error: { type: 'x' }, _id: 'boom' },
+        { _id: 'app1', found: true, _source: { id: 'app1', type: 'application', signingSecret: 's', name: 'A', schema: { runs: { fields: { n: { type: 'string' } } } } } },
+        { _id: 'missing', found: false },
       ],
     });
 
-    const results = await db().getItems({ type: 'application', ids: ['app1', 'missing', 'boom'] });
+    // `unanswered` isn't in the response at all — as a SQL `WHERE id IN (…)` would leave it.
+    const results = await db().getItems({ type: 'application', ids: ['app1', 'missing', 'unanswered'] });
 
-    expect(results).toHaveLength(1);
+    expect([ ...results.keys() ]).toEqual([ 'app1', 'missing', 'unanswered' ]);
+    expect(results.get('app1')).toBeInstanceOf(NexxusApplication);
+    expect(results.get('missing')).toBeNull();
+    expect(results.get('unanswered')).toBeNull();
     expect(state.calls.mget[0].index).toBe('nxx-application');
-    expect(logger.has('warning', /Error retrieving document/)).toBe(true);
+  });
+
+  it('throws for a document it could not read', async () => {
+    state.mget = () => ({ docs: [{ _id: 'app1', error: { type: 'shard_not_available_exception', reason: 'no shard' } }] });
+
+    const err = await db().getItems({ type: 'application', ids: ['app1'] }).catch((e: unknown) => e) as NexxusDatabaseItemsFailedException;
+
+    expect(err).toBeInstanceOf(NexxusDatabaseItemsFailedException);
+    expect(err.message).toBe('getItems failed for "app1" (shard_not_available_exception: no shard)');
+    expect(err.terminal).toBe(false);
+  });
+
+  it('reports a document as missing when its model has no index yet', async () => {
+    state.mget = () => ({ docs: [{ _id: 'r1', error: { type: 'index_not_found_exception', reason: 'no such index' } }] });
+
+    expect((await db().getItems({ type: 'runs', ids: ['r1'], appId: 'app1' })).get('r1')).toBeNull();
   });
 
   it('routes a user get to the per-app user index and constructs a NexxusUser', async () => {
-    state.mget = () => ({ docs: [{ found: true, _source: { appId: 'app1', type: 'user', username: 'u', authProviders: ['local'], devices: [], userType: 'default' } }] });
+    state.mget = () => ({ docs: [{ _id: 'u1', found: true, _source: { appId: 'app1', type: 'user', username: 'u', authProviders: ['local'], devices: [], userType: 'default' } }] });
 
     const results = await db().getItems({ type: 'user', ids: ['u1'], appId: 'app1' });
 
     expect(state.calls.mget[0].index).toBe('nxx-app-app1-user');
-    expect(results[0]).toBeInstanceOf(NexxusUser);
+    expect(results.get('u1')).toBeInstanceOf(NexxusUser);
   });
 
   it('requires an appId for user and app-model gets', async () => {
@@ -210,12 +245,12 @@ describe('NexxusElasticsearchDb.getItems', () => {
     await expect(db().getItems({ type: 'runs', ids: ['r1'] })).rejects.toThrow(/App ID is required/);
   });
 
-  it('treats a 404 (index absent) as an empty result', async () => {
+  it('reports every id as missing when the whole index is absent (a 404)', async () => {
     const d = db();
 
     vi.spyOn(client(d), 'mget').mockRejectedValueOnce(new errors.ResponseError({ statusCode: 404, warnings: [], meta: {} as never, body: {} }));
 
-    expect(await d.getItems({ type: 'runs', ids: ['r1'], appId: 'app1' })).toEqual([]);
+    expect(await d.getItems({ type: 'runs', ids: ['r1'], appId: 'app1' })).toEqual(new Map([ [ 'r1', null ] ]));
   });
 });
 
@@ -267,6 +302,42 @@ describe('NexxusElasticsearchDb.updateItems', () => {
     expect(src).toContain('ctx._source.count -= params.');
   });
 
+  it('starts incr and decr from 0 on a missing field, the value passed only as a param', async () => {
+    const p1 = new NexxusJsonPatch({ op: 'incr', path: ['count'], value: [7], metadata: { type: 'runs', id: 'r1', appId: 'app1' } });
+    const p2 = new NexxusJsonPatch({ op: 'decr', path: ['down'], value: [2], metadata: { type: 'runs', id: 'r1', appId: 'app1' } });
+
+    p1.validate({ count: { type: 'int' } } as never);
+    p2.validate({ down: { type: 'int' } } as never);
+    await db().updateItems([p1, p2]);
+
+    const script = state.calls.bulk[0].operations[1].script;
+
+    expect(script.source).toBe([
+      'if (ctx._source.count == null) { ctx._source.count = 0; } ctx._source.count += params.value0',
+      'if (ctx._source.down == null) { ctx._source.down = 0; } ctx._source.down -= params.value1'
+    ].join(';\n'));
+    expect(script.params).toEqual({ value0: 7, value1: 2 });
+  });
+
+  it('compiles remove by index and by value into unbraced lines that skip a missing field', async () => {
+    const p = new NexxusJsonPatch({ op: 'remove', path: ['items', 'tags'], value: [{ i: 1 }, { v: 'x' }], metadata: { type: 'runs', id: 'r1', appId: 'app1' } });
+
+    p.validate({
+      items: { type: 'array', arrayType: 'object', properties: { name: { type: 'string' } } },
+      tags: { type: 'array', arrayType: 'string' }
+    } as never);
+    await db().updateItems([p]);
+
+    const script = state.calls.bulk[0].operations[1].script;
+
+    // Painless refuses the joining `;` after a braced block, so these must stay unbraced.
+    expect(script.source).toBe([
+      'if (ctx._source.items != null && params.value0.i < ctx._source.items.size()) ctx._source.items.remove((int) params.value0.i)',
+      'if (ctx._source.tags != null) ctx._source.tags.removeIf(item -> item == params.value1.v)'
+    ].join(';\n'));
+    expect(script.params).toEqual({ value0: { i: 1 }, value1: { v: 'x' } });
+  });
+
   it('merges multiple patches on the same doc into one update action', async () => {
     const p1 = new NexxusJsonPatch({ op: 'replace', path: ['title'], value: ['a'], metadata: { type: 'runs', id: 'r1', appId: 'app1' } });
     const p2 = new NexxusJsonPatch({ op: 'incr', path: ['count'], value: [1], metadata: { type: 'runs', id: 'r1', appId: 'app1' } });
@@ -282,25 +353,51 @@ describe('NexxusElasticsearchDb.updateItems', () => {
     expect(state.calls.bulk[0].operations[1].script.source).toContain('ctx._source.count += params.value1');
   });
 
-  it('returns partial models (id + version + returned fields) for successful updates', async () => {
+  it('reports each updated document by id: its id, version and returned fields', async () => {
     state.bulkResult = { items: [{ update: { status: 200, _id: 'r1', _version: 9, get: { _source: { title: 'hello' } } } }] };
 
     const result = await db().updateItems([runPatch()]);
 
-    expect(result).toEqual([{ id: 'r1', title: 'hello', version: 9 }]);
+    expect(result).toEqual(new Map([ [ 'r1', { id: 'r1', title: 'hello', version: 9 } ] ]));
   });
 
-  it('returns [] and warns when no valid patches produce script lines', async () => {
+  it('reports a document that does not exist as null', async () => {
+    state.bulkResult = { errors: true, items: [{ update: { status: 404, _id: 'r1', error: { type: 'document_missing_exception' } } }] };
+
+    expect(await db().updateItems([runPatch()])).toEqual(new Map([ [ 'r1', null ] ]));
+  });
+
+  it('throws for a document it could not update — terminal only when the update itself was refused', async () => {
+    state.bulkResult = { errors: true, items: [{ update: { status: 400, _id: 'r1', error: { type: 'script_exception', reason: 'runtime error' } } }] };
+
+    const refused = await db().updateItems([runPatch()]).catch((e: unknown) => e) as NexxusDatabaseItemsFailedException;
+
+    expect(refused).toBeInstanceOf(NexxusDatabaseItemsFailedException);
+    expect(refused.terminal).toBe(true);
+
+    // A version conflict that outlasted `retry_on_conflict` may well pass later.
+    state.bulkResult = { errors: true, items: [{ update: { status: 409, _id: 'r1', error: { type: 'version_conflict_engine_exception' } } }] };
+
+    const conflicted = await db().updateItems([runPatch()]).catch((e: unknown) => e) as NexxusDatabaseItemsFailedException;
+
+    expect(conflicted.terminal).toBe(false);
+  });
+
+  it('throws, terminal, when a patch has nothing it can apply', async () => {
     // A valid incr patch (int field), then corrupt the recorded field type so
     // updateItems' switch hits the "incr not supported for this type" branch and
-    // emits no script line → empty bulk.
+    // emits no script line.
     const p = new NexxusJsonPatch({ op: 'incr', path: ['count'], value: [1], metadata: { type: 'runs', id: 'r1', appId: 'app1' } });
 
     p.validate({ count: { type: 'int' } } as never);
     (p.get().metadata as { pathFieldTypes: string[] }).pathFieldTypes = ['string'];
 
-    expect(await db().updateItems([p])).toEqual([]);
-    expect(logger.has('warning', /No items to update/)).toBe(true);
+    const err = await db().updateItems([p]).catch((e: unknown) => e) as NexxusDatabaseItemsFailedException;
+
+    expect(err).toBeInstanceOf(NexxusDatabaseItemsFailedException);
+    expect(err.message).toBe('updateItems failed for "r1" (no supported operation to apply)');
+    expect(err.terminal).toBe(true);
+    expect(state.calls.bulk).toHaveLength(0);
   });
 
   it('throws when a non-builtin patch is missing its appId', async () => {
@@ -323,6 +420,43 @@ describe('NexxusElasticsearchDb.deleteItems + countItems', () => {
     expect(ops[1]).toEqual({ delete: { _index: 'nxx-setting', _id: 'pipeline' } });
     expect(ops[2].delete._index).toBe('nxx-app-app1-user');
     expect(ops[3]).toEqual({ delete: { _index: 'nxx-app-app1-runs', _id: 'r1' } });
+  });
+
+  it('reports each item deleted, or null when it was already gone, reading nothing it was not asked for', async () => {
+    state.bulkResult = { items: [{ delete: { status: 200, result: 'deleted' } }, { delete: { status: 404, result: 'not_found' } }] };
+
+    const results = await db().deleteItems([ appModel({ id: 'r1' }), appModel({ id: 'r2' }) ]);
+
+    expect(results).toEqual(new Map<string, unknown>([ [ 'r1', { id: 'r1' } ], [ 'r2', null ] ]));
+    expect(state.calls.mget).toHaveLength(0);
+  });
+
+  it('reads the fields asked for just before deleting', async () => {
+    state.mget = () => ({ docs: [{ _id: 'r1', found: true, _source: { userId: 'owner-1' } }] });
+    state.bulkResult = { items: [{ delete: { status: 200, result: 'deleted' } }] };
+
+    const results = await db().deleteItems([ appModel() ], { returnFields: new Set([ 'userId' ]) });
+
+    expect(state.calls.mget[0]).toMatchObject({ docs: [{ _index: 'nxx-app-app1-runs', _id: 'r1' }], _source: [ 'userId' ] });
+    expect(results.get('r1')).toEqual({ id: 'r1', userId: 'owner-1' });
+  });
+
+  it('deletes nothing when the fields asked for cannot be read', async () => {
+    state.mget = () => ({ docs: [{ _id: 'r1', error: { type: 'shard_not_available_exception' } }] });
+
+    const err = await db().deleteItems([ appModel() ], { returnFields: new Set([ 'userId' ]) }).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(NexxusDatabaseItemsFailedException);
+    expect(state.calls.bulk).toHaveLength(0);
+  });
+
+  it('throws for an item it could not delete', async () => {
+    state.bulkResult = { errors: true, items: [{ delete: { status: 503, error: { type: 'unavailable_shards_exception' } } }] };
+
+    const err = await db().deleteItems([ appModel() ]).catch((e: unknown) => e) as NexxusDatabaseItemsFailedException;
+
+    expect(err.message).toBe('deleteItems failed for "r1" (unavailable_shards_exception)');
+    expect(err.terminal).toBe(false);
   });
 
   it('countItems returns the ES count', async () => {

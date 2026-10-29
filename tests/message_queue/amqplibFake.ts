@@ -14,9 +14,11 @@ export const state: {
   serverProperties: { product?: string; version?: string };
   connectImpl: ((opts: any) => Promise<any>) | null;
   checkQueueImpl: ((name: string) => Promise<unknown>) | null;
-  consumeCb: ((msg: any) => Promise<void>) | null;
+  consumeCb: ((msg: any) => void) | null;
   consumeQueue: string | null;
   nextConsumerTag: string;
+  /** How the broker answers a publish on a confirm channel: ack it, nack it, or never answer. */
+  publishOutcome: 'ack' | 'nack' | 'none';
 } = {
   channels: [],
   handlers: {},
@@ -27,17 +29,25 @@ export const state: {
   consumeCb: null,
   consumeQueue: null,
   nextConsumerTag: 'ctag-1',
+  publishOutcome: 'ack',
 };
 
 const makeChannel = () => ({
-  sendToQueue: vi.fn(),
-  consume: vi.fn(async (queue: string, cb: (msg: any) => Promise<void>) => {
+  sendToQueue: vi.fn((_queue: string, _content: Buffer, _options: unknown, cb?: (err: Error | null) => void) => {
+    if (state.publishOutcome === 'ack') setImmediate(() => cb?.(null));
+    if (state.publishOutcome === 'nack') setImmediate(() => cb?.(new Error('message nacked')));
+
+    return true;
+  }),
+  consume: vi.fn(async (queue: string, cb: (msg: any) => void) => {
     state.consumeCb = cb;
     state.consumeQueue = queue;
 
     return { consumerTag: state.nextConsumerTag };
   }),
+  prefetch: vi.fn(async () => {}),
   ack: vi.fn(),
+  nack: vi.fn(),
   checkQueue: vi.fn(async (name: string) => (state.checkQueueImpl ? state.checkQueueImpl(name) : {})),
   assertQueue: vi.fn(async () => ({})),
   deleteQueue: vi.fn(async () => ({ messageCount: 0 })),
@@ -51,14 +61,17 @@ export const connect = vi.fn(async (opts: any) => {
     return state.connectImpl(opts);
   }
 
+  const openChannel = async () => {
+    const ch = makeChannel();
+
+    state.channels.push(ch);
+
+    return ch;
+  };
+
   const conn: any = {
-    createChannel: vi.fn(async () => {
-      const ch = makeChannel();
-
-      state.channels.push(ch);
-
-      return ch;
-    }),
+    createChannel: vi.fn(openChannel),
+    createConfirmChannel: vi.fn(openChannel),
     on: vi.fn((ev: string, cb: (...a: any[]) => void) => { state.handlers[ev] = cb; }),
     once: vi.fn((ev: string, cb: (...a: any[]) => void) => { state.handlers[ev] = cb; }),
     close: vi.fn(async () => {}),
@@ -82,5 +95,6 @@ export function reset(): void {
     consumeCb: null,
     consumeQueue: null,
     nextConsumerTag: 'ctag-1',
+    publishOutcome: 'ack',
   });
 }

@@ -7,7 +7,8 @@ import {
   NexxusJsonPatch,
   NexxusBaseQueuePayload,
   NexxusTransportManagerJsonPatch,
-  INexxusAppModel
+  INexxusAppModel,
+  UnknownApplicationException
 } from '@mayhem93/nexxus-core-lib';
 import { NexxusQueueMessage } from '@mayhem93/nexxus-message-queue-lib';
 import { NexxusModelFieldCache } from '@mayhem93/nexxus-redis';
@@ -18,6 +19,7 @@ import {
   NexxusBaseWorkerStats,
   NexxusWorkerServices
 } from './BaseWorker';
+import { NexxusWorkerUnsupportedEventException } from './Exceptions';
 
 import * as path from "node:path";
 
@@ -50,6 +52,12 @@ export class NexxusWriterWorker extends NexxusBaseWorker<
   protected static envVars: ConfigEnvVars = [];
   protected static schemaPath: string = path.join(__dirname, '../../src/schemas/writer-worker.schema.json');
 
+  /**
+   * Read back from the database on updates and deletes, on apps with users:
+   * their events name the record's owner, not whoever made the change.
+   */
+  private static readonly OWNER_FIELDS: ReadonlySet<string> = new Set([ 'userId' ]);
+
   constructor(services: NexxusWorkerServices) {
     super(services);
   }
@@ -64,7 +72,7 @@ export class NexxusWriterWorker extends NexxusBaseWorker<
         const app = NexxusWriterWorker.loadedApps.get(payload.data.appId);
 
         if (!app) {
-          throw new Error(`App not found for model_created: appId=${payload.data.appId}`);
+          throw new UnknownApplicationException(`App not found for model_created: appId=${payload.data.appId}`);
         }
 
         const appModel = new NexxusAppModel(payload.data, app.getSchema());
@@ -118,7 +126,7 @@ export class NexxusWriterWorker extends NexxusBaseWorker<
           const app = NexxusWriterWorker.loadedApps.get(patchData.metadata.appId!);
 
           if (!app) {
-            throw new Error(`App not found for model_updated: appId=${patchData.metadata.appId}`);
+            throw new UnknownApplicationException(`App not found for model_updated: appId=${patchData.metadata.appId}`);
           }
 
           const modelSchema = app.getAppModelSchema(patchData.metadata.type);
@@ -143,15 +151,16 @@ export class NexxusWriterWorker extends NexxusBaseWorker<
             : new Set<string>();
           const returnFields = new Set<string>([
             ...app.getModelFilterableFields(patchData.metadata.type),
-            ...aclFields
+            ...aclFields,
+            ...(app.hasAuthEnabled() ? NexxusWriterWorker.OWNER_FIELDS : [])
           ]);
 
-          const result = await NexxusWriterWorker.database.updateItems(
+          const updated = (await NexxusWriterWorker.database.updateItems(
             [jsonPatch, updateUpdatedAtPatch],
             { returnFields }
-          ) as Array<Partial<INexxusAppModel>>;
+          )).get(patchData.metadata.id) as Partial<INexxusAppModel> | null | undefined;
 
-          if (!result[0]) {
+          if (!updated) {
             NexxusWriterWorker.logger.warn(
               `No item found to update for patch with appId ${patchData.metadata.appId} and id ${patchData.metadata.id}`,
               NexxusWriterWorker.loggerLabel
@@ -168,8 +177,8 @@ export class NexxusWriterWorker extends NexxusBaseWorker<
             const changed: Record<string, unknown> = {};
 
             for (const field of aclFields) {
-              if (patchedTopLevel.has(field) && result[0][field] !== undefined) {
-                changed[field] = result[0][field];
+              if (patchedTopLevel.has(field) && updated[field] !== undefined) {
+                changed[field] = updated[field];
               }
             }
 
@@ -186,19 +195,28 @@ export class NexxusWriterWorker extends NexxusBaseWorker<
 
           delete transformedPatchData.metadata.pathFieldTypes; // Remove pathFieldTypes before sending to Transport Manager
           delete transformedUpdatedAtPatchData.metadata.pathFieldTypes;
-          delete result[0].id; // Remove id from partialModel before sending to Transport Manager
+          // The stored owner, which per-user channels are routed by — never a
+          // `userId` the incoming patch carries.
+          const userId = updated.userId;
+
+          // The identity travels on `metadata`; `partialModel` keeps only the
+          // rest of what was read back.
+          delete updated.id;
+          delete updated.userId;
 
           validatedPatches.push({
             ...transformedPatchData,
             metadata: {
               ...transformedPatchData.metadata,
-              partialModel: result[0]
+              userId,
+              partialModel: updated
             }
           },
           { ...transformedUpdatedAtPatchData,
             metadata: {
               ...transformedUpdatedAtPatchData.metadata,
-              partialModel: result[0]
+              userId,
+              partialModel: updated
             }
           });
         }
@@ -221,7 +239,7 @@ export class NexxusWriterWorker extends NexxusBaseWorker<
         const app = NexxusWriterWorker.loadedApps.get(payload.data.appId);
 
         if (!app) {
-          throw new Error(`App not found for model_deleted: appId=${payload.data.appId}`);
+          throw new UnknownApplicationException(`App not found for model_deleted: appId=${payload.data.appId}`);
         }
 
         // Trusted path: a delete only needs id/appId/type to address the
@@ -229,8 +247,31 @@ export class NexxusWriterWorker extends NexxusBaseWorker<
         // would add nothing and would reject an otherwise-valid delete whose
         // payload omits a required field.
         const appModel = NexxusAppModel.fromStorage(payload.data as INexxusAppModel);
+        // Read back what the Transport Manager routes a delete by, as it was just
+        // before the delete: the owner, for per-user channels, and the
+        // filterable fields, for filtered subscriptions. A model nobody can
+        // subscribe to needs neither, and costs no extra read.
+        const returnFields = app.isSubscribable(payload.data.type)
+          ? new Set<string>([
+            ...app.getModelFilterableFields(payload.data.type),
+            ...(app.hasAuthEnabled() ? NexxusWriterWorker.OWNER_FIELDS : [])
+          ])
+          : new Set<string>();
+        const deleted = (await NexxusWriterWorker.database.deleteItems(
+          [ appModel ],
+          returnFields.size > 0 ? { returnFields } : {}
+        )).get(payload.data.id as string) as Partial<INexxusAppModel> | null | undefined;
 
-        await NexxusWriterWorker.database.deleteItems([ appModel ]);
+        // Already gone: the delete that got there first has told the subscribers.
+        if (!deleted) {
+          NexxusWriterWorker.logger.info(`Model with ID: "${payload.data.id}" for appId: "${payload.data.appId}" was already deleted, nothing to notify`, {
+            appId: payload.data.appId,
+            modelId: payload.data.id,
+            modelType: payload.data.type
+          }, NexxusWriterWorker.loggerLabel);
+
+          return;
+        }
 
         NexxusWriterWorker.logger.info(`Model deleted with ID: "${payload.data.id}" for appId: "${payload.data.appId}"`, {
           appId: payload.data.appId,
@@ -238,9 +279,24 @@ export class NexxusWriterWorker extends NexxusBaseWorker<
           modelType: payload.data.type
         }, NexxusWriterWorker.loggerLabel);
 
+        // The stored owner, which per-user channels are routed by — never a
+        // `userId` the incoming delete carries.
+        const userId = deleted.userId;
+
+        // The identity travels on `data`; `partialModel` keeps only the rest of
+        // what was read back.
+        delete deleted.id;
+        delete deleted.userId;
+
         await this.publish('transport-manager', {
           event: 'model_deleted',
-          data: payload.data,
+          data: {
+            id: payload.data.id,
+            type: payload.data.type,
+            appId: payload.data.appId,
+            userId,
+            partialModel: deleted
+          },
         });
 
         if (app.isAclEnabled()) {
@@ -253,7 +309,9 @@ export class NexxusWriterWorker extends NexxusBaseWorker<
         break;
       }
       default:
-        NexxusWriterWorker.logger.warn(`Unknown event type: ${(payload as NexxusBaseQueuePayload).event}`, NexxusWriterWorker.loggerLabel);
+        throw new NexxusWorkerUnsupportedEventException(
+          `The Writer doesn't handle "${(payload as NexxusBaseQueuePayload).event}" events`
+        );
     }
   }
 

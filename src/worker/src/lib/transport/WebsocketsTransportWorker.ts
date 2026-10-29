@@ -16,6 +16,7 @@ import {
   type NexxusDeviceDisconnectReason
 } from './VolatileTransportWorker';
 import { NexxusBaseWorkerEvents, NexxusBaseWorkerStats, NexxusWorkerServices } from '../BaseWorker';
+import { NexxusWorkerUnsupportedEventException } from '../Exceptions';
 import { NexxusWsClient } from './ws/Client';
 import {
   NexxusWsInternalServerException,
@@ -169,10 +170,11 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
         break;
 
       default:
-        NexxusWebsocketsTransportWorker.logger.warn(
-          `Unknown event type in payload: for device ID: "${deviceId}"`,
-          { data, deviceId },
-          NexxusWebsocketsTransportWorker.loggerLabel
+        // Unreachable by type, reachable at runtime: a newer Transport Manager
+        // can send an event this transport predates. It's the same event for
+        // every device in the message, so the first device stops the whole one.
+        throw new NexxusWorkerUnsupportedEventException(
+          `The websockets transport doesn't deliver "${(data as { event: string }).event}" events`
         );
     }
   }

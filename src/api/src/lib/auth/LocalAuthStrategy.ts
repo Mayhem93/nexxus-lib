@@ -59,12 +59,9 @@ export default class NexxusLocalAuthStrategy extends NexxusAuthStrategy {
         return done(null, false, new UserAuthenticationFailedException('Invalid credentials'));
       }
 
-      // A null hash means the account has no local credentials at all — it was
-      // created through an OAuth provider. Without this check, `verifyPassword`
-      // would be handed a null hash.
-      const passwordHash = user.getData().password;
-
-      if (!passwordHash || !await NexxusLocalAuthStrategy.verifyPassword(password, passwordHash)) {
+      // Also false for an account with no password — one created through an
+      // OAuth provider.
+      if (!await NexxusLocalAuthStrategy.verifyPassword(password, user.getData().password)) {
         return done(null, false, new UserAuthenticationFailedException('Invalid credentials'));
       }
 

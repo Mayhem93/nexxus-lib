@@ -9,6 +9,7 @@ import {
   startTestServer, type TestServer,
 } from './harness';
 import { installFakeRedis } from '../redis/helpers';
+import type { FakeRedis } from '../redis/fakeRedis';
 
 const USER = {
   id: 'u1', username: 'ann', userType: 'default',
@@ -55,9 +56,11 @@ async function serve(application: NexxusApplication, withLocalStrategy = true): 
 }
 
 describe('POST /user/register', () => {
+  let redis: FakeRedis;
+
   beforeEach(() => {
     installApiStatics();
-    installFakeRedis();
+    redis = installFakeRedis();
     dbState.searchResult = [];
   });
 
@@ -74,6 +77,7 @@ describe('POST /user/register', () => {
     expect(NexxusToken.verify(app, res.body.token).user).toMatchObject({ username: 'ann' });
     expect(res.body.device.id).toEqual(expect.any(String));
     expect(res.body.refreshToken).toMatch(new RegExp(`^${res.body.device.id}\\.`));
+    expect(res.body.accountCreated).toBe(true);
   });
 
   it('stores the password hashed', async () => {
@@ -166,14 +170,90 @@ describe('POST /user/register', () => {
     expect(dbState.updateCalls).toHaveLength(0);
   });
 
-  it('409s a username already taken', async () => {
+  it('saves the device only once the account exists', async () => {
     await serve(makeAuthApp());
-    dbState.searchResult = [ storedUser() ];
+    dbState.createImpl = () => { throw new Error('index unavailable'); };
+
+    const res = await send('POST', '/user/register', { username: 'ann', password: 'p' }, APP_ONLY);
+
+    expect(res.status).toBe(500);
+    // The account is written first, so a failed insert leaves no device behind.
+    expect(redis.store.size).toBe(0);
+  });
+
+  /**
+   * A client that never got its registration's response — or whose
+   * registration failed after the account was written — sends it again. With
+   * the account's own password, that signs in rather than being refused.
+   */
+  it('signs in when the username exists and the password is that account\'s', async () => {
+    await serve(makeAuthApp());
+    dbState.searchResult = [ storedUser({ password: await NexxusLocalAuthStrategy.hashPassword('p') }) ];
+
+    const res = await send('POST', '/user/register', { username: 'ann', password: 'p' }, APP_ONLY);
+
+    expect(res.status).toBe(200);
+    expect(res.body.accountCreated).toBe(false);
+    expect(NexxusToken.verify(app, res.body.token).user).toMatchObject({ id: 'u1' });
+    expect(dbState.created).toHaveLength(0);
+    // A new device, recorded on the account like any sign-in's.
+    expect(dbState.updateCalls[0]!.patches[0].get()).toMatchObject({
+      op: 'append', path: [ 'devices' ], value: [ res.body.device.id ],
+    });
+  });
+
+  it('ignores the profile sent when it signs in instead', async () => {
+    await serve(makeAuthApp());
+    dbState.searchResult = [ storedUser({ password: await NexxusLocalAuthStrategy.hashPassword('p') }) ];
+
+    // Undeclared, which for a new account would be a 400.
+    const res = await send('POST', '/user/register',
+      { username: 'ann', password: 'p', favouriteColour: 'blue' }, APP_ONLY);
+
+    expect(res.status).toBe(200);
+    // Nothing written to the account but its new device.
+    expect(dbState.updateCalls.flatMap(c => c.patches.map((p: any) => p.get().path[0])))
+      .toEqual([ 'devices', 'updatedAt' ]);
+  });
+
+  /**
+   * Both look the username up before either inserts, so without the username
+   * lock both would create an account.
+   */
+  it('two registrations of the same username at once make one account, and the second signs in', async () => {
+    await serve(makeAuthApp());
+    // The search sees what was inserted, as Elasticsearch does once the insert's refresh lands.
+    dbState.searchImpl = () => dbState.created.flat().filter((u: any) => u.getData().username === 'ann');
+
+    const [ first, second ] = await Promise.all([
+      send('POST', '/user/register', { username: 'ann', password: 'p' }, APP_ONLY),
+      send('POST', '/user/register', { username: 'ann', password: 'p' }, APP_ONLY),
+    ]);
+
+    expect([ first.status, second.status ]).toEqual([ 200, 200 ]);
+    expect([ first.body.accountCreated, second.body.accountCreated ].sort()).toEqual([ false, true ]);
+    expect(dbState.created).toHaveLength(1);
+  });
+
+  it('409s a username already taken, when the password is not that account\'s', async () => {
+    await serve(makeAuthApp());
+    dbState.searchResult = [ storedUser({ password: await NexxusLocalAuthStrategy.hashPassword('another') }) ];
 
     const res = await send('POST', '/user/register', { username: 'ann', password: 'p' }, APP_ONLY);
 
     expect(res.status).toBe(409);
     expect(res.body.error).toBe('UserAlreadyExistsException');
+  });
+
+  it('409s an account created through an OAuth provider, whatever the password', async () => {
+    await serve(makeAuthApp());
+    // No password stored, so registering its email can't sign in to it.
+    dbState.searchResult = [ storedUser({ password: null, authProviders: [ 'google' ] }) ];
+
+    const res = await send('POST', '/user/register', { username: 'ann', password: 'p' }, APP_ONLY);
+
+    expect(res.status).toBe(409);
+    expect(dbState.updateCalls).toHaveLength(0);
   });
 
   it('requires a username and a password', async () => {
@@ -304,6 +384,18 @@ describe('PUT /user', () => {
     expect(patches[1].get().path).toEqual([ 'updatedAt' ]);
   });
 
+  it('404s when the account behind the token no longer exists', async () => {
+    await serve(makeAuthApp({
+      auth: { strategies: { local: {} }, userDetailSchema: { default: { age: { type: 'int', required: false } } } },
+    }));
+    dbState.missingIds = [ 'u1' ];
+
+    const res = await patch({ patch: { op: 'replace', path: [ 'details.age' ], value: [ 31 ] } });
+
+    expect(res.status).toBe(404);
+    expect(res.body).toMatchObject({ error: 'NotFoundException', message: 'User "u1" no longer exists' });
+  });
+
   it('rejects a patch with no path or value arrays', async () => {
     await serve(makeAuthApp());
 
@@ -316,7 +408,7 @@ describe('PUT /user', () => {
     }
   });
 
-  it.each([ 'userType', 'authProviders', 'devices', 'createdAt', 'updatedAt' ])(
+  it.each([ 'username', 'userType', 'authProviders', 'devices', 'createdAt', 'updatedAt' ])(
     'refuses to patch %s', async (path) => {
       await serve(makeAuthApp());
 
@@ -361,6 +453,36 @@ describe('PUT /user', () => {
 
     expect(value).not.toBe('hunter2');
     expect(value).toMatch(/^\$2[aby]\$/);
+  });
+
+  it('takes a password only as a non-empty string, replaced', async () => {
+    await serve(makeAuthApp());
+
+    // It's hashed whole: an appended hash would leave a password nothing signs in with.
+    for (const body of [
+      { op: 'append', path: [ 'password' ], value: [ 'more' ] },
+      { op: 'remove', path: [ 'password' ], value: [ { i: 0 } ] },
+      { op: 'replace', path: [ 'password' ], value: [ 42 ] },
+      { op: 'replace', path: [ 'password' ], value: [ '' ] },
+    ]) {
+      const res = await patch({ patch: body });
+
+      expect(res.status).toBe(400);
+      expect(res.body.message).toBe('"password" can only be replaced, with a non-empty string');
+    }
+
+    expect(dbState.updateCalls).toHaveLength(0);
+  });
+
+  it('removes from an array in the details', async () => {
+    await serve(makeAuthApp({
+      auth: { strategies: { local: {} }, userDetailSchema: { default: { tags: { type: 'array', arrayType: 'string', required: false } } } },
+    }));
+
+    const res = await patch({ patch: { op: 'remove', path: [ 'details.tags' ], value: [ { v: 'old' } ] } });
+
+    expect(res.status).toBe(200);
+    expect(dbState.updateCalls[0]!.patches[0].get()).toMatchObject({ op: 'remove', path: [ 'details.tags' ], value: [ { v: 'old' } ] });
   });
 
   it('adds the local provider when an OAuth-only account sets a password', async () => {
@@ -408,6 +530,22 @@ describe('PUT /user', () => {
 
     expect(res.status).toBe(400);
     expect(res.body.message).toMatch(/Invalid JSON Patch/);
+    expect(dbState.updateCalls).toHaveLength(0);
+  });
+
+  it('400s a patch it cannot even construct — it used to escape as a 500', async () => {
+    await serve(makeAuthApp());
+
+    for (const body of [
+      { op: 'move', path: [ 'details.age' ], value: [ 1 ] },
+      { op: 'replace', path: [ 'details.age', 'details.city' ], value: [ 1 ] },
+    ]) {
+      const res = await patch({ patch: body });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({ error: 'InvalidParametersException', message: expect.stringMatching(/^Invalid JSON Patch: /) });
+    }
+
     expect(dbState.updateCalls).toHaveLength(0);
   });
 

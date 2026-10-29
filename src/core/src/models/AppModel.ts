@@ -30,7 +30,7 @@ export class NexxusAppModel extends NexxusBaseModel<INexxusAppModel> {
    */
   constructor(props: INexxusAppModel, appSchema: NexxusApplicationSchema | null) {
     if (!props.appId) {
-      throw new Error('AppModel requires AppId');
+      throw new InvalidSchemaDataException('AppModel requires AppId');
     }
 
     if (appSchema === null) {

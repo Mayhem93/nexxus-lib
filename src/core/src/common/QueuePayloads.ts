@@ -24,7 +24,21 @@ export type NexxusTransportManagerModelUpdatedPayload = {
   data: Array<NexxusTransportManagerJsonPatch>;
 }
 
-export type NexxusTransportManagerPayload = NexxusModelCreatedPayload | NexxusTransportManagerModelUpdatedPayload | NexxusModelDeletedPayload;
+/**
+ * A delete as the Writer passes it on: `userId` is the stored owner, and
+ * `partialModel` holds the record's filterable fields as they were just before
+ * the delete. `partialModel` is only for testing filtered subscriptions; it
+ * doesn't reach clients.
+ */
+export type NexxusTransportManagerModelDeletedPayload = {
+  event: 'model_deleted';
+  data: NexxusModelDeletedData & { partialModel: Partial<INexxusAppModel> };
+}
+
+export type NexxusTransportManagerPayload =
+  | NexxusModelCreatedPayload
+  | NexxusTransportManagerModelUpdatedPayload
+  | NexxusTransportManagerModelDeletedPayload;
 
 /**
  * Metadata for transport-bound model events (create/update/delete alike).

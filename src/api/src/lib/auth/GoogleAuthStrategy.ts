@@ -132,7 +132,12 @@ export default class NexxusGoogleAuthStrategy extends NexxusAuthStrategy<NexxusG
         providersPatch.validate(userSchema);
         updatedAtPatch.validate(userSchema);
 
-        await NexxusApi.database.updateItems([ providersPatch, updatedAtPatch ]);
+        const linked = (await NexxusApi.database.updateItems([ providersPatch, updatedAtPatch ])).get(metadata.id);
+
+        // Found by email a moment ago, gone by the time it was written to.
+        if (!linked) {
+          throw new UserAuthenticationFailedException(`User "${metadata.id}" no longer exists`);
+        }
 
         // Mirror it so the token this login mints says the account is linked —
         // the patch is applied asynchronously by the writer, and re-reading

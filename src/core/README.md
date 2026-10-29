@@ -196,8 +196,7 @@ const patch = new NexxusJsonPatch({
 });
 
 patch.validate(appModelSchema);   // REQUIRED before get() — validates + normalizes values
-patch.getPartialModel();
-// { id: "task-1", type: "task", appId: "app-123", status: "completed", priority: "low" }
+patch.get();
 ```
 
 **Operations** (`op`) and the field types they apply to:
@@ -207,8 +206,9 @@ patch.getPartialModel();
 | `replace` | any | overwrite the value |
 | `append` | `array`, `string` | push onto an array / concatenate onto a string |
 | `prepend` | `array`, `string` | unshift onto an array / prepend onto a string |
-| `incr` | `int`, `float`, `date` | add to a number |
-| `decr` | `int`, `float`, `date` | subtract from a number |
+| `incr` | `int`, `float`, `date` | add to a number (a missing value counts as `0`) |
+| `decr` | `int`, `float`, `date` | subtract from a number (a missing value counts as `0`) |
+| `remove` | `array` | take elements out: `{ v }` removes every element equal to `v` (arrays of primitives only), `{ i }` the element at index `i` (nothing past the end) |
 
 **Metadata:** `{ appId?, id, type, userId? }`. `appId` is required for every model type **except** `setting` (which is deployment-scoped and has no owning app). `validate(schema)` normalizes values in place (e.g. date strings → integer timestamps) and rejects patches that target the reserved `version` field.
 
@@ -335,6 +335,23 @@ Concrete subclasses across the repo:
 - Redis client — [`@mayhem93/nexxus-redis`](../redis/)
 - API node — [`@mayhem93/nexxus-api-lib`](../api/)
 - Worker nodes — [`@mayhem93/nexxus-worker-lib`](../worker/)
+
+---
+
+## Exceptions
+
+Every Nexxus error extends **`NexxusException`**. Its `name` is the exception's type, and `subcode` narrows it where one type covers several cases.
+
+`terminal` says whether a queue message whose processing failed with this error would fail the same way on every retry. The message queue dead-letters such a message at once instead of retrying it. It is `false` unless the subclass declares `public readonly terminal = true`. The terminal ones in core:
+
+| Exception | Raised for |
+| --- | --- |
+| `InvalidJsonPatchException` | A patch that doesn't fit the model's schema. |
+| `InvalidQueryFilterException` | A FilterQuery that doesn't fit the model's schema. |
+| `InvalidSchemaDataException` | A record that doesn't fit its schema. |
+| `InvalidUserModelException` | A user record with a missing or mistyped field. |
+| `UnknownApplicationException` | Data naming an application the process hasn't loaded. |
+| `UnknownModelTypeException` | A model type the application doesn't declare. |
 
 ---
 

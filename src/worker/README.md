@@ -83,7 +83,20 @@ process.once('SIGINT',  () => worker.close());
 
 While the database, the message queue or Redis is disconnected, the worker stops consuming. It resumes once all three are connected again.
 
-`close()` deregisters from the Hub, stops the management server and disconnects from the database, message queue and Redis. A websockets transport also deletes its slot queue and closes its WebSocket server.
+A message whose processing fails is retried or dead-lettered:
+
+- **Invalid data, an application or model type the worker doesn't know, or an event it doesn't handle** — dead-lettered at once.
+- **Any other failure** — retried after 1 s, 2 s and 4 s, then dead-lettered.
+- **A failure while a service is down** — held until the service is back, then retried. It doesn't count as a retry.
+
+When the broker doesn't confirm a message a worker publishes on to the next stage:
+
+- **Writer** — the message it was processing still succeeds, since its write has already happened and retrying would repeat it. The failure is logged as an error, and the event it carried is lost.
+- **Transport Manager** — the event fails, so it's retried and dead-lettered like any other failure. It waits for every fan-out message to be confirmed first. A device may then receive the same event twice.
+
+Messages dead-lettered from `writer` and `transport-manager` land in `writer.dlq` and `transport-manager.dlq`, created by the deployment bootstrap. Each keeps the newest `message_queue.deadLetterMaxLength` messages (100 by default), for `message_queue.deadLetterRetention` seconds (3 days by default); a transport's are dropped. Each one is logged with its queue, event and error. See [`nexxus-message-queue-lib`](../message_queue/README.md#failed-messages).
+
+`close()` deregisters from the Hub, stops the management server, stops consuming and gives the messages being processed up to 10 seconds to finish, then disconnects from the database, message queue and Redis. A message still running after that goes back to its queue. A websockets transport also deletes its slot queue and closes its WebSocket server.
 
 ---
 
@@ -133,7 +146,7 @@ No worker reads environment variables of its own.
 
 - **Create** — validates the record against the model's schema, stores it, and publishes `model_created`.
 - **Update** — validates each patch, adds one that sets `updatedAt`, and applies them. It publishes `model_updated` with the record's filterable fields as they are after the update. An update for a record that doesn't exist is dropped, with a warning.
-- **Delete** — removes the record and publishes `model_deleted`.
+- **Delete** — removes the record and publishes `model_deleted`. A delete for a record that's already gone publishes nothing.
 - On applications with access control, it also keeps the Redis copy of the fields ACL conditions are checked against.
 
 ### Transport Manager
@@ -141,9 +154,11 @@ No worker reads environment variables of its own.
 For each change, it collects:
 
 - every device with a subscription to a channel the change falls under, and
-- every device with a filtered subscription whose filter matches the changed record: the new record for a create, its filterable fields after an update, its identity fields for a delete.
+- every device with a filtered subscription whose filter matches the changed record: the new record for a create, its filterable fields after an update, its filterable fields as they were before a delete.
 
 Devices are grouped by transport queue and by the channels they matched, and each group gets one `device_message`.
+
+A stored filter that no longer compiles against the model's schema — after a field it names was removed, for example — is skipped with a warning; everyone else is still notified.
 
 ### Websockets transport
 
@@ -178,7 +193,10 @@ Every frame is JSON: `{ "event": "<name>", "data": { … } }`.
 | `error` | `{ "message", "code" }` |
 
 - `metadata.channels` lists the channel ids, as returned by `POST /subscription`, that the event matched.
+- `model.userId` is the id of the user who owns the record, which isn't necessarily whoever changed it.
+- `patches` on `model_updated` are in the format `PUT /model/{id}` takes — the `JsonPatch` schema in the API's `openapi.yaml` describes each `op` — plus one that sets `updatedAt`.
 - `model.version` on `model_updated` is the record's version after the update. Apply the patches when it is one more than your copy's version; on a larger gap, read the record again.
+- The same event can arrive more than once. A repeated `model_updated` carries the version your copy already has.
 - An `error` frame doesn't say which frame it answers.
 
 | `code` | Meaning |
@@ -210,6 +228,8 @@ The built-in workers are subclasses of the exported base classes.
 - **`NexxusVolatileTransportWorker`** — for transports that hold a connection per device. Implement `initTransport()`, `sendToDevice(deviceId, data)` and `disconnectDevice(deviceId, reason)`. `authenticateDevice(token)`, `authenticateRefreshedToken(token, deviceId, appId)`, `registerDevice(deviceId)` and `unregisterDevice(deviceId)` cover token checks and the device's Redis state. Slot queues come with it.
 - **`NexxusPersistentTransportWorker`** — for push services (APNs, FCM, …). All instances share one queue. Implement `initTransport()` and `sendToDevice(deviceId, data)`. No push transport ships yet.
 
+`processMessage` or `sendToDevice` handed an event it doesn't handle throws `NexxusWorkerUnsupportedEventException`, so the message is dead-lettered at once.
+
 ---
 
 ## Management server and Hub
@@ -231,7 +251,6 @@ With `app.hub` set, a worker registers with the Hub under its role — a websock
 
 - Applications and their ACL roles are read once, at startup. Restart every worker after creating or changing an application or a role; until then, the websockets transport refuses tokens of a new application.
 - With the built-in Elasticsearch adapter, only the first 100 applications are loaded.
-- A delete carries only the record's identity fields, so a filtered subscription whose filter tests any other field isn't told about it.
 
 ---
 

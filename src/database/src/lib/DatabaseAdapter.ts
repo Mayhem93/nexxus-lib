@@ -49,8 +49,25 @@ export interface NexxusDbGetOptions<T extends NexxusModelTypeName = string> {
 }
 
 export interface NexxusDbUpdateOptions {
-  returnFields?: Set<string>;
+  returnFields?: ReadonlySet<string>;
 }
+
+export interface NexxusDbDeleteOptions {
+  /**
+   * Fields to return for each deleted item, as they were just before the
+   * delete. An adapter that can't delete and return in one step reads first,
+   * so ask only for what you need.
+   */
+  returnFields?: ReadonlySet<string>;
+}
+
+/**
+ * What a read or write reports for each id it was asked about: the item, or
+ * `null` when it doesn't exist. Every requested id is a key, whether or not the
+ * database reports misses itself. Any other per-item failure is thrown as a
+ * `NexxusDatabaseItemsFailedException` instead.
+ */
+export type NexxusDbItemResults<T> = Map<string, T | null>;
 
 export type NexxusDatabaseAdapterStats = {};
 
@@ -87,20 +104,32 @@ export abstract class NexxusDatabaseAdapter<
    */
   public abstract getBootstrapper(): NexxusDatabaseBootstrapper;
 
+  /**
+   * The CRUD surface. Reads and writes report every item they were asked about
+   * — see `NexxusDbItemResults` — and throw `NexxusDatabaseItemsFailedException`
+   * for items that failed for any other reason than not existing. That
+   * exception is `terminal` when the database refused the data itself, so a
+   * queue consumer can tell a message that will never succeed from one worth
+   * retrying.
+   *
+   * `createItems` has nothing to miss: it resolves when every item was
+   * written, and throws otherwise.
+   */
   public abstract createItems(collection: Array<AnyNexxusModel>): Promise<void>;
-  // public abstract getItems(options: NexxusDbGetOptions): Promise<Array<NexxusBaseModel | null>>;
-  public abstract getItems(options: NexxusDbGetOptions<'application'>): Promise<Array<NexxusApplication | null>>;
-  public abstract getItems(options: NexxusDbGetOptions<'user'>): Promise<Array<NexxusUser | null>>;
-  public abstract getItems(options: NexxusDbGetOptions<'setting'>): Promise<Array<NexxusSetting | null>>;
-  public abstract getItems(options: NexxusDbGetOptions<'acl'>): Promise<Array<NexxusAclRole | null>>;
-  public abstract getItems(options: NexxusDbGetOptions<string>): Promise<Array<NexxusAppModel | null>>;
+  public abstract getItems(options: NexxusDbGetOptions<'application'>): Promise<NexxusDbItemResults<NexxusApplication>>;
+  public abstract getItems(options: NexxusDbGetOptions<'user'>): Promise<NexxusDbItemResults<NexxusUser>>;
+  public abstract getItems(options: NexxusDbGetOptions<'setting'>): Promise<NexxusDbItemResults<NexxusSetting>>;
+  public abstract getItems(options: NexxusDbGetOptions<'acl'>): Promise<NexxusDbItemResults<NexxusAclRole>>;
+  public abstract getItems(options: NexxusDbGetOptions<string>): Promise<NexxusDbItemResults<NexxusAppModel>>;
   public abstract searchItems(options: NexxusDbSearchOptions<'application'>): Promise<NexxusApplication[]>;
   public abstract searchItems(options: NexxusDbSearchOptions<'user'>): Promise<NexxusUser[]>;
   public abstract searchItems(options: NexxusDbSearchOptions<'setting'>): Promise<NexxusSetting[]>;
   public abstract searchItems(options: NexxusDbSearchOptions<'acl'>): Promise<NexxusAclRole[]>;
   public abstract searchItems(options: NexxusDbSearchOptions<string>): Promise<NexxusAppModel[]>;
-  public abstract updateItems(collection: Array<NexxusJsonPatch>, options?: NexxusDbUpdateOptions): Promise<Array<Partial<AnyNexxusModelData>> | void>;
-  public abstract deleteItems(collection: Array<NexxusBaseModel>): Promise<void>;
+  /** Keyed by document id; each value holds the id, `version` and `returnFields` as they are after the update. */
+  public abstract updateItems(collection: Array<NexxusJsonPatch>, options?: NexxusDbUpdateOptions): Promise<NexxusDbItemResults<Partial<AnyNexxusModelData>>>;
+  /** Each value holds the id, plus `returnFields` as they were before the delete. */
+  public abstract deleteItems(collection: Array<NexxusBaseModel>, options?: NexxusDbDeleteOptions): Promise<NexxusDbItemResults<Partial<AnyNexxusModelData>>>;
   public abstract countItems(options: NexxusDbCountOptions): Promise<number>;
 
   protected abstract buildQuery(options: NexxusDbSearchOptions<string>): string | object;

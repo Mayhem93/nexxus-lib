@@ -6,9 +6,11 @@
  * cleanup) are exercised for real. TTL is not modeled (expire is a no-op that
  * only reports whether the key exists). The JSON namespace supports the paths
  * the models use: '$' (whole doc), '$.subscriptions' and '$.session'. EVAL
- * supports the one script the models run, the device-session compare-and-set.
+ * supports the two scripts the models run: the device-session compare-and-set
+ * and the username-lock release.
  */
 import { NEXXUS_DEVICE_SESSION_CAS_SCRIPT } from '../../src/redis/src/lib/models/Device';
+import { NEXXUS_USERNAME_LOCK_RELEASE_SCRIPT } from '../../src/redis/src/lib/models/UsernameLock';
 
 type Entry =
   | { type: 'hash'; value: Map<string, string> }
@@ -50,7 +52,15 @@ export class FakeRedis {
   }
 
   // ---- STRING ----
-  async set(key: string, value: string, opts?: { expiration?: { type: string; value: number } }): Promise<string> {
+  async set(
+    key: string,
+    value: string,
+    opts?: { condition?: 'NX'; expiration?: { type: string; value: number } }
+  ): Promise<string | null> {
+    if (opts?.condition === 'NX' && this.store.has(key)) {
+      return null;
+    }
+
     this.store.set(key, { type: 'string', value, ttl: opts?.expiration?.value });
 
     return 'OK';
@@ -177,14 +187,29 @@ export class FakeRedis {
     return this.store.delete(key) ? 1 : 0;
   }
 
+  async exists(key: string): Promise<number> {
+    return this.store.has(key) ? 1 : 0;
+  }
+
   // ---- SCRIPTING ----
   /**
-   * Emulates the device-session compare-and-set with the script's own return
-   * contract: 1 swapped, 0 the stored hash moved on (or there is no session),
-   * -1 no such device. Any other script is refused, so a new one can't silently
-   * hit a fake that does nothing.
+   * Emulates each script with its own return contract. The username-lock
+   * release: 1 deleted, 0 the lock holds another token (or is gone). The
+   * device-session compare-and-set: 1 swapped, 0 the stored hash moved on (or
+   * there is no session), -1 no such device. Any other script is refused, so a
+   * new one can't silently hit a fake that does nothing.
    */
   async eval(script: string, opts: { keys: string[]; arguments: string[] }): Promise<number> {
+    if (script === NEXXUS_USERNAME_LOCK_RELEASE_SCRIPT) {
+      const lock = this.store.get(opts.keys[0]!);
+
+      if (lock?.type !== 'string' || lock.value !== opts.arguments[0]) return 0;
+
+      this.store.delete(opts.keys[0]!);
+
+      return 1;
+    }
+
     if (script !== NEXXUS_DEVICE_SESSION_CAS_SCRIPT) {
       throw new Error('FakeRedis.eval: unsupported script');
     }

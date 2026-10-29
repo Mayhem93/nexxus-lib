@@ -136,6 +136,9 @@ export abstract class NexxusVolatileTransportWorker<
    * without auto-delete semantics behave consistently.
    */
   public async close(): Promise<void> {
+    // Before the queue goes, so messages already being delivered can finish.
+    await NexxusBaseWorker.messageQueue.stopConsuming();
+
     try {
       await NexxusBaseWorker.messageQueue.deleteQueue(this.queueName);
     } catch (err) {

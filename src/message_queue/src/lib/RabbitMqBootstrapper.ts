@@ -25,6 +25,10 @@ export interface NexxusRabbitMqBootstrapAdapterConfig extends NexxusConfig {
   user: string;
   password: string;
   managementPort: number;
+  /** Seconds a dead-lettered message is kept. */
+  deadLetterRetention: number;
+  /** Most messages a dead-letter queue holds. */
+  deadLetterMaxLength: number;
 }
 
 /**
@@ -49,13 +53,22 @@ export interface NexxusRabbitMqBootstrapAdapterConfig extends NexxusConfig {
  *   4. The `systemMessages` fanout exchange — the cross-node broadcast
  *      surface. See the "no bindings on purpose" note near the queue
  *      declaration below for why nothing binds to it here.
- *   5. One durable quorum queue per static pipeline stage. Dynamic-pattern
- *      stages (`websockets-transport`, `mqtt-transport`) are skipped —
- *      their per-slot queues (`<stage>_<N>`) are declared by the worker
- *      that picks the slot.
+ *   5. The `deadLetters` direct exchange — where messages the workers give
+ *      up on are routed.
+ *   6. One durable quorum queue per static pipeline stage, plus its dead-letter
+ *      queue `<stage>.dlq`, bound to `deadLetters` by the stage's name.
+ *      Dynamic-pattern stages (`websockets-transport`, `mqtt-transport`) are
+ *      skipped — their per-slot queues (`<stage>_<N>`) are declared by the
+ *      worker that picks the slot, and have no dead-letter queue: a message
+ *      for a live connection is of no use later.
+ *   7. A policy pointing the stage queues at `deadLetters`.
+ *   8. A policy on the dead-letter queues discarding messages older than
+ *      `deadLetterRetention` seconds, and the oldest once a queue holds
+ *      `deadLetterMaxLength`.
  *
- * All management-API PUTs are natively idempotent on RabbitMQ, so re-runs
- * are safe by construction.
+ * All of these management-API calls are idempotent on RabbitMQ, so re-runs
+ * are safe by construction — and a re-run is how an existing deployment gets
+ * its dead-letter queues, or a changed retention.
  */
 export class NexxusRabbitMqBootstrapper
   extends NexxusMessageQueueBootstrapper<NexxusRabbitMqBootstrapOptions>
@@ -63,6 +76,9 @@ export class NexxusRabbitMqBootstrapper
   private static readonly LOGGER_LABEL = 'NxxMqBootstrap';
   private static readonly VHOST = '/nexxus';
   private static readonly SYSTEM_MESSAGES_EXCHANGE = 'systemMessages';
+  private static readonly DEAD_LETTER_EXCHANGE = 'deadLetters';
+  private static readonly DEAD_LETTER_POLICY = 'nexxus-dead-letter';
+  private static readonly DEAD_LETTER_RETENTION_POLICY = 'nexxus-dead-letter-retention';
 
   /**
    * Pipeline stages whose runtime queues are per-slot (`<stage>_<N>`)
@@ -78,25 +94,29 @@ export class NexxusRabbitMqBootstrapper
 
   private readonly baseUrl: string;
   private readonly authHeader: string;
+  private readonly deadLetterRetention: number;
+  private readonly deadLetterMaxLength: number;
 
   constructor(options: NexxusRabbitMqBootstrapOptions, config: NexxusRabbitMqBootstrapAdapterConfig) {
     super(options);
     this.baseUrl = `http://${config.host}:${config.managementPort}`;
     this.authHeader = 'Basic ' + Buffer.from(`${config.user}:${config.password}`).toString('base64');
+    this.deadLetterRetention = config.deadLetterRetention;
+    this.deadLetterMaxLength = config.deadLetterMaxLength;
   }
 
   public async bootstrapDeployment(pipeline: string[]): Promise<void> {
     const vhostPath = encodeURIComponent(NexxusRabbitMqBootstrapper.VHOST);
     const userPath = encodeURIComponent(this.options.runtimeUser);
 
-    await this.putMgmt(`/api/vhosts/${vhostPath}`);
-    
+    await this.callMgmt('PUT', `/api/vhosts/${vhostPath}`);
+
     NexxusMessageQueueAdapter.logger.info(
       `Declared vhost ${NexxusRabbitMqBootstrapper.VHOST}`,
       NexxusRabbitMqBootstrapper.LOGGER_LABEL,
     );
 
-    await this.putMgmt(`/api/users/${userPath}`, {
+    await this.callMgmt('PUT', `/api/users/${userPath}`, {
       password: this.options.runtimePassword,
       tags: '',
     });
@@ -105,7 +125,7 @@ export class NexxusRabbitMqBootstrapper
       NexxusRabbitMqBootstrapper.LOGGER_LABEL,
     );
 
-    await this.putMgmt(`/api/permissions/${vhostPath}/${userPath}`, {
+    await this.callMgmt('PUT', `/api/permissions/${vhostPath}/${userPath}`, {
       configure: '.*',
       write: '.*',
       read: '.*',
@@ -121,7 +141,8 @@ export class NexxusRabbitMqBootstrapper
     // separate topology where each worker binds its own ephemeral queue
     // on startup. Mixing the two would either miss broadcast recipients
     // or double-deliver work to every node.
-    await this.putMgmt(
+    await this.callMgmt(
+      'PUT',
       `/api/exchanges/${vhostPath}/${encodeURIComponent(NexxusRabbitMqBootstrapper.SYSTEM_MESSAGES_EXCHANGE)}`,
       {
         type: 'fanout',
@@ -133,6 +154,19 @@ export class NexxusRabbitMqBootstrapper
       NexxusRabbitMqBootstrapper.LOGGER_LABEL,
     );
 
+    const deadLetterExchange = NexxusRabbitMqBootstrapper.DEAD_LETTER_EXCHANGE;
+
+    await this.callMgmt('PUT', `/api/exchanges/${vhostPath}/${encodeURIComponent(deadLetterExchange)}`, {
+      type: 'direct',
+      durable: true,
+    });
+    NexxusMessageQueueAdapter.logger.info(
+      `Declared direct exchange ${deadLetterExchange}`,
+      NexxusRabbitMqBootstrapper.LOGGER_LABEL,
+    );
+
+    const staticStages: string[] = [];
+
     for (const stage of pipeline) {
       if (NexxusRabbitMqBootstrapper.DYNAMIC_STAGES.has(stage)) {
         NexxusMessageQueueAdapter.logger.debug(
@@ -143,7 +177,7 @@ export class NexxusRabbitMqBootstrapper
         continue;
       }
 
-      await this.putMgmt(`/api/queues/${vhostPath}/${encodeURIComponent(stage)}`, {
+      await this.callMgmt('PUT', `/api/queues/${vhostPath}/${encodeURIComponent(stage)}`, {
         durable: true,
         arguments: { 'x-queue-type': 'quorum' },
       });
@@ -152,18 +186,86 @@ export class NexxusRabbitMqBootstrapper
         `Declared queue ${stage}`,
         NexxusRabbitMqBootstrapper.LOGGER_LABEL,
       );
+
+      // A dead-lettered message keeps the routing key it was published with,
+      // which is the stage queue's own name — so that's the binding key.
+      const deadLetterQueue = `${stage}.dlq`;
+
+      await this.callMgmt('PUT', `/api/queues/${vhostPath}/${encodeURIComponent(deadLetterQueue)}`, {
+        durable: true,
+        arguments: { 'x-queue-type': 'quorum' },
+      });
+      await this.callMgmt(
+        'POST',
+        `/api/bindings/${vhostPath}/e/${encodeURIComponent(deadLetterExchange)}/q/${encodeURIComponent(deadLetterQueue)}`,
+        { routing_key: stage },
+      );
+
+      NexxusMessageQueueAdapter.logger.info(
+        `Declared dead-letter queue ${deadLetterQueue}`,
+        NexxusRabbitMqBootstrapper.LOGGER_LABEL,
+      );
+
+      staticStages.push(stage);
     }
+
+    if (staticStages.length === 0) {
+      return;
+    }
+
+    // A policy rather than queue arguments: a queue's arguments can't change
+    // once it exists, and a policy applies to the queue as it is.
+    await this.callMgmt(
+      'PUT',
+      `/api/policies/${vhostPath}/${encodeURIComponent(NexxusRabbitMqBootstrapper.DEAD_LETTER_POLICY)}`,
+      {
+        pattern: `^(${staticStages.map(NexxusRabbitMqBootstrapper.literalPattern).join('|')})$`,
+        definition: { 'dead-letter-exchange': deadLetterExchange },
+        'apply-to': 'queues',
+      },
+    );
+
+    NexxusMessageQueueAdapter.logger.info(
+      `Applied policy ${NexxusRabbitMqBootstrapper.DEAD_LETTER_POLICY} to queues ${staticStages.join(', ')}`,
+      NexxusRabbitMqBootstrapper.LOGGER_LABEL,
+    );
+
+    // Its own policy: a queue follows only one policy, and the dead-letter
+    // queues must not match the one above.
+    const deadLetterQueues = staticStages.map(stage => `${stage}.dlq`);
+
+    await this.callMgmt(
+      'PUT',
+      `/api/policies/${vhostPath}/${encodeURIComponent(NexxusRabbitMqBootstrapper.DEAD_LETTER_RETENTION_POLICY)}`,
+      {
+        pattern: `^(${deadLetterQueues.map(NexxusRabbitMqBootstrapper.literalPattern).join('|')})$`,
+        // Past `max-length` RabbitMQ drops from the head: the oldest message goes.
+        definition: { 'message-ttl': this.deadLetterRetention * 1000, 'max-length': this.deadLetterMaxLength },
+        'apply-to': 'queues',
+      },
+    );
+
+    NexxusMessageQueueAdapter.logger.info(
+      `Applied policy ${NexxusRabbitMqBootstrapper.DEAD_LETTER_RETENTION_POLICY} to queues ${deadLetterQueues.join(', ')}: ` +
+      `each keeps up to ${this.deadLetterMaxLength} dead-lettered messages, for ${this.deadLetterRetention} seconds`,
+      NexxusRabbitMqBootstrapper.LOGGER_LABEL,
+    );
+  }
+
+  /** `text` as a regex that matches only itself. */
+  private static literalPattern(text: string): string {
+    return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
   /**
-   * Thin PUT wrapper over the RabbitMQ management API. Every declare
-   * operation the bootstrapper does is a PUT, and every one of them takes
-   * either an empty body (vhost) or a small JSON blob. Non-2xx responses
-   * throw with the broker's error text so callers see the reason.
+   * Thin wrapper over the RabbitMQ management API. Every declare operation
+   * the bootstrapper does is a PUT, except creating a binding (POST); each
+   * takes either an empty body (vhost) or a small JSON blob. Non-2xx
+   * responses throw with the broker's error text so callers see the reason.
    */
-  private async putMgmt(path: string, body?: Record<string, unknown>): Promise<void> {
+  private async callMgmt(method: 'PUT' | 'POST', path: string, body?: Record<string, unknown>): Promise<void> {
     const res = await fetch(`${this.baseUrl}${path}`, {
-      method: 'PUT',
+      method,
       headers: {
         Authorization: this.authHeader,
         'Content-Type': 'application/json',
@@ -175,7 +277,7 @@ export class NexxusRabbitMqBootstrapper
       const detail = await res.text().catch(() => '');
 
       throw new Error(
-        `RabbitMQ management API PUT ${path} failed with ${res.status} ${res.statusText}: ${detail}`,
+        `RabbitMQ management API ${method} ${path} failed with ${res.status} ${res.statusText}: ${detail}`,
       );
     }
   }

@@ -3,14 +3,13 @@ import {
   ConfigEnvVars,
   INexxusBaseServices,
   NexxusQueueName,
-  NexxusQueuePayload,
 } from '@mayhem93/nexxus-core-lib';
 import {
   NexxusMessageQueueAdapter,
   NexxusMessageQueueAdapterEvents,
   NexxusMessageQueueAdapterStats,
   NexxusMessageQueueConfig,
-  NexxusQueueMessage
+  NexxusMessageDelivery
 } from './MessageQueueAdapter';
 import {
   NexxusRabbitMqBootstrapper,
@@ -27,6 +26,12 @@ type RabbitMQConfig = {
   user: string;
   password: string;
   managementPort: number;
+  /** Most unacknowledged messages a consumer holds at once. */
+  prefetch: number;
+  /** Seconds a dead-lettered message is kept before the broker discards it. Applied by the bootstrapper. */
+  deadLetterRetention: number;
+  /** Most messages a dead-letter queue holds; past it the oldest is discarded. Applied by the bootstrapper. */
+  deadLetterMaxLength: number;
 } & NexxusMessageQueueConfig;
 
 export type RabbitMqMetadata = {
@@ -64,7 +69,8 @@ export class NexxusRabbitMq extends NexxusMessageQueueAdapter<RabbitMQConfig, Ne
   protected reconnectDelayMs: number = 5000; //TODO: make this configurable
 
   private connection: amqplib.ChannelModel | null = null;
-  private channel: amqplib.Channel | null = null;
+  /** A confirm channel: the broker acknowledges every message published on it. */
+  private channel: amqplib.ConfirmChannel | null = null;
 
   /**
    * amqplib consumer tags keyed by queue name. Populated by `doConsume`
@@ -103,7 +109,10 @@ export class NexxusRabbitMq extends NexxusMessageQueueAdapter<RabbitMQConfig, Ne
       heartbeat: 10
     });
 
-    const channel = await connection.createChannel();
+    const channel = await connection.createConfirmChannel();
+
+    // Without a prefetch RabbitMQ hands a consumer every ready message at once.
+    await channel.prefetch(this.config.prefetch);
 
     connection.on('error', (err) => {
       NexxusRabbitMq.logger.error(`RabbitMQ connection error: ${err.message}`, NexxusRabbitMq.loggerLabel);
@@ -182,29 +191,32 @@ export class NexxusRabbitMq extends NexxusMessageQueueAdapter<RabbitMQConfig, Ne
     });
   }
 
-  public async publishMessage<Q extends NexxusQueueName>(
-    queueName: Q,
-    message: NexxusQueuePayload<Q>,
-    metadata?: amqplib.Options.Publish
-  ): Promise<void> {
-    // `serializePayload` on the base handles JSON encode + optional
-    // compression per the adapter's config. Content-type reflects the
-    // post-compression wire shape so any inspector (RabbitMQ management
-    // UI, tracing) knows not to try JSON-parsing the raw bytes.
-    const messageBuffer = await this.serializePayload(message);
+  protected doPublish(queueName: NexxusQueueName, content: Buffer, metadata?: amqplib.Options.Publish): Promise<void> {
+    const channel = this.channel;
+
+    if (!channel) {
+      return Promise.reject(new Error('no open channel'));
+    }
 
     NexxusRabbitMq.logger.debug(
-      `Publishing message to RabbitMQ queue ${queueName} (${messageBuffer.length} bytes${this.compressor ? ', compressed' : ''})`,
+      `Publishing message to RabbitMQ queue ${queueName} (${content.length} bytes${this.compressor ? ', compressed' : ''})`,
       NexxusRabbitMq.loggerLabel,
     );
 
+    // Content-type reflects the post-compression wire shape so any inspector
+    // (RabbitMQ management UI, tracing) knows not to try JSON-parsing the raw
+    // bytes.
     const options : amqplib.Options.Publish = {
       persistent: true,
       contentType: this.compressor ? 'application/octet-stream' : 'application/json',
       ...metadata || {}
     };
 
-    this.channel?.sendToQueue(queueName, messageBuffer, options);
+    // The callback runs when the broker acks or nacks the message, and with
+    // an error when the channel closes before it does.
+    return new Promise((resolve, reject) => {
+      channel.sendToQueue(queueName, content, options, (err) => err ? reject(err) : resolve());
+    });
   }
 
   public async queueExists(name: string): Promise<boolean> {
@@ -308,35 +320,42 @@ export class NexxusRabbitMq extends NexxusMessageQueueAdapter<RabbitMQConfig, Ne
    * on external unpause, and by `tryOnce`'s auto-restore on reconnect.
    * The returned consumer tag is stashed keyed by queue name so
    * `doCancelAll` can address it later.
+   *
+   * Dead-lettering is a reject without requeue: the broker routes the message
+   * to the queue's dead-letter exchange (set up by the bootstrapper's policy),
+   * or drops it when the queue has none, as the volatile slot queues do.
    */
   protected async doConsume(
     queueName: NexxusQueueName,
-    onMessage: (message: NexxusQueueMessage<any>) => Promise<void>
+    deliver: (delivery: NexxusMessageDelivery) => void
   ): Promise<void> {
-    if (!this.channel) {
+    const channel = this.channel;
+
+    if (!channel) {
       throw new Error('RabbitMQ channel not available — call connect() before doConsume()');
     }
 
-    const { consumerTag } = await this.channel.consume(queueName, async msg => {
-      if (msg !== null) {
-        // `deserializePayload` on the base handles decompression (when
-        // enabled) + JSON.parse, so compression policy stays in one place.
-        const payload = await this.deserializePayload<any>(msg.content);
-        const metadata: RabbitMqMetadata = {
-          fields: msg.fields,
-          properties: msg.properties,
-        };
-        const queueMessage: NexxusQueueMessage<any> = {
-          payload,
-          metadata,
-        };
-
-        NexxusRabbitMq.logger.debug(`Received message from RabbitMQ queue ${queueName}: ${msg.content.toString()}`, NexxusRabbitMq.loggerLabel);
-
-        await onMessage(queueMessage);
-
-        this.channel?.ack(msg);
+    const { consumerTag } = await channel.consume(queueName, msg => {
+      // `null` is the broker cancelling this consumer (e.g. its queue was deleted).
+      if (msg === null) {
+        return;
       }
+
+      NexxusRabbitMq.logger.debug(`Received message from RabbitMQ queue ${queueName}: ${msg.content.toString()}`, NexxusRabbitMq.loggerLabel);
+
+      const metadata: RabbitMqMetadata = { fields: msg.fields, properties: msg.properties };
+
+      deliver({
+        content: msg.content,
+        metadata,
+        ack: () => channel.ack(msg),
+        deadLetter: () => channel.nack(msg, false, false),
+        requeue: () => channel.nack(msg, false, true),
+        // A delivery tag is only valid on the channel it arrived on. Once that
+        // channel is gone the broker has put the message back already, and
+        // settling it on its replacement would close that channel too.
+        isLive: () => channel === this.channel
+      });
     });
 
     this.consumerTags.set(queueName, consumerTag);

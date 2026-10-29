@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { NexxusTransportManagerWorker, NexxusBaseWorker } from '@mayhem93/nexxus-worker-lib';
+import { NexxusTransportManagerWorker, NexxusBaseWorker, NexxusWorkerUnsupportedEventException } from '@mayhem93/nexxus-worker-lib';
 import { NexxusApplication, NexxusFilterQuery, NEXXUS_PREFIX_LC } from '@mayhem93/nexxus-core-lib';
 import { NexxusRedisSubscription, type NexxusSubscriptionChannel } from '@mayhem93/nexxus-redis';
 import { makeHarness, logger, mqState, resetWorkerStatics, type WorkerHarness } from './harness';
@@ -87,8 +87,9 @@ const created = (over: Record<string, unknown> = {}) => ({
   },
 });
 
-const deleted = (over: Record<string, unknown> = {}) => ({
-  payload: { event: 'model_deleted', data: { id: 'r1', appId: 'app1', type: 'runs', ...over } },
+/** A writer-shaped delete: `over` tweaks the identity, `partial` the filterable fields read back before it. */
+const deleted = (over: Record<string, unknown> = {}, partial: Record<string, unknown> = {}) => ({
+  payload: { event: 'model_deleted', data: { id: 'r1', appId: 'app1', type: 'runs', ...over, partialModel: partial } },
 });
 
 /** A writer-shaped patch: `over` tweaks the op, `partial` the post-update partial model, `meta` the identity. */
@@ -116,10 +117,13 @@ const updated = (patches?: any[]) => ({
 const onQueue = (queue: string) => mqState.published.filter(p => p.queue === queue);
 
 describe('NexxusTransportManagerWorker event dispatch', () => {
-  it('warns and drops an event it does not handle', async () => {
-    await tm().processMessage({ payload: { event: 'model_exploded' } });
+  it('fails an event it does not handle with a terminal error, so it is dead-lettered', async () => {
+    const err = await tm().processMessage({ payload: { event: 'model_exploded' } })
+      .catch((e: unknown) => e) as NexxusWorkerUnsupportedEventException;
 
-    expect(logger.has('warning', /Unknown event type: model_exploded/)).toBe(true);
+    expect(err).toBeInstanceOf(NexxusWorkerUnsupportedEventException);
+    expect(err.terminal).toBe(true);
+    expect(err.message).toBe('The Transport Manager doesn\'t handle "model_exploded" events');
     expect(mqState.published).toHaveLength(0);
   });
 
@@ -274,6 +278,27 @@ describe('NexxusTransportManagerWorker model_created', () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
+  it('skips a stored filter that no longer compiles, and still notifies everyone else', async () => {
+    loadApp();
+
+    // Stored while `runs` still declared `priority`; the schema no longer does.
+    const stale = new NexxusFilterQuery({ priority: 'high' } as never, {
+      ...SCHEMA.runs.fields,
+      priority: { type: 'string', filterable: true },
+    } as never);
+
+    await subscribe({ appId: 'app1', model: 'runs', filter: stale }, 'd1');
+
+    const appChannel = await subscribe({ appId: 'app1', model: 'runs' }, 'd2');
+
+    await tm().processMessage(created());
+
+    expect(mqState.published).toHaveLength(1);
+    expect(mqState.published[0].message.deviceIds).toEqual([ 'd2' ]);
+    expect(mqState.published[0].message.data.metadata.channels).toEqual([ appChannel ]);
+    expect(logger.has('warning', /Skipping stored filter ".+" on channel/)).toBe(true);
+  });
+
   it('resolves the model schema once, however many filters it has to compile', async () => {
     const app = loadApp();
     const spy = vi.spyOn(app, 'getAppModelSchema');
@@ -327,6 +352,19 @@ describe('NexxusTransportManagerWorker model_updated', () => {
       expect(p).not.toHaveProperty('metadata');
       expect(Object.keys(p).sort()).toEqual([ 'op', 'path', 'value' ]);
     }
+  });
+
+  it('matches a filter on the identity, which the partial model does not repeat', async () => {
+    loadApp({ auth: true });
+
+    const filteredKey = await subscribe(
+      { appId: 'app1', model: 'runs', filter: filterOn({ userId: 'u1' }, { auth: true }) }, 'd1'
+    );
+
+    // The owner rides on the patch metadata only.
+    await tm().processMessage(updated([ patch({}, {}, { userId: 'u1' }) ]));
+
+    expect(mqState.published[0].message.data.metadata.channels).toEqual([ filteredKey ]);
   });
 
   it('matches a filtered subscription when ANY patch\'s partial model matches', async () => {
@@ -385,12 +423,12 @@ describe('NexxusTransportManagerWorker model_updated', () => {
 });
 
 describe('NexxusTransportManagerWorker model_deleted', () => {
-  it('publishes the deleted model\'s identity to its subscribers', async () => {
+  it('publishes the deleted model\'s identity to its subscribers, not the fields it was matched on', async () => {
     loadApp();
 
     const channelKey = await subscribe({ appId: 'app1', model: 'runs' }, 'd1');
 
-    await tm().processMessage(deleted());
+    await tm().processMessage(deleted({}, { count: 3, status: 'active' }));
 
     expect(mqState.published).toHaveLength(1);
     expect(mqState.published[0].message).toEqual({
@@ -417,50 +455,87 @@ describe('NexxusTransportManagerWorker model_deleted', () => {
     expect(mqState.published[0].message.data.metadata.channels).toEqual([ filteredKey ]);
   });
 
-  it('cannot notify a filtered subscriber whose filter reads a field a delete does not carry', async () => {
+  it('notifies a filtered subscriber whose filter matched the record as it was before the delete', async () => {
     loadApp();
 
-    // Documented gap: a delete payload carries identity fields only, so a
-    // filter on `status` has nothing to match against and the subscriber is
-    // never told the object it was watching is gone.
+    const filteredKey = await subscribe(
+      { appId: 'app1', model: 'runs', filter: filterOn({ status: 'active' }) }, 'd1'
+    );
+
+    await tm().processMessage(deleted({}, { count: 3, status: 'active' }));
+
+    expect(mqState.published).toHaveLength(1);
+    expect(mqState.published[0].message.data.metadata.channels).toEqual([ filteredKey ]);
+  });
+
+  it('matches a filter on a universal field, such as createdAt', async () => {
+    loadApp();
+
+    const filteredKey = await subscribe(
+      { appId: 'app1', model: 'runs', filter: filterOn({ createdAt: { gte: 100 } }) }, 'd1'
+    );
+
+    await tm().processMessage(deleted({}, { createdAt: 150 }));
+
+    expect(mqState.published[0].message.data.metadata.channels).toEqual([ filteredKey ]);
+  });
+
+  it('skips a filtered subscriber whose filter did not match the record', async () => {
+    loadApp();
+
     await subscribe({ appId: 'app1', model: 'runs', filter: filterOn({ status: 'active' }) }, 'd1');
 
-    await tm().processMessage(deleted());
+    await tm().processMessage(deleted({}, { count: 3, status: 'archived' }));
 
     expect(mqState.published).toHaveLength(0);
   });
 });
 
 describe('NexxusTransportManagerWorker publish resilience', () => {
-  it('logs and swallows a transport publish failure', async () => {
+  /**
+   * The Transport Manager writes nothing of its own, so retrying the event
+   * repeats only the delivery. Swallowing the failure would lose the event.
+   */
+  it('fails the event when a fan-out publish is not confirmed, so it is retried', async () => {
     loadApp();
 
     await subscribe({ appId: 'app1', model: 'runs' }, 'd1');
     vi.spyOn(h.mq, 'publishMessage').mockRejectedValueOnce(new Error('broker down'));
 
-    await expect(tm().processMessage(created())).resolves.toBeUndefined();
-
-    // Fan-out publishes are deliberately not awaited (throughput over
-    // per-device confirmation), so the swallowed failure lands a tick later.
-    await new Promise(resolve => setImmediate(resolve));
-
-    expect(logger.has('warning',
-      new RegExp(`Publish to "${T1}" failed for event "device_message" ; non-fatal: broker down`))).toBe(true);
+    await expect(tm().processMessage(created())).rejects.toThrow('broker down');
   });
 
-  it('does not wait for a slow transport before returning', async () => {
+  it('still attempts every transport when one publish fails', async () => {
+    loadApp();
+
+    await subscribe({ appId: 'app1', model: 'runs' }, 'd1', T1);
+    await subscribe({ appId: 'app1', model: 'runs' }, 'd2', T2);
+
+    const publish = vi.spyOn(h.mq, 'publishMessage').mockRejectedValueOnce(new Error('broker down'));
+
+    await expect(tm().processMessage(created())).rejects.toThrow('broker down');
+    expect(publish).toHaveBeenCalledTimes(2);
+  });
+
+  it('waits for the broker to confirm every fan-out publish before finishing', async () => {
     loadApp();
 
     await subscribe({ appId: 'app1', model: 'runs' }, 'd1');
 
-    let released: () => void = () => {};
-
-    vi.spyOn(h.mq, 'publishMessage').mockImplementationOnce(
-      () => new Promise<void>(resolve => { released = resolve; })
+    let confirm: () => void = () => {};
+    const publish = vi.spyOn(h.mq, 'publishMessage').mockImplementationOnce(
+      () => new Promise<void>(resolve => { confirm = resolve; })
     );
 
-    await expect(tm().processMessage(created())).resolves.toBeUndefined();
+    let finished = false;
+    const processing = tm().processMessage(created()).then(() => { finished = true; });
 
-    released();
+    await vi.waitFor(() => expect(publish).toHaveBeenCalled());
+    expect(finished).toBe(false);
+
+    confirm();
+    await processing;
+
+    expect(finished).toBe(true);
   });
 });

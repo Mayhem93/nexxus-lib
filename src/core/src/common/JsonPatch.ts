@@ -6,19 +6,17 @@ import type {
   NexxusModelFieldType,
   PrimitiveFieldDef
 } from '../common/ModelTypes';
-import { INexxusAppModel } from '../models/AppModel';
 import { NEXXUS_UNIVERSAL_FIELDS } from './BuiltinSchemas';
 import { InvalidJsonPatchException, InvalidSchemaDataException } from '../lib/Exceptions';
 import { NexxusSchemaValidator } from './SchemaValidator';
-
-import * as dot from 'dot-prop';
 
 const JSON_OPS = [
   'replace',
   'append',
   'prepend',
   'incr',
-  'decr'
+  'decr',
+  'remove'
 ] as const;
 
 export type NexxusJsonPatchConstructor = {
@@ -53,6 +51,13 @@ type NexxusJsonPatchMetadataInternal = NexxusJsonPatchMetadata & {
 };
 
 export type NexxusJsonPatchMetadataConstructor = Omit<NexxusJsonPatchMetadata, 'pathFieldTypes'>;
+
+/**
+ * The value of a `remove` patch, one per path. `{ v }` removes every element
+ * equal to `v` (arrays of primitives only); `{ i }` removes the element at
+ * index `i`, and nothing when the array is shorter than that.
+ */
+export type NexxusJsonPatchRemoveValue = { v: string | number | boolean } | { i: number };
 
 type OperationRule = {
   allowedTypes: NexxusModelFieldType[];
@@ -162,6 +167,38 @@ export class NexxusJsonPatch {
       allowedTypes: ['int', 'float', 'date'],
       validateValue: (value: any, fieldDef: NexxusFieldDef, path: string) =>
         NexxusSchemaValidator.validateValue(value, fieldDef, path)
+    },
+    remove: {
+      allowedTypes: ['array'],
+      validateValue: (value: any, fieldDef: NexxusFieldDef, path: string): NexxusJsonPatchRemoveValue => {
+        const keys = value !== null && typeof value === 'object' && !Array.isArray(value) ? Object.keys(value) : [];
+
+        if (keys.length !== 1 || (keys[0] !== 'v' && keys[0] !== 'i')) {
+          throw new InvalidJsonPatchException(`Value for remove at path "${path}" must be either { v: <element> } or { i: <index> }`);
+        }
+
+        if (keys[0] === 'i') {
+          if (!Number.isSafeInteger(value.i) || value.i < 0) {
+            throw new InvalidJsonPatchException(`Index for remove at path "${path}" must be a non-negative integer`);
+          }
+
+          return { i: value.i };
+        }
+
+        const arrayFieldDef = fieldDef as NexxusArrayFieldDef;
+
+        if (arrayFieldDef.arrayType === 'object') {
+          throw new InvalidJsonPatchException(`Elements of the array of objects at "${path}" can only be removed by index`);
+        }
+
+        const primitiveFieldDef: PrimitiveFieldDef = {
+          type: arrayFieldDef.arrayType,
+          required: false
+        };
+
+        // Normalized like an appended element, so a date matches how it's stored.
+        return { v: NexxusSchemaValidator.validateValue(value.v, primitiveFieldDef, path) as string | number | boolean };
+      }
     }
   };
 
@@ -220,30 +257,6 @@ export class NexxusJsonPatch {
 
   public isValid(): boolean {
     return this.valid;
-  }
-
-  public getPartialModel(): Partial<INexxusAppModel> {
-    const partialModel: Partial<INexxusAppModel> = {
-      id: this.fullPatch.metadata.id,
-      type: this.fullPatch.metadata.type,
-    };
-
-    // Only per-app models carry appId; deployment-scoped models (currently
-    // `setting`) leave it undefined and the DB adapter routes to a global
-    // index rather than the per-app one.
-    if (this.fullPatch.metadata.appId) {
-      partialModel.appId = this.fullPatch.metadata.appId;
-    }
-
-    for (let i = 0; i < this.fullPatch.path.length; i++) {
-      const path = this.fullPatch.path[i];
-      const value = this.fullPatch.value[i];
-
-      // Set value at path in partialModel
-      dot.setProperty(partialModel, path, value);
-    }
-
-    return partialModel;
   }
 
   public validate(schema: NexxusModelDef): void {
@@ -341,8 +354,8 @@ export class NexxusJsonPatch {
 
         current = objDef.properties;
       } else {
-        // Arrays and primitives are leaves. You can replace/append/prepend a
-        // whole array, but there is no path syntax to address an element (no
+        // Arrays and primitives are leaves. You can replace/append/prepend/remove
+        // on a whole array, but there is no path syntax to address an element (no
         // index notation), so we never descend into an array's element fields.
         return null;
       }

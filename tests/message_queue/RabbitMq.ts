@@ -1,6 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { NexxusRabbitMq, NexxusRabbitMqBootstrapper } from '@mayhem93/nexxus-message-queue-lib';
-import { NexxusBaseLogger, type INexxusBaseServices } from '@mayhem93/nexxus-core-lib';
+import { NexxusBaseLogger, InvalidSchemaDataException, type INexxusBaseServices } from '@mayhem93/nexxus-core-lib';
 
 // The amqplib mock itself is registered in index.test.ts (hoisted early); here
 // we just import the shared fake to drive/inspect it.
@@ -18,8 +18,9 @@ class TestLogger extends NexxusBaseLogger<Record<string, unknown>> {
 
 const logger = new TestLogger({});
 
+/** A config as validation leaves it, schema defaults included. */
 const config = (over: Record<string, unknown> = {}) => ({
-  host: 'mq.local', port: 5672, user: 'u', password: 'p', managementPort: 15672, ...over,
+  host: 'mq.local', port: 5672, user: 'u', password: 'p', managementPort: 15672, prefetch: 10, ...over,
 });
 
 const adapters: NexxusRabbitMq[] = [];
@@ -131,32 +132,117 @@ describe('NexxusRabbitMq publishMessage', () => {
     expect((buf as Buffer).equals(Buffer.from(JSON.stringify({ a: 1 })))).toBe(false); // compressed
   });
 
-  it('silently no-ops when publishing while disconnected (channel null)', async () => {
+  it('publishes on a confirm channel', async () => {
     const a = makeAdapter();
 
-    await expect(a.publishMessage('writer' as never, { a: 1 } as never)).resolves.toBeUndefined();
+    await a.connect();
+
+    expect(h.state.lastConnection.createConfirmChannel).toHaveBeenCalledOnce();
+  });
+
+  it('rejects when there is no channel to publish on', async () => {
+    const a = makeAdapter();
+
+    // Used to resolve without sending anything, so the API answered 202 for a
+    // write that never reached the queue.
+    await expect(a.publishMessage('writer' as never, { event: 'model_created' } as never))
+      .rejects.toThrow('Publishing "model_created" to "writer" failed: no open channel');
+  });
+
+  it('rejects when the broker refuses the message', async () => {
+    const a = makeAdapter();
+
+    await a.connect();
+    h.state.publishOutcome = 'nack';
+
+    await expect(a.publishMessage('writer' as never, { event: 'model_created' } as never))
+      .rejects.toThrow('Publishing "model_created" to "writer" failed: message nacked');
   });
 });
 
 describe('NexxusRabbitMq consume', () => {
-  it('deserializes, invokes the callback with payload + metadata, then acks', async () => {
+  /** A message as amqplib hands it to a consumer. */
+  const amqpMessage = (payload: unknown = { hello: 'world' }) => ({
+    content: Buffer.from(JSON.stringify(payload)),
+    fields: { deliveryTag: 1 },
+    properties: { contentType: 'application/json' },
+  });
+
+  it('limits a consumer to the configured number of unacknowledged messages', async () => {
+    const a = makeAdapter(config({ prefetch: 25 }));
+
+    await a.connect();
+
+    expect(mainChannel().prefetch).toHaveBeenCalledWith(25);
+  });
+
+  it('hands the handler the payload and metadata, then acks', async () => {
     const a = makeAdapter();
     const received: any[] = [];
 
     await a.connect();
     await a.consumeMessages('writer' as never, async m => { received.push(m); });
 
-    const msg = {
-      content: Buffer.from(JSON.stringify({ hello: 'world' })),
-      fields: { deliveryTag: 1 },
-      properties: { contentType: 'application/json' },
-    };
+    const msg = amqpMessage();
 
-    await h.state.consumeCb!(msg);
+    h.state.consumeCb!(msg);
 
+    await vi.waitFor(() => expect(mainChannel().ack).toHaveBeenCalledWith(msg));
     expect(received[0].payload).toEqual({ hello: 'world' });
     expect(received[0].metadata).toEqual({ fields: msg.fields, properties: msg.properties });
-    expect(mainChannel().ack).toHaveBeenCalledWith(msg);
+  });
+
+  it('dead-letters by rejecting without requeue', async () => {
+    const a = makeAdapter();
+
+    await a.connect();
+    await a.consumeMessages('writer' as never, async () => { throw new InvalidSchemaDataException('bad'); });
+
+    const msg = amqpMessage();
+
+    h.state.consumeCb!(msg);
+
+    // The queue's dead-letter policy takes it from there.
+    await vi.waitFor(() => expect(mainChannel().nack).toHaveBeenCalledWith(msg, false, false));
+    expect(mainChannel().ack).not.toHaveBeenCalled();
+  });
+
+  it('requeues a message still waiting for a retry when consumption stops', async () => {
+    const a = makeAdapter();
+
+    await a.connect();
+    await a.consumeMessages('writer' as never, async () => { throw new Error('flaky'); });
+
+    const msg = amqpMessage();
+
+    h.state.consumeCb!(msg);
+
+    await vi.waitFor(() => expect(logger.has('warning', /Retrying message from queue "writer" in/)).toBe(true));
+    await a.stopConsuming();
+
+    expect(mainChannel().nack).toHaveBeenCalledWith(msg, false, true);
+  });
+
+  it('leaves a message alone once the channel it arrived on is gone', async () => {
+    const a = makeAdapter();
+    let finish: (() => void) | undefined;
+
+    await a.connect();
+    await a.consumeMessages('writer' as never, () => new Promise<void>(resolve => { finish = resolve; }));
+
+    const channel = mainChannel();
+
+    h.state.consumeCb!(amqpMessage());
+    await vi.waitFor(() => expect(finish).toBeDefined());
+
+    h.state.handlers.close(); // the connection drops mid-processing
+    finish!();
+    await tick();
+
+    // The broker took the message back with the channel; settling it on the
+    // dead channel would fail, and on its replacement would close that one too.
+    expect(channel.ack).not.toHaveBeenCalled();
+    expect(channel.nack).not.toHaveBeenCalled();
   });
 
   it('ignores a null delivery (no callback, no ack)', async () => {
@@ -165,7 +251,8 @@ describe('NexxusRabbitMq consume', () => {
 
     await a.connect();
     await a.consumeMessages('writer' as never, async m => { received.push(m); });
-    await h.state.consumeCb!(null);
+    h.state.consumeCb!(null);
+    await tick();
 
     expect(received).toHaveLength(0);
     expect(mainChannel().ack).not.toHaveBeenCalled();

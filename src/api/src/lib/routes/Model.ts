@@ -165,19 +165,19 @@ export default class ModelRoute extends NexxusApiBaseRoute {
 
     const aclConstraint = NexxusApiAcl.authorize(app, req, 'get', req.query.type);
 
-    const items = await NexxusApi.database.getItems({
+    const item = (await NexxusApi.database.getItems({
       ids: [ req.params.id ],
       type: req.query.type,
       appId: appId
-    });
+    })).get(req.params.id);
 
-    if (items.length === 0 || !items[0]) {
+    if (!item) {
       throw new ModelNotFoundException(`Model instance with ID "${req.params.id}" not found`);
     }
 
-    NexxusApiAcl.enforceRowConstraint(app, req, 'get', req.query.type, aclConstraint, items[0].getData() as Record<string, unknown>);
+    NexxusApiAcl.enforceRowConstraint(app, req, 'get', req.query.type, aclConstraint, item.getData() as Record<string, unknown>);
 
-    res.status(200).send({ data: items[0].getData() });
+    res.status(200).send({ data: item.getData() });
   }
 
   private async createModel(req: CreateAppModelRequest, res: NexxusApiResponse): Promise<void> {
@@ -245,13 +245,14 @@ export default class ModelRoute extends NexxusApiBaseRoute {
     }
 
     try {
+      // No `userId`: the Writer stamps the record's stored owner on the event,
+      // which isn't necessarily the user sending this patch.
       const jsonPatch = new NexxusJsonPatch({
         ...req.body.patch,
         metadata: {
           appId,
           id: req.params.id,
-          type: req.body.type,
-          userId: req.user?.id
+          type: req.body.type
         }
       });
 
@@ -292,11 +293,11 @@ export default class ModelRoute extends NexxusApiBaseRoute {
       NexxusApiAcl.enforceRowConstraint(app, req, 'delete', req.body.type, aclConstraint, attrs);
     }
 
+    // No `userId`, for the same reason as an update.
     await NexxusApi.messageQueue.publishMessage('writer', { event: 'model_deleted', data: {
       appId,
       id: req.params.id,
-      type: req.body.type,
-      userId: req.user?.id
+      type: req.body.type
     }});
 
     res.status(202).send({ message: 'Model deleted successfully!' });

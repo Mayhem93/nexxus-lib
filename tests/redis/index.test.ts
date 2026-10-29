@@ -18,4 +18,5 @@ import './Redis';
 import './Subscription';
 import './FieldCache';
 import './AuthNonce';
+import './UsernameLock';
 import './Device';

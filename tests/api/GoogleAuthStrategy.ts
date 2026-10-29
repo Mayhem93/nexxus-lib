@@ -4,6 +4,7 @@ import { NexxusAuthNonce } from '@mayhem93/nexxus-redis';
 
 import NexxusGoogleAuthStrategy from '../../src/api/src/lib/auth/GoogleAuthStrategy';
 import NexxusAuthStrategy from '../../src/api/src/lib/auth/AuthStrategy';
+import { UserAuthenticationFailedException } from '../../src/api/src/lib/Exceptions';
 import type { NexxusApiRequest, NexxusApiResponse } from '../../src/api/src/lib/Api';
 
 import { installApiStatics, seedApp, makeAuthApp, dbState } from './harness';
@@ -294,6 +295,17 @@ describe('NexxusGoogleAuthStrategy.verifyProfile', () => {
     expect(paths).toContain('details.$auth_google');
     expect(paths).toContain('authProviders');
     expect(user.authProviders).toContain('google');
+  });
+
+  it('fails the sign-in when the account is deleted while it signs in', async () => {
+    dbState.searchResult = [ storedUser({ authProviders: [ 'local' ] }) ];
+    dbState.missingIds = [ 'u1' ];
+
+    const { err, user } = await verify(profile());
+
+    expect(err).toBeInstanceOf(UserAuthenticationFailedException);
+    expect((err as Error).message).toBe('User "u1" no longer exists');
+    expect(user).toBeUndefined();
   });
 
   it('does not re-append the provider when the account is already linked', async () => {

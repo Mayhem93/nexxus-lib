@@ -17,6 +17,29 @@
       "type": "number",
       "default": 15672
     },
+    "prefetch": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 10
+    },
+    "publishTimeout": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 30,
+      "default": 5
+    },
+    "deadLetterRetention": {
+      "type": "integer",
+      "minimum": 259200,
+      "maximum": 2592000,
+      "default": 259200
+    },
+    "deadLetterMaxLength": {
+      "type": "integer",
+      "minimum": 10,
+      "maximum": 500,
+      "default": 100
+    },
     "compression": {
       "type": "object",
       "properties": {

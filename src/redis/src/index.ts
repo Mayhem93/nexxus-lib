@@ -9,6 +9,7 @@ export {
 } from './lib/models/Device';
 export { NexxusModelFieldCache } from './lib/models/FieldCache';
 export { NexxusAuthNonce } from './lib/models/AuthNonce';
+export { NexxusUsernameLock } from './lib/models/UsernameLock';
 export {
   NexxusRedisSubscription,
   type NexxusSubscriptionChannel,

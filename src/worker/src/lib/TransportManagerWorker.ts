@@ -5,7 +5,8 @@ import {
   NexxusTransportManagerPayload,
   NexxusModelCreatedPayload,
   NexxusTransportManagerModelUpdatedPayload,
-  NexxusModelDeletedPayload,
+  NexxusTransportManagerModelDeletedPayload,
+  NexxusTransportDeviceMessagePayload,
   NexxusBaseQueuePayload,
   NexxusFilterQuery,
   INexxusAppModel,
@@ -25,6 +26,7 @@ import {
   NexxusBaseWorkerStats,
   NexxusWorkerServices
 } from './BaseWorker';
+import { NexxusWorkerUnsupportedEventException } from './Exceptions';
 
 import * as path from 'node:path';
 
@@ -51,6 +53,12 @@ type NexxusTransportManagerWorkerStats = NexxusBaseWorkerStats & {}
 type NexxusFanOutGroup = {
   channels: string[];
   deviceIds: string[];
+};
+
+/** One `device_message`, and the transport queue it goes to. */
+type NexxusFanOutMessage = {
+  transport: string;
+  payload: NexxusTransportDeviceMessagePayload;
 };
 
 export class NexxusTransportManagerWorker extends NexxusBaseWorker<
@@ -108,8 +116,8 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<
         break;
       }
       default:
-        NexxusTransportManagerWorker.logger.warn(`Unknown event type: ${(payload as NexxusBaseQueuePayload).event}`,
-          { type: (payload as NexxusBaseQueuePayload).event }, NexxusTransportManagerWorker.loggerLabel
+        throw new NexxusWorkerUnsupportedEventException(
+          `The Transport Manager doesn't handle "${(payload as NexxusBaseQueuePayload).event}" events`
         );
     }
   }
@@ -122,13 +130,15 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<
       modelId: data.id
     }, [ data ]);
 
+    const messages: NexxusFanOutMessage[] = [];
+
     for (const [transport, groups] of this.groupDevicesForFanOut(deviceToChannelsMap).entries()) {
       let deviceCount = 0;
 
       for (const { channels, deviceIds } of groups) {
         deviceCount += deviceIds.length;
 
-        this.publish(transport, {
+        messages.push({ transport, payload: {
           event: 'device_message',
           deviceIds,
           data: {
@@ -138,7 +148,7 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<
               channels
             }
           }
-        });
+        } });
       }
 
       NexxusTransportManagerWorker.logger.info(
@@ -155,6 +165,8 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<
         NexxusTransportManagerWorker.loggerLabel
       );
     }
+
+    await this.publishFanOut(messages);
   }
 
   private async handleModelUpdated(data: NexxusTransportManagerModelUpdatedPayload['data']): Promise<void> {
@@ -165,22 +177,29 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<
       modelId: data[0].metadata.id
     };
 
-    // Get map of devices -> matching channel keys. Updates match filters
-    // against each patch's post-update partial model.
-    const deviceToChannelsMap = await this.getDevicesFromGeneratedChannels(
-      channel,
-      data.map(patch => patch.metadata.partialModel)
-    );
-
-    // All patches in a single model_updated event target the same model; identity
-    // and patch ops are constant across devices — compute once, reuse per recipient.
-    // The post-update `version` comes from the writer's partial (populated by the
-    // adapter on the bulk update) — every patch in this batch shares it.
-    const modelIdentity = {
+    // All patches in a single model_updated event target the same model, so the
+    // identity is constant across them.
+    const identity = {
       id: data[0].metadata.id,
       type: data[0].metadata.type,
-      appId: data[0].metadata.appId,
-      userId: data[0].metadata.userId,
+      appId: data[0].metadata.appId!,
+      userId: data[0].metadata.userId
+    };
+
+    // Get map of devices -> matching channel keys. Updates match filters
+    // against each patch's post-update partial model, with the identity merged
+    // in — the partial doesn't repeat it.
+    const deviceToChannelsMap = await this.getDevicesFromGeneratedChannels(
+      channel,
+      data.map(patch => ({ ...patch.metadata.partialModel, ...identity }))
+    );
+
+    // Identity and patch ops are constant across devices — compute once, reuse
+    // per recipient. The post-update `version` comes from the writer's partial
+    // (populated by the adapter on the bulk update) — every patch in this batch
+    // shares it.
+    const modelIdentity = {
+      ...identity,
       version: data[0].metadata.partialModel.version,
     };
     const patches = data.map(patch => ({
@@ -189,13 +208,15 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<
       value: patch.value,
     }));
 
+    const messages: NexxusFanOutMessage[] = [];
+
     for (const [transport, groups] of this.groupDevicesForFanOut(deviceToChannelsMap).entries()) {
       let deviceCount = 0;
 
       for (const { channels, deviceIds } of groups) {
         deviceCount += deviceIds.length;
 
-        this.publish(transport, {
+        messages.push({ transport, payload: {
           event: 'device_message',
           deviceIds,
           data: {
@@ -204,7 +225,7 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<
             patches,
             metadata: { channels },
           }
-        });
+        } });
       }
 
       NexxusTransportManagerWorker.logger.info(
@@ -221,18 +242,24 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<
         NexxusTransportManagerWorker.loggerLabel
       );
     }
+
+    await this.publishFanOut(messages);
   }
 
-  private async handleModelDeleted(data: NexxusModelDeletedPayload['data']): Promise<void> {
-    // Deletes carry only identity fields (id/type/appId/userId), which is
-    // enough to match ownership-style filters (e.g. userId == me) so filtered
-    // subscribers are notified; filters on other fields can't be tested here.
+  private async handleModelDeleted(data: NexxusTransportManagerModelDeletedPayload['data']): Promise<void> {
+    // What subscribers are told: the identity, nothing more.
+    const model = { id: data.id, type: data.type, appId: data.appId, userId: data.userId };
+
+    // Filters are tested against the record as it was just before the delete:
+    // its identity plus the filterable fields the Writer read back.
     const deviceToChannelsMap = await this.getDevicesFromGeneratedChannels({
       appId: data.appId,
       userId: data.userId,
       model: data.type,
       modelId: data.id
-    }, [ data ]);
+    }, [ { ...data.partialModel, ...model } ]);
+
+    const messages: NexxusFanOutMessage[] = [];
 
     for (const [transport, groups] of this.groupDevicesForFanOut(deviceToChannelsMap).entries()) {
       let deviceCount = 0;
@@ -240,17 +267,17 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<
       for (const { channels, deviceIds } of groups) {
         deviceCount += deviceIds.length;
 
-        this.publish(transport, {
+        messages.push({ transport, payload: {
           event: 'device_message',
           deviceIds,
           data: {
             event: 'model_deleted',
-            model: data,
+            model,
             metadata: {
               channels
             }
           }
-        });
+        } });
       }
 
       NexxusTransportManagerWorker.logger.info(
@@ -266,6 +293,30 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<
         },
         NexxusTransportManagerWorker.loggerLabel
       );
+    }
+
+    await this.publishFanOut(messages);
+  }
+
+  /**
+   * Publish every fan-out message and wait until the broker has confirmed them
+   * all. Unlike `publish()`, a failure fails the event: the Transport Manager
+   * has no write of its own to repeat, so the event is retried — and
+   * dead-lettered if it keeps failing — rather than lost. A device may then get
+   * the same event twice, which it recognises by `version` on an update and by
+   * `id` otherwise.
+   *
+   * Every publish settles before the failure is thrown, so a retry never
+   * overlaps publishes still in flight.
+   */
+  private async publishFanOut(messages: NexxusFanOutMessage[]): Promise<void> {
+    const results = await Promise.allSettled(
+      messages.map(({ transport, payload }) => NexxusBaseWorker.messageQueue.publishMessage(transport, payload))
+    );
+    const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+
+    if (failed) {
+      throw failed.reason;
     }
   }
 
@@ -323,7 +374,8 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<
    * `filterTargets` are the model-shaped objects filtered subscriptions get
    * tested against (empty for events that carry none). Callers normalize each
    * event's shape: creates pass the new model, updates the per-patch
-   * post-update partial model, deletes the deleted model's identity fields.
+   * post-update partial model, deletes the identity and filterable fields as
+   * they were before the delete.
    */
   private async getDevicesFromGeneratedChannels(
     channel: NexxusBaseSubscriptionChannel,
@@ -405,7 +457,23 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<
 
         // For each filter, test if ANY change matches
         for (const [filterId, filterQuery] of Object.entries(filters)) {
-          const filter = new NexxusFilterQuery(filterQuery, getAppModelSchema());
+          let filter: NexxusFilterQuery;
+
+          // A stored filter that no longer compiles — a schema change removed a
+          // field it names, say — is skipped. Failing the message for it would
+          // keep the change from every other subscriber.
+          try {
+            filter = new NexxusFilterQuery(filterQuery, getAppModelSchema());
+          } catch (e) {
+            NexxusTransportManagerWorker.logger.warn(
+              `Skipping stored filter "${filterId}" on channel ${JSON.stringify(channelPattern)}: ${(e as Error).message}`,
+              { filterId, channel: channelPattern },
+              NexxusTransportManagerWorker.loggerLabel
+            );
+
+            continue;
+          }
+
           const matchesFilter = filterTargets.some(change => filter.test(change));
 
           if (matchesFilter) {

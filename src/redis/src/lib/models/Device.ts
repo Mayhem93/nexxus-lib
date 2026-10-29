@@ -209,6 +209,18 @@ export class NexxusDevice {
     return device;
   }
 
+  /**
+   * Whether each device exists, by id. One single-key `EXISTS` per device, all
+   * sent at once: a cluster refuses a command whose keys live on different
+   * nodes, and device keys are spread across all of them.
+   */
+  public static async exists(ids: string[]): Promise<Map<string, boolean>> {
+    const client = NexxusRedis.instance.getClient();
+    const found = await Promise.all(ids.map(id => client.exists(NexxusDevice.getKey(id))));
+
+    return new Map(ids.map((id, i) => [ id, found[i] === 1 ]));
+  }
+
   public static async update(id: string, updates: NexxusDeviceUpdateProps): Promise<void> {
     const redis = NexxusRedis.instance.getClient();
     const key = this.getKey(id);

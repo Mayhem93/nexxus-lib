@@ -5,9 +5,12 @@ import {
   NexxusDbCountOptions,
   NexxusDbGetOptions,
   NexxusDbSearchOptions,
-  NexxusDbUpdateOptions
+  NexxusDbUpdateOptions,
+  NexxusDbDeleteOptions,
+  NexxusDbItemResults
 } from './DatabaseAdapter';
 import { NexxusElasticsearchDbBootstrapper } from './ElasticsearchDbBootstrapper';
+import { NexxusDatabaseItemsFailedException, type NexxusDatabaseItemFailure } from './Exceptions';
 import {
   NexxusConfig,
   ConfigCliArgs,
@@ -28,6 +31,7 @@ import {
   NexxusAclRole,
   INexxusAclRole,
   NexxusJsonPatch,
+  type NexxusJsonPatchRemoveValue,
   NexxusFilterQuery,
   NexxusLogicalOperator,
   NEXXUS_PREFIX_LC,
@@ -42,6 +46,7 @@ type BulkOperationContainer = estypesWithBody.BulkOperationContainer;
 type BulkUpdateAction = estypesWithBody.BulkUpdateAction;
 type QueryDslQueryContainer = estypesWithBody.QueryDslQueryContainer;
 type QueryDslBoolQuery = estypesWithBody.QueryDslBoolQuery;
+type ErrorCause = estypesWithBody.ErrorCause;
 
 import * as path from 'node:path';
 
@@ -155,6 +160,20 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
     this.stopPingLoop();
 
     return this.client.close();
+  }
+
+  /**
+   * A failed bulk or mget item, as Elasticsearch reported it. Terminal when the
+   * status is 400: the document or script itself was refused, and will be on
+   * every retry. Anything else — overloaded, a read-only index, a version
+   * conflict that outlasted `retry_on_conflict` — may pass on a later attempt.
+   */
+  private static itemFailure(id: string, status: number | undefined, error: ErrorCause | undefined): NexxusDatabaseItemFailure {
+    const reason = error
+      ? (error.reason ? `${error.type}: ${error.reason}` : error.type)
+      : `status ${status}`;
+
+    return { id, reason, terminal: status === 400 };
   }
 
   /**
@@ -382,17 +401,14 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
       const dbResult = await this.client.bulk({ operations: bulkReq.body, refresh: waitForRefresh ? 'wait_for' : false });
 
       if (dbResult.errors) {
-        const erroredItems = dbResult.items.filter(item => {
-          const action = item.index || item.update || item.delete || item.create;
+        // Bulk items come back in the order they were sent.
+        const failures = dbResult.items.flatMap((item, i) => item.index?.error
+          ? [ NexxusElasticsearchDb.itemFailure(String(collection[i]!.getData().id), item.index.status, item.index.error) ]
+          : []);
 
-          return action && action.error;
-        });
-
-        NexxusElasticsearchDb.logger.error(
-          `Failed to create items in Elasticsearch database`,
-          { errors: erroredItems },
-          NexxusDatabaseAdapter.loggerLabel
-        );
+        if (failures.length > 0) {
+          throw new NexxusDatabaseItemsFailedException('createItems', failures);
+        }
       }
 
       // Back-fill the adapter-assigned version onto each successfully-written AppModel.
@@ -470,13 +486,13 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
     }, 'searchItems');
   }
 
-  public getItems(options: NexxusDbGetOptions<'application'>): Promise<Array<NexxusApplication | null>>;
-  public getItems(options: NexxusDbGetOptions<'user'>): Promise<Array<NexxusUser | null>>;
-  public getItems(options: NexxusDbGetOptions<'setting'>): Promise<Array<NexxusSetting | null>>;
-  public getItems(options: NexxusDbGetOptions<'acl'>): Promise<Array<NexxusAclRole | null>>;
-  public getItems(options: NexxusDbGetOptions<string>): Promise<Array<NexxusAppModel | null>>;
+  public getItems(options: NexxusDbGetOptions<'application'>): Promise<NexxusDbItemResults<NexxusApplication>>;
+  public getItems(options: NexxusDbGetOptions<'user'>): Promise<NexxusDbItemResults<NexxusUser>>;
+  public getItems(options: NexxusDbGetOptions<'setting'>): Promise<NexxusDbItemResults<NexxusSetting>>;
+  public getItems(options: NexxusDbGetOptions<'acl'>): Promise<NexxusDbItemResults<NexxusAclRole>>;
+  public getItems(options: NexxusDbGetOptions<string>): Promise<NexxusDbItemResults<NexxusAppModel>>;
 
-  public getItems(options: NexxusDbGetOptions<string>): Promise<Array<NexxusBaseModel | null>> {
+  public getItems(options: NexxusDbGetOptions<string>): Promise<NexxusDbItemResults<NexxusBaseModel>> {
     return this.esRequestWrapper(async () => {
       let index : string;
 
@@ -502,66 +518,91 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
 
         default:
           if (!options.appId) {
-            throw new Error("App ID is required for getting app-specific models");
+            throw new Error('App ID is required for getting app-specific models');
           }
 
           index = `${NEXXUS_PREFIX_LC}-app-${options.appId}-${options.type}`;
       }
 
+      // Every requested id is answered: `null` unless it's found below.
+      const results: NexxusDbItemResults<NexxusBaseModel> = new Map(options.ids.map(id => [ id, null ]));
+      const failures: Array<NexxusDatabaseItemFailure> = [];
+      let esMgetResponse;
+
       try {
-        const esMgetResponse = await this.client.mget({
+        esMgetResponse = await this.client.mget({
           index: index,
           ids: options.ids,
           _source: true,
           realtime: true
         });
-
-        return esMgetResponse.docs.map(doc => {
-          if ('error' in doc) {
-            NexxusElasticsearchDb.logger.warn(`Error retrieving document ID ${doc._id} from Elasticsearch`, { error: doc.error }, NexxusDatabaseAdapter.loggerLabel);
-
-            return null;
-          }
-
-          if (!doc.found) {
-            return null;
-          }
-
-          switch(options.type) {
-            case 'application':
-              return new NexxusApplication(doc._source as INexxusApplication);
-
-            case 'user':
-              return new NexxusUser(doc._source as INexxusUser);
-
-            case 'setting':
-              return new NexxusSetting(doc._source as INexxusSetting);
-
-            case 'acl':
-              return new NexxusAclRole(doc._source as INexxusAclRole);
-
-            default:
-              // Inject the ES-side _version into the model data before construction.
-              return NexxusAppModel.fromStorage({
-                ...(doc._source as INexxusAppModel),
-                version: doc._version
-              });
-          }
-        }).filter(doc => doc !== null);
       } catch (e: Error | unknown) {
-        // 404 = the whole index doesn't exist yet; that's a legitimate
-        // "no documents" outcome, not an ES-down signal — swallow and
-        // return empty. Any other error propagates to the wrapper.
+        // 404 = the whole index doesn't exist yet, so none of its documents do —
+        // a legitimate answer, not an ES-down signal. Any other error
+        // propagates to the wrapper.
         if (e instanceof ElasticSearch.errors.ResponseError && e.statusCode === 404) {
-          return [];
+          return results;
         }
 
         throw e;
       }
+
+      for (const doc of esMgetResponse.docs) {
+        if ('error' in doc) {
+          // Same as above, reported per document.
+          if (doc.error.type !== 'index_not_found_exception') {
+            failures.push(NexxusElasticsearchDb.itemFailure(doc._id, undefined, doc.error));
+          }
+
+          continue;
+        }
+
+        if (!doc.found) {
+          continue;
+        }
+
+        switch(options.type) {
+          case 'application':
+            results.set(doc._id, new NexxusApplication(doc._source as INexxusApplication));
+
+            break;
+
+          case 'user':
+            results.set(doc._id, new NexxusUser(doc._source as INexxusUser));
+
+            break;
+
+          case 'setting':
+            results.set(doc._id, new NexxusSetting(doc._source as INexxusSetting));
+
+            break;
+
+          case 'acl':
+            results.set(doc._id, new NexxusAclRole(doc._source as INexxusAclRole));
+
+            break;
+
+          default:
+            // Inject the ES-side _version into the model data before construction.
+            results.set(doc._id, NexxusAppModel.fromStorage({
+              ...(doc._source as INexxusAppModel),
+              version: doc._version
+            }));
+        }
+      }
+
+      if (failures.length > 0) {
+        throw new NexxusDatabaseItemsFailedException('getItems', failures);
+      }
+
+      return results;
     }, 'getItems');
   }
 
-  public updateItems(collection: Array<NexxusJsonPatch>, options?: NexxusDbUpdateOptions): Promise<Array<Partial<AnyNexxusModelData>>> {
+  public updateItems(
+    collection: Array<NexxusJsonPatch>,
+    options?: NexxusDbUpdateOptions
+  ): Promise<NexxusDbItemResults<Partial<AnyNexxusModelData>>> {
     return this.esRequestWrapper(async () => {
       const bulkBody: Array<BulkOperationContainer | BulkUpdateAction> = [];
       const collectedModelFields = new Set<string>();
@@ -644,7 +685,7 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
 
             case 'incr':
               if (fieldType === 'int' || fieldType === 'float' || fieldType === 'date') {
-                scriptLine = `if (ctx._source.${path} == null) { ctx._source.${path} = ${patchData.value[idx]}; } ctx._source.${path} += params.${paramName}`;
+                scriptLine = `if (ctx._source.${path} == null) { ctx._source.${path} = 0; } ctx._source.${path} += params.${paramName}`;
               } else {
                 NexxusElasticsearchDb.logger.warn(`Incr operation not supported for field type: ${fieldType}`, NexxusDatabaseAdapter.loggerLabel);
               }
@@ -653,9 +694,24 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
 
             case 'decr':
               if (fieldType === 'int' || fieldType === 'float' || fieldType === 'date') {
-                scriptLine = `if (ctx._source.${path} == null) { ctx._source.${path} = ${patchData.value[idx]}; } ctx._source.${path} -= params.${paramName}`;
+                scriptLine = `if (ctx._source.${path} == null) { ctx._source.${path} = 0; } ctx._source.${path} -= params.${paramName}`;
               } else {
                 NexxusElasticsearchDb.logger.warn(`Decr operation not supported for field type: ${fieldType}`, NexxusDatabaseAdapter.loggerLabel);
+              }
+
+              break;
+
+            case 'remove':
+              // Unbraced `if`s, because painless refuses the `;` that joins the
+              // lines when it follows a block. A field that isn't there, or an
+              // index past the end, removes nothing; `==` compares numbers by
+              // value, so a stored `2.0` is removed by `2`.
+              if (fieldType === 'array') {
+                scriptLine = 'i' in (patchData.value[idx] as NexxusJsonPatchRemoveValue)
+                  ? `if (ctx._source.${path} != null && params.${paramName}.i < ctx._source.${path}.size()) ctx._source.${path}.remove((int) params.${paramName}.i)`
+                  : `if (ctx._source.${path} != null) ctx._source.${path}.removeIf(item -> item == params.${paramName}.v)`;
+              } else {
+                NexxusElasticsearchDb.logger.warn(`Remove operation not supported for field type: ${fieldType}`, NexxusDatabaseAdapter.loggerLabel);
               }
 
               break;
@@ -676,10 +732,19 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
         }
       }
 
+      // Every patched document is answered: `null` unless it's updated below.
+      const results: NexxusDbItemResults<Partial<AnyNexxusModelData>> = new Map(
+        [ ...docBuckets.values() ].map(bucket => [ bucket.id, null ])
+      );
+      const failures: Array<NexxusDatabaseItemFailure> = [];
+      /** The document id of each update action, in the order sent — bulk results come back in it. */
+      const sentIds: Array<string> = [];
+
       // One update action per doc — single merged script, single `_version` bump.
       for (const bucket of docBuckets.values()) {
         if (bucket.scriptLines.length === 0) {
-          NexxusElasticsearchDb.logger.warn(`No valid script lines generated for ID ${bucket.id}`, NexxusDatabaseAdapter.loggerLabel);
+          // Nothing in the patches could be expressed, and nothing ever will be.
+          failures.push({ id: bucket.id, reason: 'no supported operation to apply', terminal: true });
 
           continue;
         }
@@ -694,12 +759,17 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
             }
           }
         );
+        sentIds.push(bucket.id);
+      }
+
+      if (failures.length > 0) {
+        throw new NexxusDatabaseItemsFailedException('updateItems', failures);
       }
 
       if (bulkBody.length === 0) {
         NexxusElasticsearchDb.logger.warn('No items to update in Elasticsearch database', NexxusDatabaseAdapter.loggerLabel);
 
-        return [];
+        return results;
       }
 
       NexxusElasticsearchDb.logger.debug('Executing bulk update in Elasticsearch', { bulkBody }, NexxusDatabaseAdapter.loggerLabel);
@@ -710,32 +780,42 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
         _source: Array.from(returnFields),
         refresh: waitForRefresh ? 'wait_for' : false
       });
-      const collectedPartialModels: Array<Partial<AnyNexxusModelData>> = [];
 
       NexxusElasticsearchDb.logger.debug('Bulk update result', { result }, NexxusDatabaseAdapter.loggerLabel);
 
-      result.items.forEach(item => {
-        if (item.update && item.update.status >= 200 && item.update.status < 300) {
-          collectedPartialModels.push({
-            id: item.update._id,
-            ...(item.update.get!._source),
+      result.items.forEach((item, i) => {
+        const id = sentIds[i]!;
+        const update = item.update;
+
+        if (update && update.status >= 200 && update.status < 300) {
+          results.set(id, {
+            id,
+            ...(update.get?._source),
             // Adapter-assigned post-write version. Meaningful only for app models;
             // for built-in updates the field is technically populated too but
             // ignored downstream (built-ins don't participate in version-based sync).
-            version: item.update._version
+            version: update._version
           } as Partial<AnyNexxusModelData>);
-        } else {
-          NexxusElasticsearchDb.logger.warn(`Failed to update item ID ${item.update?._id} in Elasticsearch`, { error: item.update?.error }, NexxusDatabaseAdapter.loggerLabel);
+        } else if (update?.status !== 404) {
+          // A 404 — the document, or its whole index, doesn't exist — leaves it `null`.
+          failures.push(NexxusElasticsearchDb.itemFailure(id, update?.status, update?.error));
         }
       });
 
-      return collectedPartialModels;
+      if (failures.length > 0) {
+        throw new NexxusDatabaseItemsFailedException('updateItems', failures);
+      }
+
+      return results;
     }, 'updateItems');
   }
 
-  public deleteItems(collection: Array<NexxusBaseModel>): Promise<void> {
+  public deleteItems(
+    collection: Array<NexxusBaseModel>,
+    options?: NexxusDbDeleteOptions
+  ): Promise<NexxusDbItemResults<Partial<AnyNexxusModelData>>> {
     return this.esRequestWrapper(async () => {
-      const bulkBody : Array<BulkOperationContainer> = [];
+      const targets: Array<{ _index: string; _id: string }> = [];
 
       for (const item of collection) {
         let index;
@@ -755,12 +835,58 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
           index = `${NEXXUS_PREFIX_LC}-app-${itemData.appId}-${itemData.type}`;
         }
 
-        bulkBody.push(
-          { delete: { _index: index, _id: itemData.id as string } }
-        );
+        targets.push({ _index: index, _id: itemData.id as string });
       }
 
-      await this.client.bulk({ operations: bulkBody });
+      // Every requested id is answered: `null` unless it's deleted below.
+      const results: NexxusDbItemResults<Partial<AnyNexxusModelData>> = new Map(targets.map(t => [ t._id, null ]));
+      const failures: Array<NexxusDatabaseItemFailure> = [];
+      const beforeDelete: Map<string, Record<string, unknown>> = new Map();
+
+      // Elasticsearch can't return a document it deletes, so the fields asked
+      // for are read first — only when they are asked for.
+      if (options?.returnFields && options.returnFields.size > 0) {
+        const read = await this.client.mget({ docs: targets, _source: Array.from(options.returnFields) });
+
+        for (const doc of read.docs) {
+          if ('error' in doc) {
+            // The model's index not existing yet means the document doesn't either.
+            if (doc.error.type !== 'index_not_found_exception') {
+              failures.push(NexxusElasticsearchDb.itemFailure(doc._id, undefined, doc.error));
+            }
+          } else if (doc.found) {
+            beforeDelete.set(doc._id, (doc._source ?? {}) as Record<string, unknown>);
+          }
+        }
+
+        // Nothing is deleted when what was asked for can't be returned.
+        if (failures.length > 0) {
+          throw new NexxusDatabaseItemsFailedException('deleteItems', failures);
+        }
+      }
+
+      const operations: Array<BulkOperationContainer> = targets.map(target => ({ delete: target }));
+      const deleted = await this.client.bulk({ operations });
+
+      // Bulk items come back in the order they were sent. Whether a document
+      // existed is decided here, by the delete — not by the read above.
+      deleted.items.forEach((item, i) => {
+        const id = targets[i]!._id;
+        const result = item.delete;
+
+        if (result && result.status >= 200 && result.status < 300) {
+          results.set(id, { id, ...beforeDelete.get(id) } as Partial<AnyNexxusModelData>);
+        } else if (result?.status !== 404) {
+          // A 404 — already gone, or its whole index never existed — leaves it `null`.
+          failures.push(NexxusElasticsearchDb.itemFailure(id, result?.status, result?.error));
+        }
+      });
+
+      if (failures.length > 0) {
+        throw new NexxusDatabaseItemsFailedException('deleteItems', failures);
+      }
+
+      return results;
     }, 'deleteItems');
   }
 

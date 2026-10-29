@@ -1,7 +1,7 @@
 import { vi } from 'vitest';
 import { NexxusBaseLogger } from '@mayhem93/nexxus-core-lib';
 import { NexxusDatabaseAdapter, type NexxusDatabaseAdapterEvents } from '@mayhem93/nexxus-database-lib';
-import { NexxusMessageQueueAdapter, type NexxusQueueMessage } from '@mayhem93/nexxus-message-queue-lib';
+import { NexxusMessageQueueAdapter, type NexxusMessageDelivery } from '@mayhem93/nexxus-message-queue-lib';
 import { NexxusRedis } from '@mayhem93/nexxus-redis';
 import type { NexxusApplication, NexxusAclRole, INexxusBaseServices } from '@mayhem93/nexxus-core-lib';
 import { FakeRedis } from '../redis/fakeRedis';
@@ -31,11 +31,18 @@ export const dbState: {
   searchCalls: any[];
   created: any[][];
   deleted: any[][];
+  /** The options each `deleteItems` call was given, in order. */
+  deleteOptions: any[];
   updateCalls: Array<{ patches: any[]; options: any }>;
+  /** What `updateItems` reads back, by `id`: the fields `returnFields` asks for. */
   updateResult: any[];
+  /** What `deleteItems` reads back before deleting, by `id`: the fields `returnFields` asks for. */
+  deleteResult: any[];
+  /** Ids no document is stored under: `updateItems` and `deleteItems` answer `null` for them. */
+  missingIds: string[];
 } = {
   applications: [], aclRoles: {}, connectImpl: null, disconnectImpl: null, searchCalls: [],
-  created: [], deleted: [], updateCalls: [], updateResult: [],
+  created: [], deleted: [], deleteOptions: [], updateCalls: [], updateResult: [], deleteResult: [], missingIds: [],
 };
 
 export class FakeDb extends NexxusDatabaseAdapter<any, NexxusDatabaseAdapterEvents> {
@@ -53,7 +60,10 @@ export class FakeDb extends NexxusDatabaseAdapter<any, NexxusDatabaseAdapterEven
 
   public async createItems(collection: any[]): Promise<void> { dbState.created.push(collection); }
 
-  public async getItems(): Promise<any> { return []; }
+  /** Nothing is stored here: every requested id is reported missing. */
+  public async getItems(options: any): Promise<any> {
+    return new Map(options.ids.map((id: string) => [ id, null ]));
+  }
 
   public async searchItems(options: any): Promise<any> {
     dbState.searchCalls.push(options);
@@ -64,13 +74,28 @@ export class FakeDb extends NexxusDatabaseAdapter<any, NexxusDatabaseAdapterEven
     return [];
   }
 
+  /** As the adapter does: keyed by document id, `null` for one in `missingIds`. */
   public async updateItems(patches: any[], options: any): Promise<any> {
     dbState.updateCalls.push({ patches, options });
 
-    return dbState.updateResult;
+    return new Map(patches.map(p => {
+      const id = p.get().metadata.id;
+
+      return [ id, dbState.missingIds.includes(id) ? null : { id, ...dbState.updateResult.find(r => r.id === id) } ];
+    }));
   }
 
-  public async deleteItems(collection: any[]): Promise<void> { dbState.deleted.push(collection); }
+  /** As `updateItems` does; `deleteResult` is what reading `returnFields` back finds. */
+  public async deleteItems(collection: any[], options?: any): Promise<any> {
+    dbState.deleted.push(collection);
+    dbState.deleteOptions.push(options);
+
+    return new Map(collection.map(item => {
+      const id = item.getData().id;
+
+      return [ id, dbState.missingIds.includes(id) ? null : { id, ...dbState.deleteResult.find(r => r.id === id) } ];
+    }));
+  }
   public async countItems(): Promise<number> { return 0; }
   protected buildQuery(): object { return {}; }
   public async getStats(): Promise<any> { return {}; }
@@ -81,7 +106,8 @@ export class FakeDb extends NexxusDatabaseAdapter<any, NexxusDatabaseAdapterEven
  * ------------------------------------------------------------------ */
 export const mqState: {
   connectImpl: (() => void) | null;
-  consumed: Array<{ queue: string; cb: any }>;
+  /** Every consumer registered: `deliver` is how a test hands it a message. */
+  consumed: Array<{ queue: string; deliver: (delivery: NexxusMessageDelivery) => void }>;
   published: Array<{ queue: string; message: any; metadata?: any }>;
   queueExistsResult: boolean;
   createdQueues: string[];
@@ -112,15 +138,16 @@ export class FakeMq extends NexxusMessageQueueAdapter<any, any, any> {
   protected async doDisconnect(): Promise<void> { this.open = false; }
   protected isFatalConnectError(): boolean { return false; }
 
-  protected async doConsume(queueName: string, cb: (m: NexxusQueueMessage<any>) => Promise<void>): Promise<void> {
-    mqState.consumed.push({ queue: queueName, cb });
+  protected async doConsume(queueName: string, deliver: (delivery: NexxusMessageDelivery) => void): Promise<void> {
+    mqState.consumed.push({ queue: queueName, deliver });
   }
 
   protected async doCancelAll(): Promise<void> {}
   public getBootstrapper(): never { return undefined as never; }
 
-  public async publishMessage(queueName: any, message: any, metadata?: any): Promise<void> {
-    mqState.published.push({ queue: queueName, message, metadata });
+  /** Publishing goes through the real base; records each message as the broker would get it. */
+  protected async doPublish(queueName: any, content: Buffer, metadata?: any): Promise<void> {
+    mqState.published.push({ queue: queueName, message: JSON.parse(content.toString()), metadata });
   }
 
   public async queueExists(): Promise<boolean> {
@@ -145,6 +172,24 @@ export class FakeMq extends NexxusMessageQueueAdapter<any, any, any> {
 
   public async getStats(): Promise<any> { return { id: 'fake-mq' }; }
 }
+
+/**
+ * A message as the broker would hand it to a consumer registered with the fake
+ * MQ (`mqState.consumed[i].deliver(...)`), recording how it was settled.
+ */
+export const fakeDelivery = (payload: unknown) => {
+  const delivery = {
+    content: Buffer.from(JSON.stringify(payload)),
+    metadata: {},
+    settled: [] as string[],
+    ack: (): void => { delivery.settled.push('ack'); },
+    deadLetter: (): void => { delivery.settled.push('deadLetter'); },
+    requeue: (): void => { delivery.settled.push('requeue'); },
+    isLive: (): boolean => true,
+  };
+
+  return delivery;
+};
 
 /* ------------------------------------------------------------------ *
  * Services + helpers                                                  *
@@ -204,7 +249,7 @@ export async function makeHarness(appConfigOverrides: Record<string, unknown> = 
   logger.entries = [];
   Object.assign(dbState, {
     applications: [], aclRoles: {}, connectImpl: null, disconnectImpl: null, searchCalls: [],
-    created: [], deleted: [], updateCalls: [], updateResult: [],
+    created: [], deleted: [], deleteOptions: [], updateCalls: [], updateResult: [], deleteResult: [], missingIds: [],
   });
   Object.assign(mqState, {
     connectImpl: null, consumed: [], published: [], queueExistsResult: false,

@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { NexxusApplication, DEFAULT_ACL_ROLE_ID, type INexxusApplication } from '@mayhem93/nexxus-core-lib';
+import {
+  NexxusApplication,
+  DEFAULT_ACL_ROLE_ID,
+  UnknownModelTypeException,
+  type INexxusApplication
+} from '@mayhem93/nexxus-core-lib';
 
 /** A valid minimal application document, with per-test overrides. */
 const makeData = (overrides: Record<string, unknown> = {}): INexxusApplication => ({
@@ -215,7 +220,10 @@ describe('NexxusApplication accessors', () => {
   });
 
   it('getAppModelSchema throws for an unknown model', () => {
-    expect(() => new NexxusApplication(makeData()).getAppModelSchema('ghost')).toThrow(/Unknown app model type/);
+    const app = new NexxusApplication(makeData());
+
+    expect(() => app.getAppModelSchema('ghost')).toThrow(UnknownModelTypeException);
+    expect(() => app.getAppModelSchema('ghost')).toThrow(/Unknown app model type/);
   });
 
   it('static getModelSchema returns the application model schema', () => {
@@ -313,6 +321,14 @@ describe('NexxusApplication accessors', () => {
     expect(filterable.has('meta.note')).toBe(false);
     expect(filterable.has('tags')).toBe(true);      // filterable array included
     expect(filterable.has('rawTags')).toBe(false);  // non-filterable array excluded
+  });
+
+  it('getModelFilterableFields includes the universal fields a filter can always test', () => {
+    const app = new NexxusApplication(makeData({
+      schema: { orders: { fields: { code: { type: 'string' } } } },
+    }));
+
+    expect([ ...app.getModelFilterableFields('orders') ]).toEqual([ 'id', 'createdAt', 'updatedAt' ]);
   });
 
   it('getModelFilterableFields returns an empty set for an unknown model', () => {

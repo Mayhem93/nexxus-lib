@@ -21,6 +21,7 @@ const SCHEMA: NexxusModelDef = {
   when:   { type: 'date' },
   tags:   { type: 'array', arrayType: 'string' },
   scores: { type: 'array', arrayType: 'int' },
+  days:   { type: 'array', arrayType: 'date' },
   items:  { type: 'array', arrayType: 'object', properties: { name: { type: 'string', required: true } } },
   meta:   { type: 'object', properties: { region: { type: 'string' }, level: { type: 'int' } } },
 };
@@ -46,7 +47,7 @@ describe('NexxusJsonPatch constructor', () => {
   });
 
   it('rejects an unsupported operation', () => {
-    expect(() => makePatch({ op: 'remove' as never })).toThrow(/Unsupported JSON Patch operation: remove/);
+    expect(() => makePatch({ op: 'move' as never })).toThrow(/Unsupported JSON Patch operation: move/);
   });
 
   it('rejects mismatched path/value array lengths', () => {
@@ -73,12 +74,8 @@ describe('NexxusJsonPatch constructor', () => {
     expect(() => makePatch({ metadata: { type: 'runs', appId: 'a', id: 9 } as never })).toThrow(/must include id/);
   });
 
-  it('constructs an un-validated patch (isValid=false, pathFieldTypes seeded empty)', () => {
-    const patch = makePatch();
-
-    expect(patch.isValid()).toBe(false);
-    // get() is gated behind validation, but getPartialModel() reads the raw patch.
-    expect(patch.getPartialModel()).toMatchObject({ id: 'obj1', type: 'runs', appId: 'app1', title: 'hello' });
+  it('constructs an un-validated patch', () => {
+    expect(makePatch().isValid()).toBe(false);
   });
 });
 
@@ -99,31 +96,6 @@ describe('NexxusJsonPatch get() / isValid()', () => {
       value: ['hello'],
       metadata: { type: 'runs', id: 'obj1', appId: 'app1', pathFieldTypes: ['string'] },
     });
-  });
-});
-
-describe('NexxusJsonPatch getPartialModel()', () => {
-  it('includes appId for per-app models and sets each path/value', () => {
-    const patch = makePatch({ path: ['count', 'meta.region'], value: [3, 'EU'] });
-
-    expect(patch.getPartialModel()).toEqual({
-      id: 'obj1',
-      type: 'runs',
-      appId: 'app1',
-      count: 3,
-      meta: { region: 'EU' },
-    });
-  });
-
-  it('omits appId for deployment-scoped models', () => {
-    const patch = new NexxusJsonPatch(patchInput({
-      path: ['title'], value: ['x'], metadata: { type: 'setting', id: 's1' } as never,
-    }));
-
-    const partial = patch.getPartialModel();
-
-    expect(partial).toEqual({ id: 's1', type: 'setting', title: 'x' });
-    expect('appId' in partial).toBe(false);
   });
 });
 
@@ -300,5 +272,55 @@ describe('NexxusJsonPatch validate() — prepend', () => {
 
     expect(() => makePatch({ op: 'prepend', path: ['items'], value: [{}] }).validate(brokenSchema))
       .toThrow(/missing properties definition/);
+  });
+});
+
+describe('NexxusJsonPatch validate() — remove', () => {
+  it('removes by index from any array, an array of objects included', () => {
+    const patch = makePatch({ op: 'remove', path: ['tags', 'items'], value: [{ i: 0 }, { i: 3 }] });
+
+    patch.validate(SCHEMA);
+
+    expect(patch.get().value).toEqual([{ i: 0 }, { i: 3 }]);
+    expect(patch.get().metadata.pathFieldTypes).toEqual(['array', 'array']);
+  });
+
+  it('removes by value from an array of primitives, normalized like an appended element', () => {
+    const patch = makePatch({ op: 'remove', path: ['tags', 'days'], value: [{ v: 'urgent' }, { v: '2020-01-01T00:00:00.000Z' }] });
+
+    patch.validate(SCHEMA);
+
+    expect(patch.get().value).toEqual([{ v: 'urgent' }, { v: EPOCH_SECONDS }]);
+  });
+
+  it('refuses removing by value from an array of objects', () => {
+    expect(() => makePatch({ op: 'remove', path: ['items'], value: [{ v: { name: 'crate' } }] }).validate(SCHEMA))
+      .toThrow(/can only be removed by index/);
+  });
+
+  it('refuses an element the array could not hold', () => {
+    expect(() => makePatch({ op: 'remove', path: ['scores'], value: [{ v: 'ten' }] }).validate(SCHEMA))
+      .toThrow(/Expected integer/);
+    expect(() => makePatch({ op: 'remove', path: ['tags'], value: [{ v: null }] }).validate(SCHEMA))
+      .toThrow(/Expected string/);
+  });
+
+  it('refuses an index that is not a non-negative integer', () => {
+    for (const i of [-1, 1.5, '0', null, 2 ** 53]) {
+      expect(() => makePatch({ op: 'remove', path: ['tags'], value: [{ i }] }).validate(SCHEMA))
+        .toThrow(/must be a non-negative integer/);
+    }
+  });
+
+  it('refuses a value that is not exactly one of { v } and { i }', () => {
+    for (const value of ['urgent', 0, null, [], {}, { v: 'a', i: 0 }, { x: 1 }]) {
+      expect(() => makePatch({ op: 'remove', path: ['tags'], value: [value] }).validate(SCHEMA))
+        .toThrow(/must be either \{ v: <element> \} or \{ i: <index> \}/);
+    }
+  });
+
+  it('refuses remove on a field that is not an array', () => {
+    expect(() => makePatch({ op: 'remove', path: ['title'], value: [{ i: 0 }] }).validate(SCHEMA))
+      .toThrow(/Operation "remove" not allowed on type "string"/);
   });
 });

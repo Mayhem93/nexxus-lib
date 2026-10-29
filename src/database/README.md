@@ -45,11 +45,11 @@ The operations an adapter must implement — note everything is a **collection**
 | --- | --- |
 | `connect()` / `disconnect()` | Open/close the connection; drive the `connect`/`disconnect` events. |
 | `getBootstrapper()` | Return this adapter's `NexxusDatabaseBootstrapper` (see below). |
-| `createItems(collection: AnyNexxusModel[])` | Persist model instances. |
-| `getItems({ ids, type, appId? })` | Fetch by id (returns `null` per missing id, per model type). |
+| `createItems(collection: AnyNexxusModel[])` | Persist model instances. Resolves once every item is written. |
+| `getItems({ ids, type, appId? })` | Fetch by id: a `Map` of each requested id to its model, or `null`. |
 | `searchItems({ type, appId?, filter?, limit?, offset?, sort?, databaseSpecific? })` | Query with a `NexxusFilterQuery`. |
-| `updateItems(patches: NexxusJsonPatch[], { returnFields? })` | Apply patches; optionally return the changed fields. |
-| `deleteItems(collection: NexxusBaseModel[])` | Delete by model instance. |
+| `updateItems(patches: NexxusJsonPatch[], { returnFields? })` | Apply patches: a `Map` of each document id to its id, `version` and `returnFields` after the update, or `null`. |
+| `deleteItems(collection: NexxusBaseModel[], { returnFields? })` | Delete by model instance: a `Map` of each id to its id and `returnFields` as they were before the delete, or `null`. |
 | `countItems({ type, appId?, filter? })` | Count matching documents. |
 | `buildQuery(options)` *(protected)* | Adapter-internal: translate search options into the native query. |
 
@@ -59,8 +59,8 @@ Typical caller usage (the API and workers, not end users):
 // create — pass model instances, not raw JSON
 await db.createItems([ new NexxusAppModel(data, app.getSchema()) ]);
 
-// read by id
-const [task] = await db.getItems({ type: 'task', ids: ['task-1'], appId: 'app-123' });
+// read by id — null when it doesn't exist
+const task = (await db.getItems({ type: 'task', ids: ['task-1'], appId: 'app-123' })).get('task-1');
 
 // search
 const tasks = await db.searchItems({
@@ -73,14 +73,23 @@ const tasks = await db.searchItems({
 });
 
 // update — patches are validated NexxusJsonPatch instances
-const [changed] = await db.updateItems([patch], { returnFields: new Set(['status']) });
+const changed = (await db.updateItems([patch], { returnFields: new Set(['status']) })).get('task-1');
 
-// delete / count
-await db.deleteItems([taskModel]);
+// delete — `returnFields` costs an extra read on stores that can't return deleted rows
+const removed = (await db.deleteItems([taskModel], { returnFields: new Set(['userId']) })).get('task-1');
+
+// count
 const total = await db.countItems({ type: 'task', appId: 'app-123' });
 ```
 
 `getItems` and `searchItems` are overloaded by `type` so built-in models resolve to their concrete classes (`NexxusApplication`, `NexxusUser`, `NexxusSetting`) and everything else to `NexxusAppModel`.
+
+### Results and failures
+
+- `getItems`, `updateItems` and `deleteItems` answer **every id they were asked about**: the result, or `null` when the item doesn't exist.
+- An item that fails for any other reason makes the call throw a `NexxusDatabaseItemsFailedException`, listing each failed id and why in `failures`.
+- That exception is `terminal` when the database refused the data itself, so retrying can't help; otherwise it's worth retrying. A queue consumer dead-letters a terminal failure at once and retries the rest.
+- `createItems` has nothing to miss: it resolves when every item is written, and throws the same exception otherwise.
 
 ---
 
@@ -126,14 +135,15 @@ The built-in Elasticsearch adapter lowers it to a `bool` query:
 
 ## JsonPatch translation
 
-Updates arrive as validated `NexxusJsonPatch` instances whose ops are `replace`, `append`, `prepend`, `incr`, and `decr` (with parallel `path[]`/`value[]` arrays). An adapter maps those ops onto its engine's native update mechanism: a scripted update, a SQL `UPDATE` with the right expressions, a document-store update operator (`$set`, `$inc`, `$push`, …), etc. The important part is preserving each op's semantics — `incr`/`decr` are relative arithmetic, `append`/`prepend` mutate arrays/strings — and applying all of a document's patches atomically where the engine allows.
+Updates arrive as validated `NexxusJsonPatch` instances whose ops are `replace`, `append`, `prepend`, `incr`, `decr`, and `remove` (with parallel `path[]`/`value[]` arrays). An adapter maps those ops onto its engine's native update mechanism: a scripted update, a SQL `UPDATE` with the right expressions, a document-store update operator (`$set`, `$inc`, `$push`, …), etc. The important part is preserving each op's semantics — `incr`/`decr` are relative arithmetic that counts a missing value as `0`, `append`/`prepend` mutate arrays/strings, `remove` takes every element equal to `{ v }`, or the one at index `{ i }`, out of an array (an index past the end, or a missing array, removes nothing) — and applying all of a document's patches atomically, in order, where the engine allows.
 
 The Elasticsearch adapter compiles the patches for a document into a single painless script (one script per document, so its `_version` bumps exactly once):
 
 ```painless
-// replace status; incr viewCount
+// replace status; incr viewCount; remove every "archived" from tags
 ctx._source.status = params.value0;
-ctx._source.viewCount += params.value1;
+if (ctx._source.viewCount == null) { ctx._source.viewCount = 0; } ctx._source.viewCount += params.value1;
+if (ctx._source.tags != null) ctx._source.tags.removeIf(item -> item == params.value2.v)
 ```
 
 Values are passed as script `params` (never string-interpolated), and paths are validated against the model schema before the script is built.
@@ -165,9 +175,10 @@ To add support for a new store, ship a package that:
 1. **Extends `NexxusDatabaseAdapter<Config, Events, Stats>`** and sets the static config hooks it inherits from `NexxusBaseService` — `configRootKey` is already `'database'`; you provide `schemaPath` (a JSON schema for your config) and any `envVars` / `cliArgs` specs.
 2. **Implements the operations** in the interface table above. Remember the inputs are framework objects: `createItems` receives model instances (`getData()` to read them), `updateItems` receives `NexxusJsonPatch` instances (`get()` after `validate()`), `deleteItems` receives `NexxusBaseModel` instances.
 3. **Lowers FilterQuery and JsonPatch** to native queries/updates in `searchItems`/`buildQuery` and `updateItems` respectively.
-4. **Drives the lifecycle events** — resolve `connect()` on first successful connection and keep retrying rather than failing fast; emit `disconnect` when the connection drops and `connect` when it returns. The API/worker gate request availability on these, so getting them right matters more than the CRUD.
-5. **Preserves the `version` field** — it's a per-write counter the client uses for gap detection. Assign/return it on writes the way ES surfaces `_version`; a store without a native document version needs its own monotonic counter (see the write-concurrency notes in core).
-6. **Provides a `NexxusDatabaseBootstrapper` subclass** via `getBootstrapper()` for deployment/app provisioning.
+4. **Reports every requested id** as described in [Results and failures](#results-and-failures). A store that doesn't report misses — a SQL `WHERE id IN (…)` — gets them by comparing what came back with the ids it was given. A store that can't return a deleted row (no `DELETE … RETURNING`) reads `returnFields` first, and only when they're asked for.
+5. **Drives the lifecycle events** — resolve `connect()` on first successful connection and keep retrying rather than failing fast; emit `disconnect` when the connection drops and `connect` when it returns. The API/worker gate request availability on these, so getting them right matters more than the CRUD.
+6. **Preserves the `version` field** — it's a per-write counter the client uses for gap detection. Assign/return it on writes the way ES surfaces `_version`; a store without a native document version needs its own monotonic counter (see the write-concurrency notes in core).
+7. **Provides a `NexxusDatabaseBootstrapper` subclass** via `getBootstrapper()` for deployment/app provisioning.
 
 Package it with `@mayhem93/nexxus-core-lib` as a **peer dependency** so `instanceof` checks resolve against a single shared copy, then point `app.database` at your package name in config — the framework dynamic-imports it.
 
@@ -197,6 +208,7 @@ Anything a service requires but no provider supplies fails validation against th
 - **Index-per-type, per-app layout** — `nxx-application` and `nxx-setting` are deployment-scoped; app data lives in `nxx-app-<appId>-<modelType>` (and `nxx-app-<appId>-user` when auth is enabled). The document `type` is expressed by the index it lives in rather than a filtered field.
 - **Explicit, analyzer-free mappings** declared by the bootstrapper (see above), with dynamic templates enforcing the same policy for open subtrees.
 - **Scripted bulk updates** — a document's patches merge into one painless script so `_version` bumps once; conflicts use `retry_on_conflict`. That `_version` becomes the model's `version`.
+- **Per-item results from bulk and mget** — a 404 (no such document, or no such index yet) is `null`; a 400 (a document or script Elasticsearch refused) is a terminal failure; anything else (overloaded, a read-only index, a lasting version conflict) is retryable. `deleteItems` with `returnFields` reads them with one `mget` before the bulk delete.
 - **Reactive liveness** — `connect()` retries until ES answers, then a background ping loop (relaxed while connected, aggressive while down) flips the `connect`/`disconnect` events the API listens on.
 - **Write visibility** — app-model writes don't force a refresh; built-in model writes wait for one, so control-plane reads are immediately consistent.
 
@@ -208,7 +220,8 @@ Anything a service requires but no provider supplies fails validation against th
 - **`NexxusDatabaseBootstrapper`** *(abstract)* — deployment + per-application provisioning contract.
 - **`NexxusElasticsearchDb`** — built-in Elasticsearch adapter.
 - **`NexxusElasticsearchDbBootstrapper`** — built-in ES bootstrapper (index + mapping creation).
-- **`NexxusDatabaseException` / `NexxusDatabaseUpdateConflictException`** — adapter error types; the conflict exception carries the offending `id`/`appId`.
+- **`NexxusDatabaseException`** — base of the adapter error types.
+- **`NexxusDatabaseItemsFailedException`** — items that failed for a reason other than not existing; `failures` lists each id and why, and `terminal` is set when retrying can't help. See [Results and failures](#results-and-failures).
 
 ---
 
