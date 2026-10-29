@@ -55,7 +55,7 @@ export default [
       'no-else-return': WARN,
       'no-unused-expressions': ERROR,
       'no-use-before-define': ERROR,
-      'quotes': [ERROR, 'single', { avoidEscape: true }],
+      'quotes': [WARN, 'single', { avoidEscape: true }],
       'require-await': WARN,
       'wrap-iife': [WARN, 'any'],
       'yoda': [WARN, 'never'],

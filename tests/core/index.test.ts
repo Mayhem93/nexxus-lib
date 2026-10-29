@@ -5,6 +5,7 @@
  * these per-package `index.test.ts` files are collected (see `include` in
  * vitest.config.ts); the suites themselves are plain `.ts` modules.
  */
+import './Exceptions';
 import './AclStatement';
 import './BuiltinSchemas';
 import './SchemaValidator';

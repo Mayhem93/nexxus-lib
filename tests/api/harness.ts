@@ -5,7 +5,7 @@ import {
   type INexxusBaseServices
 } from '@mayhem93/nexxus-core-lib';
 import { NexxusDatabaseAdapter, type NexxusDatabaseAdapterEvents } from '@mayhem93/nexxus-database-lib';
-import { NexxusMessageQueueAdapter, type NexxusQueueMessage } from '@mayhem93/nexxus-message-queue-lib';
+import { NexxusMessageQueueAdapter, type NexxusMessageDelivery } from '@mayhem93/nexxus-message-queue-lib';
 import { NexxusRedis } from '@mayhem93/nexxus-redis';
 
 import { NexxusApi } from '../../src/api/src/lib/Api';
@@ -36,18 +36,20 @@ export const dbState: {
   /** Returned by `searchItems` unless `searchImpl` is set. */
   searchResult: any[];
   countResult: number;
-  updateResult: any[];
+  /** Ids no document is stored under: `updateItems` answers `null` for them. */
+  missingIds: string[];
   /** Per-test overrides, for the cases a fixed array can't express (throwing, branching on options). */
   getItemsImpl: ((options: any) => any[] | Promise<any[]>) | null;
   searchImpl: ((options: any) => any[] | Promise<any[]>) | null;
+  createImpl: ((collection: any[]) => void | Promise<void>) | null;
   getItemsCalls: any[];
   searchCalls: any[];
   created: any[][];
   deleted: any[][];
   updateCalls: Array<{ patches: any[]; options: any }>;
 } = {
-  getItemsResult: [], searchResult: [], countResult: 0, updateResult: [],
-  getItemsImpl: null, searchImpl: null,
+  getItemsResult: [], searchResult: [], countResult: 0, missingIds: [],
+  getItemsImpl: null, searchImpl: null, createImpl: null,
   getItemsCalls: [], searchCalls: [], created: [], deleted: [], updateCalls: [],
 };
 
@@ -61,10 +63,13 @@ export class FakeDb extends NexxusDatabaseAdapter<any, NexxusDatabaseAdapterEven
   public async disconnect(): Promise<void> {}
   public getBootstrapper(): never { return undefined as never; }
 
+  /** As the adapter does: every requested id is a key, `null` when nothing stored has that id. */
   public async getItems(options: any): Promise<any> {
     dbState.getItemsCalls.push(options);
 
-    return dbState.getItemsImpl ? dbState.getItemsImpl(options) : dbState.getItemsResult;
+    const stored = await (dbState.getItemsImpl ? dbState.getItemsImpl(options) : dbState.getItemsResult);
+
+    return new Map(options.ids.map((id: string) => [ id, stored.find((m: any) => m?.getData().id === id) ?? null ]));
   }
 
   public async searchItems(options: any): Promise<any> {
@@ -73,13 +78,28 @@ export class FakeDb extends NexxusDatabaseAdapter<any, NexxusDatabaseAdapterEven
     return dbState.searchImpl ? dbState.searchImpl(options) : dbState.searchResult;
   }
 
-  public async createItems(collection: any[]): Promise<void> { dbState.created.push(collection); }
-  public async deleteItems(collection: any[]): Promise<void> { dbState.deleted.push(collection); }
+  public async createItems(collection: any[]): Promise<void> {
+    if (dbState.createImpl) await dbState.createImpl(collection);
 
+    dbState.created.push(collection);
+  }
+
+  /** Every item existed. */
+  public async deleteItems(collection: any[]): Promise<any> {
+    dbState.deleted.push(collection);
+
+    return new Map(collection.map(item => [ item.getData().id, { id: item.getData().id } ]));
+  }
+
+  /** As the adapter does: keyed by document id, `null` for one in `missingIds`. */
   public async updateItems(patches: any[], options: any): Promise<any> {
     dbState.updateCalls.push({ patches, options });
 
-    return dbState.updateResult;
+    return new Map(patches.map(p => {
+      const id = p.get().metadata.id;
+
+      return [ id, dbState.missingIds.includes(id) ? null : { id } ];
+    }));
   }
 
   public async countItems(): Promise<number> { return dbState.countResult; }
@@ -101,14 +121,19 @@ export class FakeMq extends NexxusMessageQueueAdapter<any, any, any> {
   protected async doConnect(): Promise<void> {}
   protected async doDisconnect(): Promise<void> {}
   protected isFatalConnectError(): boolean { return false; }
-  protected async doConsume(_queue: string, _cb: (m: NexxusQueueMessage<any>) => Promise<void>): Promise<void> {}
+  protected async doConsume(_queue: string, _deliver: (delivery: NexxusMessageDelivery) => void): Promise<void> {}
   protected async doCancelAll(): Promise<void> {}
   public getBootstrapper(): never { return undefined as never; }
 
-  public async publishMessage(queueName: any, message: any, metadata?: any): Promise<void> {
+  /**
+   * Publishing goes through the real base, so a `publishImpl` that throws is
+   * wrapped exactly as a broker refusal would be. Records each message as the
+   * broker would get it.
+   */
+  protected async doPublish(queueName: any, content: Buffer, metadata?: any): Promise<void> {
     if (mqState.publishImpl) await mqState.publishImpl();
 
-    mqState.published.push({ queue: queueName, message, metadata });
+    mqState.published.push({ queue: queueName, message: JSON.parse(content.toString()), metadata });
   }
 
   public async queueExists(): Promise<boolean> { return false; }
@@ -155,8 +180,8 @@ export function installApiStatics(): ApiHarness {
   authStrategies.clear();
 
   Object.assign(dbState, {
-    getItemsResult: [], searchResult: [], countResult: 0, updateResult: [],
-    getItemsImpl: null, searchImpl: null,
+    getItemsResult: [], searchResult: [], countResult: 0, missingIds: [],
+    getItemsImpl: null, searchImpl: null, createImpl: null,
     getItemsCalls: [], searchCalls: [], created: [], deleted: [], updateCalls: [],
   });
   Object.assign(mqState, { published: [], publishImpl: null });

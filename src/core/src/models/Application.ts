@@ -11,6 +11,7 @@ import { InferModel } from '../common/InferModel';
 import {
   NEXXUS_BUILTIN_MODEL_SCHEMAS,
   NEXXUS_RESERVED_FIELD_NAMES,
+  NEXXUS_UNIVERSAL_FIELDS,
   isAppScopedBuiltinModel
 } from '../common/BuiltinSchemas';
 import {
@@ -19,6 +20,7 @@ import {
   NEXXUS_USER_DETAIL_RESERVED_PREFIX
 } from './User';
 import { DEFAULT_ACL_ROLE_ID } from './AclRole';
+import { UnknownModelTypeException } from '../lib/Exceptions';
 
 import type { NexxusAclManager } from '../lib/Acl';
 
@@ -468,7 +470,7 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
     const appModelDef = this.data.schema[modelType];
 
     if (!appModelDef) {
-      throw new Error(`Unknown app model type: ${modelType}`);
+      throw new UnknownModelTypeException(`Unknown app model type: ${modelType}`);
     }
 
     const fields = structuredClone(appModelDef.fields);
@@ -513,7 +515,7 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
     const appModelDef = this.data.schema[modelType];
 
     if (!appModelDef) {
-      throw new Error(`Unknown app model type: ${modelType}`);
+      throw new UnknownModelTypeException(`Unknown app model type: ${modelType}`);
     }
 
     return appModelDef.subscribable !== false;
@@ -527,7 +529,7 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
     const appModelDef = this.data.schema[modelType];
 
     if (!appModelDef) {
-      throw new Error(`Unknown app model type: ${modelType}`);
+      throw new UnknownModelTypeException(`Unknown app model type: ${modelType}`);
     }
 
     return appModelDef.transient === true;
@@ -547,6 +549,11 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
     return appModelFieldType as string | undefined;
   }
 
+  /**
+   * Every field a FilterQuery can test on this model: the universal ones (`id`,
+   * `createdAt`, `updatedAt`), the declared ones marked filterable, and `userId`
+   * on an application with users.
+   */
   public getModelFilterableFields(modelType: string): Set<string> {
     const modelDef = this.getSchema()[modelType];
     const filterableFields: Set<string> = new Set();
@@ -557,9 +564,10 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
 
     // Route through `getAppModelSchema` so we pick up the auto-marked
     // filterable fields on non-subscribable models (and the userId
-    // injection when auth is enabled). The traversal below then only
-    // needs to look at the `filterable` flag.
-    const fields = this.getAppModelSchema(modelType);
+    // injection when auth is enabled), plus the universal fields, as
+    // FilterQuery does. The traversal below then only needs to look at the
+    // `filterable` flag.
+    const fields: Record<string, NexxusFieldDef> = { ...NEXXUS_UNIVERSAL_FIELDS, ...this.getAppModelSchema(modelType) };
 
     const collectFilterableFields = (
       subFields: Record<string, NexxusFieldDef>,

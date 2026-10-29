@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { FatalErrorException, InvalidTokenException } from '@mayhem93/nexxus-core-lib';
+import { NexxusDatabaseItemsFailedException } from '@mayhem93/nexxus-database-lib';
 
 // NotFound and Error aren't imported here: `startTestServer` mounts that pair
 // on every app it builds, exactly as `NexxusApi.init()` does — so they're
@@ -378,6 +379,18 @@ describe('ErrorMiddleware', () => {
     expect(JSON.stringify(res.body)).not.toMatch(/10\.0\.0\.4/);
   });
 
+  it('replaces a database failure with a generic 500, keeping its details to the log', async () => {
+    toThrow = new NexxusDatabaseItemsFailedException('updateItems', [
+      { id: 'r1', reason: 'mapper_parsing_exception: failed to parse field [count]', terminal: true },
+    ]);
+
+    const res = await server.request('/throw');
+
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ error: 'ServerErrorException', message: 'An unexpected server error occurred.' });
+    expect(logger.has('error', /updateItems failed for "r1" \(mapper_parsing_exception/)).toBe(true);
+  });
+
   /**
    * A core exception is a `NexxusException` but not a `NexxusApiException`, so
    * it has no `statusCode` and falls back to 500 — while KEEPING its own name
@@ -404,8 +417,9 @@ describe('ErrorMiddleware', () => {
     toThrow = new Error('boom');
     await server.request('/throw'); // 500
 
-    expect(logger.has('error', /An unexpected server error occurred/)).toBe(true);
-    expect(logger.has('info', /An unexpected server error occurred/)).toBe(false);
+    // The client got a generic message; the log has what actually failed.
+    expect(logger.has('error', /boom/)).toBe(true);
+    expect(logger.has('info', /boom/)).toBe(false);
   });
 
   it('omits the stack from the response body outside dev', async () => {

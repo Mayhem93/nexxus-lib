@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { NexxusDevice, NexxusRedisSubscription } from '@mayhem93/nexxus-redis';
 import { NEXXUS_PREFIX_LC } from '@mayhem93/nexxus-core-lib';
 import { installFakeRedis, logger } from './helpers';
@@ -75,6 +75,18 @@ describe('NexxusDevice getKey / get / save', () => {
 
     expect(withSubs.getValue().subscriptions).toHaveLength(1);
     expect(withSubs.getValue().subscriptions[0].getKey()).toBe(makeSub().getKey());
+  });
+});
+
+describe('NexxusDevice.exists', () => {
+  it('tells which devices exist, with one single-key EXISTS per id', async () => {
+    await new NexxusDevice({ appId: 'a', id: 'd1', name: 'N', subscriptions: [] }).save();
+
+    const exists = vi.spyOn(redis, 'exists');
+
+    expect(await NexxusDevice.exists(['d1', 'ghost'])).toEqual(new Map([['d1', true], ['ghost', false]]));
+    // A cluster refuses a single command whose keys live on different nodes.
+    expect(exists.mock.calls).toEqual([[NexxusDevice.getKey('d1')], [NexxusDevice.getKey('ghost')]]);
   });
 });
 

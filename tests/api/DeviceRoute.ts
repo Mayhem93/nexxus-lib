@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { NexxusToken, NexxusUser, type INexxusUser, type NexxusApplication } from '@mayhem93/nexxus-core-lib';
 import { NexxusDevice } from '@mayhem93/nexxus-redis';
 
@@ -171,6 +171,16 @@ describe('POST /device/register', () => {
 
     await expect(NexxusDevice.get(res.body.device.id)).resolves.toBeDefined();
   });
+
+  it('404s when the account behind the token no longer exists', async () => {
+    await serve(makeAuthApp());
+    dbState.missingIds = [ 'u1' ];
+
+    const res = await post('/device/register', { name: 'Laptop' }, as('d1', USER));
+
+    expect(res.status).toBe(404);
+    expect(res.body).toMatchObject({ error: 'NotFoundException', message: 'User "u1" no longer exists' });
+  });
 });
 
 describe('GET /device', () => {
@@ -295,10 +305,13 @@ describe('PUT /device', () => {
 });
 
 describe('GET /device/list', () => {
-  const storedUser = (devices: string[]): NexxusUser => new NexxusUser({
+  /** Without `updatedAt`, the account counts as written just now. */
+  const storedUser = (devices: string[], updatedAt?: number): NexxusUser => new NexxusUser({
     id: 'u1', type: 'user', appId: 'app1', username: 'ann', password: null,
-    authProviders: [ 'local' ], devices, details: {}, userType: 'default',
+    authProviders: [ 'local' ], devices, details: {}, userType: 'default', updatedAt,
   } as INexxusUser);
+
+  const minutesAgo = (minutes: number): number => Math.floor(Date.now() / 1000) - minutes * 60;
 
   beforeEach(() => {
     installApiStatics();
@@ -321,14 +334,14 @@ describe('GET /device/list', () => {
 
   /**
    * The id list lives on the user document while the records live in Redis, so
-   * the two drift — a reaped device leaves an id behind. `Promise.all` made one
-   * dangling id fail the whole endpoint, leaving a user unable to see ANY of
-   * their devices until someone pruned it by hand.
+   * an id can name nothing — a device whose save failed after its id was
+   * recorded. `Promise.all` made one such id fail the whole endpoint, leaving a
+   * user unable to see ANY of their devices.
    */
   it('survives a dangling device id', async () => {
     await serve(makeAuthApp());
     await seedDevice({ id: 'd1', userId: 'u1', name: 'Phone' });
-    dbState.getItemsResult = [ storedUser([ 'd1', 'reaped-long-ago' ]) ];
+    dbState.getItemsResult = [ storedUser([ 'd1', 'never-saved' ]) ];
 
     const res = await server.request('/device/list', { headers: as('d1', USER) });
 
@@ -336,6 +349,78 @@ describe('GET /device/list', () => {
     expect(res.body.devices).toHaveLength(1);
     // 'warning', not 'warn' — NexxusLoggerLevels uses syslog names.
     expect(logger.has('warning', /lists 2 devices but only 1 could be read/)).toBe(true);
+  });
+
+  it('removes the ids naming no device from an account unwritten for over a minute', async () => {
+    await serve(makeAuthApp());
+    await seedDevice({ id: 'd1', userId: 'u1', name: 'Phone' });
+    dbState.getItemsResult = [ storedUser([ 'd1', 'never-saved', 'never-saved-either' ], minutesAgo(2)) ];
+
+    const res = await server.request('/device/list', { headers: as('d1', USER) });
+
+    expect(res.status).toBe(200);
+    expect(res.body.devices).toHaveLength(1);
+
+    const [ devicesPatch, updatedAtPatch ] = dbState.updateCalls[0]!.patches;
+
+    // By value, so a device linked in the meantime keeps its id.
+    expect(devicesPatch.get()).toMatchObject({
+      op: 'remove',
+      path: [ 'devices', 'devices' ],
+      value: [ { v: 'never-saved' }, { v: 'never-saved-either' } ],
+      metadata: { id: 'u1', appId: 'app1', type: 'user' },
+    });
+    expect(updatedAtPatch.get().path).toEqual([ 'updatedAt' ]);
+  });
+
+  it('removes nothing from an account written to in the last minute', async () => {
+    await serve(makeAuthApp());
+    // Ids are recorded before their device is saved, so this one may be mid-save.
+    dbState.getItemsResult = [ storedUser([ 'being-saved' ], minutesAgo(0.5)) ];
+
+    const res = await server.request('/device/list', { headers: as('d1', USER) });
+
+    expect(res.status).toBe(200);
+    expect(dbState.updateCalls).toHaveLength(0);
+  });
+
+  it('never removes the id of a device that exists but could not be read', async () => {
+    await serve(makeAuthApp());
+    await seedDevice({ id: 'd1', userId: 'u1', name: 'Phone' });
+    await seedDevice({ id: 'd2', userId: 'u1', name: 'Laptop' });
+    dbState.getItemsResult = [ storedUser([ 'd1', 'd2' ], minutesAgo(2)) ];
+
+    const get = NexxusDevice.get.bind(NexxusDevice);
+    const spy = vi.spyOn(NexxusDevice, 'get').mockImplementation((id, withSubscriptions) =>
+      id === 'd2' ? Promise.reject(new Error('redis hiccup')) : get(id, withSubscriptions));
+
+    try {
+      const res = await server.request('/device/list', { headers: as('d1', USER) });
+
+      expect(res.body.devices.map((d: { name: string }) => d.name)).toEqual([ 'Phone' ]);
+      expect(dbState.updateCalls).toHaveLength(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('still answers when the ids could not be checked', async () => {
+    await serve(makeAuthApp());
+    await seedDevice({ id: 'd1', userId: 'u1', name: 'Phone' });
+    dbState.getItemsResult = [ storedUser([ 'd1', 'never-saved' ], minutesAgo(2)) ];
+
+    const spy = vi.spyOn(NexxusDevice, 'exists').mockRejectedValueOnce(new Error('redis down'));
+
+    try {
+      const res = await server.request('/device/list', { headers: as('d1', USER) });
+
+      expect(res.status).toBe(200);
+      expect(res.body.devices).toHaveLength(1);
+      expect(logger.has('warning', /Could not remove missing devices from user "u1": redis down/)).toBe(true);
+      expect(dbState.updateCalls).toHaveLength(0);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('returns an empty list for a user with no devices', async () => {

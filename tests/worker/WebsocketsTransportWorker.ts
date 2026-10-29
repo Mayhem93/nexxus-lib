@@ -5,7 +5,7 @@
  * message queue) are fakes, as everywhere else in this package.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { NexxusWebsocketsTransportWorker, NexxusBaseWorker } from '@mayhem93/nexxus-worker-lib';
+import { NexxusWebsocketsTransportWorker, NexxusBaseWorker, NexxusWorkerUnsupportedEventException } from '@mayhem93/nexxus-worker-lib';
 import { NexxusDevice, RedisDeviceInvalidParamsException } from '@mayhem93/nexxus-redis';
 import { NexxusApplication, NexxusToken } from '@mayhem93/nexxus-core-lib';
 import { makeHarness, logger, mqState, getFreePort, resetWorkerStatics, type WorkerHarness } from './harness';
@@ -613,14 +613,17 @@ describe('NexxusWebsocketsTransportWorker.sendToDevice', () => {
     expect(logger.has('info', /No registered client found for device ID: "ghost"/)).toBe(true);
   });
 
-  it('warns about an unrecognized event type in the payload', async () => {
+  it('fails a device event it does not deliver with a terminal error, so the message is dead-lettered', async () => {
     const w = await build();
 
     await registered(w);
 
-    await w.sendToDevice('d1', { event: 'model_imploded', metadata: { channels: [] } } as any);
+    const err = await w.sendToDevice('d1', { event: 'model_imploded', metadata: { channels: [] } } as any)
+      .catch((e: unknown) => e) as NexxusWorkerUnsupportedEventException;
 
-    expect(logger.has('warning', /Unknown event type in payload: for device ID: "d1"/)).toBe(true);
+    expect(err).toBeInstanceOf(NexxusWorkerUnsupportedEventException);
+    expect(err.terminal).toBe(true);
+    expect(err.message).toBe('The websockets transport doesn\'t deliver "model_imploded" events');
   });
 
   it('drops the message instead of erroring when the socket is already closing', async () => {

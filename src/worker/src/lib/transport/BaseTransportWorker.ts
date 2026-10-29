@@ -12,6 +12,7 @@ import {
   NexxusBaseWorkerStats,
   NexxusWorkerServices
 } from '../BaseWorker';
+import { NexxusWorkerUnsupportedEventException } from '../Exceptions';
 
 export type NexxusBaseTransportWorkerConfig = NexxusBaseWorkerConfig & {}
 
@@ -90,12 +91,9 @@ export abstract class NexxusBaseTransportWorker<
     }
 
     if (payload.event !== 'device_message') {
-      NexxusBaseTransportWorker.logger.warn(
-        `Unknown event type: ${(payload as NexxusBaseQueuePayload).event}`,
-        label
+      throw new NexxusWorkerUnsupportedEventException(
+        `Transports don't handle "${(payload as NexxusBaseQueuePayload).event}" events`
       );
-
-      return;
     }
 
     if (payload.deviceIds.length === 0) {

@@ -2,6 +2,7 @@ import { NexxusApiBaseRoute } from '../BaseRoute';
 import {
   InvalidAuthMethodException,
   InvalidParametersException,
+  NotFoundException,
   ServerErrorException,
   UserAlreadyExistsException
 } from '../Exceptions';
@@ -17,7 +18,7 @@ import {
   RequiresUserMiddleware
 } from '../middlewares';
 import { NexxusAuthStrategy } from '../auth';
-import { createDevice } from '../DeviceRegistration';
+import { NexxusApiDeviceRegistration } from '../DeviceRegistration';
 
 import {
   InvalidJsonPatchException,
@@ -57,7 +58,12 @@ interface UserUpdateRequest extends NexxusApiRequest {
 }
 
 export default class UserRoute extends NexxusApiBaseRoute {
-  private static readonly forbiddenUpdatePaths = ['userType', 'authProviders', 'devices', 'createdAt', 'updatedAt'];
+  /**
+   * `username` included: OAuth strategies find an account by its username (the
+   * provider's email), so renaming one would cut it off from its provider — and
+   * a rename couldn't be checked against the usernames already taken.
+   */
+  private static readonly forbiddenUpdatePaths = ['username', 'userType', 'authProviders', 'devices', 'createdAt', 'updatedAt'];
 
   /**
    * Whether a patch path targets something the user may not write.
@@ -148,39 +154,59 @@ export default class UserRoute extends NexxusApiBaseRoute {
     if (!localStrategy) {
       throw new InvalidAuthMethodException('Local authentication is not available for this application');
     }
-    const existingUser = await localStrategy.findUserByUsername(username);
 
-    if (existingUser) {
-      throw new UserAlreadyExistsException('User with this username already exists');
-    }
+    // Looked up and created under the username lock: a second registration, or
+    // a first OAuth sign-in, for the same username at the same moment waits,
+    // then finds this account instead of creating another.
+    await localStrategy.withUsernameLock(username, async () => {
+      const existingUser = await localStrategy.findUserByUsername(username);
 
-    // The account's first device, created BEFORE the user so its id can be
-    // written into `devices` by the same insert. Registering is how a client
-    // gets a device in the first place, so this is not optional and takes no
-    // input — a brand-new account has nothing to reuse and nothing to hint at.
-    //
-    // Device first, user second: if the user insert fails, the loose device is
-    // unreachable (nothing references it) rather than the account existing with
-    // a username taken and no device.
-    const userId = randomUUID();
-    const device = await createDevice(appId, userId);
+      // Registering an existing account with its password signs in to it, so a
+      // client retrying a registration whose response it never got — or one that
+      // failed after the account was written — isn't locked out by its own first
+      // attempt. The account as stored is what signs in: the user type and details
+      // sent are ignored. Any other password, or an account with none (created
+      // through an OAuth provider), means the username is taken.
+      if (existingUser) {
+        if (!await NexxusAuthStrategy.verifyPassword(password, existingUser.getData().password)) {
+          throw new UserAlreadyExistsException('User with this username already exists');
+        }
 
-    const user = await localStrategy.createUser({
-      id: userId,
-      deviceId: device.getValue().id,
-      username,
-      userType: req.body.userType,
-      password,
-      authProviders: ['local'],
-      details
+        await localStrategy.sendSessionForExistingUser(res, NexxusAuthStrategy.convertToApiUser(existingUser));
+
+        return;
+      }
+
+      // The account's first device. Registering is how a client gets a device in
+      // the first place, so this is not optional and takes no input — a brand-new
+      // account has nothing to reuse and nothing to hint at.
+      //
+      // Built before the user, so its id is written into `devices` by the same
+      // insert, and saved after it: the account is written first (see
+      // `NexxusApiDeviceRegistration.buildDevice`), so a failed insert leaves
+      // nothing behind.
+      const userId = randomUUID();
+      const device = NexxusApiDeviceRegistration.buildDevice(appId, userId);
+
+      const user = await localStrategy.createUser({
+        id: userId,
+        deviceId: device.getValue().id,
+        username,
+        userType: req.body.userType,
+        password,
+        authProviders: ['local'],
+        details
+      });
+
+      await device.save();
+
+      // Finish like a login rather than making the client immediately turn around
+      // and authenticate, so a freshly registered client is usable straight away.
+      // The device is already decided, so this only issues its tokens and writes
+      // the response — the id travels outward from here, and the client hints with
+      // it when it later authenticates.
+      await localStrategy.sendSession(res, NexxusAuthStrategy.convertToApiUser(user), device, { accountCreated: true });
     });
-
-    // Finish like a login rather than making the client immediately turn around
-    // and authenticate, so a freshly registered client is usable straight away.
-    // The device is already decided, so this only issues its tokens and writes
-    // the response — the id travels outward from here, and the client hints with
-    // it when it later authenticates.
-    await localStrategy.sendSession(res, NexxusAuthStrategy.convertToApiUser(user), device);
   }
 
   private async update(req: UserUpdateRequest, res: NexxusApiResponse): Promise<void> {
@@ -213,6 +239,12 @@ export default class UserRoute extends NexxusApiBaseRoute {
     let authProvidersPatch: NexxusJsonPatch | undefined;
 
     if (passwordUpdateIndex !== -1) {
+      // The value is hashed whole, so only `replace` makes sense: appending one
+      // hash to another would leave a password nothing signs in with.
+      if (patch.op !== 'replace' || typeof patch.value[passwordUpdateIndex] !== 'string' || !patch.value[passwordUpdateIndex]) {
+        throw new InvalidParametersException('"password" can only be replaced, with a non-empty string');
+      }
+
       patch.value[passwordUpdateIndex] = await NexxusAuthStrategy.hashPassword(patch.value[passwordUpdateIndex]);
 
       if (!req.user!.authProviders.includes('local')) {
@@ -229,30 +261,32 @@ export default class UserRoute extends NexxusApiBaseRoute {
       }
     }
 
-    const patches = [];
-    const jsonPatch = new NexxusJsonPatch({
-      ...req.body.patch,
-      metadata: {
-        appId,
-        id: req.user!.id,
-        type: 'user'
-      }
-    });
-    const updatedAtPatch = new NexxusJsonPatch({
-      op: 'replace',
-      path: ['updatedAt'],
-      value: [ new Date() ],
-      metadata: {
-        appId,
-        id: req.user!.id,
-        type: 'user'
-      }
-    });
-
-    patches.push(jsonPatch);
-    patches.push(updatedAtPatch);
-
+    // Constructed inside the `try`: the constructor rejects a malformed patch (an
+    // unknown `op`, `path` and `value` of different lengths), and that is a 400.
     try {
+      const patches = [];
+      const jsonPatch = new NexxusJsonPatch({
+        ...req.body.patch,
+        metadata: {
+          appId,
+          id: req.user!.id,
+          type: 'user'
+        }
+      });
+      const updatedAtPatch = new NexxusJsonPatch({
+        op: 'replace',
+        path: ['updatedAt'],
+        value: [ new Date() ],
+        metadata: {
+          appId,
+          id: req.user!.id,
+          type: 'user'
+        }
+      });
+
+      patches.push(jsonPatch);
+      patches.push(updatedAtPatch);
+
       const userSchema = NexxusUser.getModelSchema(app.getUserDetailSchema(user.userType));
 
       if (authProvidersPatch) {
@@ -263,7 +297,12 @@ export default class UserRoute extends NexxusApiBaseRoute {
       jsonPatch.validate(userSchema);
       updatedAtPatch.validate(userSchema);
 
-      await NexxusApi.database.updateItems(patches);
+      const stored = (await NexxusApi.database.updateItems(patches)).get(user.id);
+
+      // The token outlived the account.
+      if (!stored) {
+        throw new NotFoundException(`User "${user.id}" no longer exists`);
+      }
 
       res.status(200).json({ message: 'User updated successfully' });
     } catch (e) {

@@ -7,18 +7,21 @@ import {
   NexxusQueuePayload,
   NexxusBaseQueuePayload,
   FatalErrorException,
+  NexxusException,
 } from '@mayhem93/nexxus-core-lib';
 
 import { NexxusMessageCompressor, NexxusCompressionConfig } from './Compression';
+import { NexxusMessageQueuePublishException } from './Exceptions';
 
 /**
- * Shared shape every MQ adapter's config extends. Currently just adds the
- * optional `compression` block; future MQ-generic fields (message TTL,
- * retry policy, etc.) belong here too so every concrete adapter picks
- * them up.
+ * Shared shape every MQ adapter's config extends: the fields the base itself
+ * reads. Future MQ-generic fields (message TTL, retry policy, etc.) belong
+ * here too so every concrete adapter picks them up.
  */
 export type NexxusMessageQueueConfig = NexxusConfig & {
   compression?: NexxusCompressionConfig;
+  /** Seconds to wait for the broker to confirm a publish. Default 5. */
+  publishTimeout?: number;
 };
 
 export type NexxusMessageQueueAdapterEvents = {
@@ -32,6 +35,43 @@ export interface NexxusQueueMessage<TPayload = NexxusBaseQueuePayload> {
   payload: TPayload;
   metadata?: Record<string, any>;
 }
+
+/**
+ * What a consumer tells the adapter about the services its handler depends on.
+ * A message that fails while one of them is down is retried once it is back,
+ * and that failure doesn't count against the message's retries.
+ */
+export type NexxusConsumeOptions = {
+  /** Whether every service the handler depends on is up right now. */
+  isReady: () => boolean;
+  /** Resolves once they all are. */
+  waitUntilReady: () => Promise<void>;
+};
+
+/**
+ * One message as the broker delivered it, and the ways to settle it. The
+ * concrete adapter builds one per delivery; the base decides how it's settled.
+ */
+export type NexxusMessageDelivery = {
+  content: Buffer;
+  metadata: Record<string, any>;
+  /** Processed: the broker removes it. */
+  ack: () => void;
+  /**
+   * Given up on: the broker dead-letters it, or drops it from a queue with
+   * nowhere to dead-letter to.
+   */
+  deadLetter: () => void;
+  /** Not processed: the broker returns it to the queue, for any consumer. */
+  requeue: () => void;
+  /**
+   * False once the connection the message arrived on is gone. The broker has
+   * taken the message back by then, so it must not be settled.
+   */
+  isLive: () => boolean;
+};
+
+type NexxusDeliveryOutcome = 'ack' | 'deadLetter' | 'requeue';
 
 export type NexxusMessageQueueAdapterStats = {
   id: string | 'unknown';
@@ -87,15 +127,35 @@ export abstract class NexxusMessageQueueAdapter<
   protected consumingPaused: boolean = false;
 
   /**
-   * (queueName → callback) tuples for every active `consumeMessages`
-   * call. Retained across MQ reconnects so the state machine restores
-   * each consumer via `doConsume(queue, cb)` after `doConnect`
-   * succeeds. The callback type is erased to `any` here because
-   * TypeScript Maps can't hold heterogeneous parameterized callbacks;
-   * the public `consumeMessages` signature preserves the Q-generic for
-   * callers, and the erasure is invisible outside this class.
+   * (queueName → deliver) for every active `consumeMessages` call. `deliver`
+   * wraps the caller's handler with the retry / dead-letter policy, and is
+   * what the concrete consumer hands each message to. Retained across MQ
+   * reconnects so the state machine restores each consumer via
+   * `doConsume(queue, deliver)` after `doConnect` succeeds.
    */
-  protected consumers: Map<NexxusQueueName, (message: NexxusQueueMessage<any>) => Promise<void>> = new Map();
+  protected consumers: Map<NexxusQueueName, (delivery: NexxusMessageDelivery) => void> = new Map();
+
+  /**
+   * How long to wait before each retry of a failed message — one entry per
+   * retry. A message still failing after the last one is dead-lettered.
+   */
+  protected retryDelaysMs: ReadonlyArray<number> = [1000, 2000, 4000];
+
+  /** How long `publishMessage` waits for the broker's confirmation when `publishTimeout` isn't set. */
+  private static readonly DEFAULT_PUBLISH_TIMEOUT_SECONDS = 5;
+
+  /** True from `stopConsuming()` on: retries end, and deliveries are handed back. */
+  private stopping: boolean = false;
+  /** Waits `stopConsuming()` cuts short — retry delays and readiness waits. */
+  private stopWaiters: Set<() => void> = new Set();
+  /** Deliveries not settled yet, so `stopConsuming()` can wait for them. */
+  private inFlight: Set<Promise<void>> = new Set();
+
+  /** For consumers that pass no options: nothing to wait for, so every failure counts. */
+  private static readonly ALWAYS_READY: NexxusConsumeOptions = {
+    isReady: () => true,
+    waitUntilReady: () => Promise.resolve()
+  };
 
   constructor(services: INexxusBaseServices) {
     super(services.configManager.getConfig('message_queue') as T);
@@ -120,9 +180,8 @@ export abstract class NexxusMessageQueueAdapter<
 
   /**
    * Encode a typed payload for the wire. JSON → Buffer, then compress if
-   * enabled. Concrete adapters call this in their `publishMessage` in
-   * place of the raw `Buffer.from(JSON.stringify(...))` so compression
-   * policy stays in one place.
+   * enabled. `publishMessage` calls it before handing the bytes to
+   * `doPublish`, so compression policy stays in one place.
    */
   protected serializePayload<Q extends NexxusQueueName>(
     payload: NexxusQueuePayload<Q>,
@@ -254,11 +313,44 @@ export abstract class NexxusMessageQueueAdapter<
    */
   abstract getBootstrapper(options: Record<string, any>): NexxusMessageQueueBootstrapper;
 
-  abstract publishMessage<Q extends NexxusQueueName>(
+  /**
+   * Publish `message` to `queueName`. Resolves once the broker confirms it has
+   * the message; rejects with a `NexxusMessageQueuePublishException` when there
+   * is no connection, the broker refuses it, the connection goes first, or no
+   * confirmation arrives within `publishTimeout` seconds.
+   */
+  public async publishMessage<Q extends NexxusQueueName>(
     queueName: Q,
     message: NexxusQueuePayload<Q>,
     metadata?: Record<string, any>
-  ): Promise<void>;
+  ): Promise<void> {
+    const content = await this.serializePayload(message);
+    const timeoutSeconds = this.config.publishTimeout ?? NexxusMessageQueueAdapter.DEFAULT_PUBLISH_TIMEOUT_SECONDS;
+    let timer: NodeJS.Timeout | undefined;
+
+    try {
+      await Promise.race([
+        this.doPublish(queueName, content, metadata),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`not confirmed within ${timeoutSeconds} s`)), timeoutSeconds * 1000);
+        })
+      ]);
+    } catch (e) {
+      throw new NexxusMessageQueuePublishException(
+        `Publishing "${(message as NexxusBaseQueuePayload).event}" to "${queueName}" failed: ${(e as Error).message}`
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Hand an encoded message to the broker for `queueName`. Resolve once the
+   * broker confirms it has it; reject when the broker refuses it or the
+   * connection goes before it confirms, and at once when there's no connection
+   * to publish on. The base applies the timeout.
+   */
+  protected abstract doPublish(queueName: NexxusQueueName, content: Buffer, metadata?: Record<string, any>): Promise<void>;
 
   /**
    * Register a callback to consume messages from `queueName`. The
@@ -266,21 +358,75 @@ export abstract class NexxusMessageQueueAdapter<
    * and external `resumeConsuming()` calls can restore the consumer
    * without the caller re-registering.
    *
+   * A message is acked once `onMessage` resolves. When it rejects, the
+   * message is retried and eventually dead-lettered — see `processDelivery`.
+   * `options` lets a failure during an outage wait for the outage to end
+   * instead of using up the message's retries.
+   *
    * If already connected and not paused, dispatches immediately to
    * `doConsume`. Otherwise the tuple is stashed and picked up by the
    * next reconnect / resume transition.
    */
   public async consumeMessages<Q extends NexxusQueueName>(
     queueName: Q,
-    onMessage: (message: NexxusQueueMessage<NexxusQueuePayload<Q>>) => Promise<void>
+    onMessage: (message: NexxusQueueMessage<NexxusQueuePayload<Q>>) => Promise<void>,
+    options: NexxusConsumeOptions = NexxusMessageQueueAdapter.ALWAYS_READY
   ): Promise<void> {
-    const erased = onMessage as (message: NexxusQueueMessage<any>) => Promise<void>;
+    // Erased to `any`: the map holds every queue's handler, and the public
+    // signature above is what keeps each caller's payload type.
+    const handler = onMessage as (message: NexxusQueueMessage<any>) => Promise<void>;
+    const deliver = (delivery: NexxusMessageDelivery): void => {
+      const settled = this.handleDelivery(queueName, handler, options, delivery);
 
-    this.consumers.set(queueName, erased);
+      this.inFlight.add(settled);
+      void settled.then(() => { this.inFlight.delete(settled); });
+    };
+
+    this.consumers.set(queueName, deliver);
 
     if (this.connected && !this.consumingPaused) {
-      await this.doConsume(queueName, erased);
+      await this.doConsume(queueName, deliver);
     }
+  }
+
+  /**
+   * Stop consuming for good, ahead of shutdown. Every consumer is cancelled,
+   * messages waiting to be retried are handed back to their queue, and messages
+   * being processed get up to `timeoutMs` to finish. Whatever is still running
+   * after that is redelivered by the broker once the connection closes.
+   *
+   * Call it before closing the services the handlers depend on, so in-flight
+   * messages don't fail halfway. Safe to call more than once.
+   */
+  public async stopConsuming(timeoutMs: number = 10_000): Promise<void> {
+    if (!this.stopping) {
+      this.stopping = true;
+      // Keeps consumers from coming back on a reconnect or a resume.
+      this.consumingPaused = true;
+
+      for (const wake of this.stopWaiters) {
+        wake();
+      }
+
+      this.stopWaiters.clear();
+
+      if (this.connected) {
+        await this.doCancelAll();
+      }
+    }
+
+    if (this.inFlight.size === 0) {
+      return;
+    }
+
+    let timer: NodeJS.Timeout | undefined;
+
+    await Promise.race([
+      Promise.all(this.inFlight),
+      new Promise<void>(resolve => { timer = setTimeout(resolve, timeoutMs); })
+    ]);
+
+    clearTimeout(timer);
   }
 
   /**
@@ -307,10 +453,10 @@ export abstract class NexxusMessageQueueAdapter<
    * currently connected, iterates the stored consumers and re-registers
    * each via `doConsume`. If disconnected, only the flag is cleared —
    * the next reconnect's auto-restore now sees `!consumingPaused` and
-   * does the actual work.
+   * does the actual work. A no-op after `stopConsuming()`.
    */
   public async resumeConsuming(): Promise<void> {
-    if (!this.consumingPaused) {
+    if (!this.consumingPaused || this.stopping) {
       return;
     }
 
@@ -330,10 +476,14 @@ export abstract class NexxusMessageQueueAdapter<
    * `tryOnce`'s auto-restore branch (MQ reconnect). The concrete tracks
    * broker-specific state — e.g. RabbitMQ's per-consumer tag — locally
    * so it can cancel later via `doCancelAll`.
+   *
+   * Each message goes to `deliver` as a `NexxusMessageDelivery`: the raw
+   * content, and how to ack, dead-letter and requeue it on this broker. The
+   * base decodes, processes and settles it — the concrete never acks itself.
    */
   protected abstract doConsume(
     queueName: NexxusQueueName,
-    onMessage: (message: NexxusQueueMessage<any>) => Promise<void>
+    deliver: (delivery: NexxusMessageDelivery) => void
   ): Promise<void>;
 
   /**
@@ -377,6 +527,179 @@ export abstract class NexxusMessageQueueAdapter<
    * explicit; for brokers without auto-delete semantics it's mandatory.
    */
   abstract deleteQueue(name: string): Promise<void>;
+
+  // ---- Delivery handling ----
+
+  /**
+   * Process one delivery and settle it. Never rejects: it runs from the broker
+   * client's event handler, where a rejection would end the process.
+   */
+  private async handleDelivery(
+    queueName: NexxusQueueName,
+    handler: (message: NexxusQueueMessage<any>) => Promise<void>,
+    options: NexxusConsumeOptions,
+    delivery: NexxusMessageDelivery
+  ): Promise<void> {
+    let outcome: NexxusDeliveryOutcome;
+
+    try {
+      // A message that arrives after `stopConsuming()` — the broker can still
+      // be sending while the cancel is in flight — goes straight back.
+      outcome = this.stopping ? 'requeue' : await this.processDelivery(queueName, handler, options, delivery);
+    } catch (err) {
+      // `processDelivery` handles the handler's failures itself; this is the
+      // backstop for anything else.
+      NexxusMessageQueueAdapter.logger.error(
+        `Unexpected error processing a message from queue "${queueName}": ${NexxusMessageQueueAdapter.describeError(err)}`,
+        NexxusMessageQueueAdapter.loggerLabel
+      );
+      outcome = 'requeue';
+    }
+
+    if (!delivery.isLive()) {
+      return;
+    }
+
+    try {
+      delivery[outcome]();
+    } catch (err) {
+      NexxusMessageQueueAdapter.logger.warn(
+        `Could not settle a message from queue "${queueName}": ${NexxusMessageQueueAdapter.describeError(err)}`,
+        NexxusMessageQueueAdapter.loggerLabel
+      );
+    }
+  }
+
+  /**
+   * Run the handler until the message is done with, and say how to settle it:
+   *
+   *   - the handler resolves → ack
+   *   - it fails with a `terminal` NexxusException → dead-letter, no retries
+   *   - it fails while a service is down → wait for the service, retry, and
+   *     don't count the failure: an outage isn't the message's fault
+   *   - it fails otherwise → retry after each of `retryDelaysMs`, then
+   *     dead-letter
+   *   - consumption stops, or the delivery's connection goes away → requeue
+   *
+   * A payload that can't be decoded never will be, so it's dead-lettered too.
+   */
+  private async processDelivery(
+    queueName: NexxusQueueName,
+    handler: (message: NexxusQueueMessage<any>) => Promise<void>,
+    options: NexxusConsumeOptions,
+    delivery: NexxusMessageDelivery
+  ): Promise<NexxusDeliveryOutcome> {
+    const logger = NexxusMessageQueueAdapter.logger;
+    const label = NexxusMessageQueueAdapter.loggerLabel;
+    let message: NexxusQueueMessage<any>;
+
+    try {
+      message = { payload: await this.deserializePayload(delivery.content), metadata: delivery.metadata };
+    } catch (err) {
+      logger.error(
+        `Giving up on a message from queue "${queueName}": it could not be decoded (${NexxusMessageQueueAdapter.describeError(err)})`,
+        label
+      );
+
+      return 'deadLetter';
+    }
+
+    const event = (message.payload as { event?: unknown } | null)?.event;
+    const what = `message${typeof event === 'string' ? ` "${event}"` : ''} from queue "${queueName}"`;
+    let retries = 0;
+    // Stays undefined for as long as the message is to be tried again.
+    let outcome: NexxusDeliveryOutcome | undefined;
+
+    do {
+      try {
+        await handler(message);
+
+        outcome = 'ack';
+      } catch (err) {
+        const reason = NexxusMessageQueueAdapter.describeError(err);
+
+        if (this.stopping || !delivery.isLive()) {
+          outcome = 'requeue';
+        } else if (err instanceof NexxusException && err.terminal) {
+          logger.error(`Giving up on ${what}: ${reason}`, label);
+          outcome = 'deadLetter';
+        } else if (!options.isReady()) {
+          logger.warn(`Retrying ${what} once every service is back; it failed while one was down: ${reason}`, label);
+
+          if (!await this.whenReady(options) || !delivery.isLive()) {
+            outcome = 'requeue';
+          }
+        } else if (retries === this.retryDelaysMs.length) {
+          logger.error(`Giving up on ${what} after ${retries} retries: ${reason}`, label);
+          outcome = 'deadLetter';
+        } else {
+          const wait = this.retryDelaysMs[retries]!;
+
+          retries += 1;
+          logger.warn(`Retrying ${what} in ${wait} ms (retry ${retries} of ${this.retryDelaysMs.length}): ${reason}`, label);
+
+          if (!await this.delay(wait) || !delivery.isLive()) {
+            outcome = 'requeue';
+          }
+        }
+      }
+    } while (outcome === undefined);
+
+    return outcome;
+  }
+
+  /**
+   * Wait `ms`, unless consumption stops first. Resolves `true` when the whole
+   * wait elapsed, `false` when it was cut short.
+   */
+  private delay(ms: number): Promise<boolean> {
+    return new Promise(resolve => {
+      if (this.stopping) {
+        resolve(false);
+
+        return;
+      }
+
+      let timer: NodeJS.Timeout | undefined;
+      const wake = (): void => {
+        clearTimeout(timer);
+        resolve(false);
+      };
+
+      timer = setTimeout(() => {
+        this.stopWaiters.delete(wake);
+        resolve(true);
+      }, ms);
+      this.stopWaiters.add(wake);
+    });
+  }
+
+  /**
+   * Wait until `options` reports every service up, unless consumption stops
+   * first. Resolves like `delay`.
+   */
+  private whenReady(options: NexxusConsumeOptions): Promise<boolean> {
+    return new Promise(resolve => {
+      if (this.stopping) {
+        resolve(false);
+
+        return;
+      }
+
+      const wake = (): void => resolve(false);
+      const ready = (): void => {
+        this.stopWaiters.delete(wake);
+        resolve(true);
+      };
+
+      this.stopWaiters.add(wake);
+      void options.waitUntilReady().then(ready, ready);
+    });
+  }
+
+  private static describeError(err: unknown): string {
+    return err instanceof Error ? err.message : String(err);
+  }
 
   // ---- State-machine internals ----
 

@@ -12,7 +12,7 @@ import {
   RequiresDeviceMiddleware
 } from '../middlewares';
 import { InvalidParametersException, NotFoundException } from '../Exceptions';
-import { resolveDevice } from '../DeviceRegistration';
+import { NexxusApiDeviceRegistration } from '../DeviceRegistration';
 import { NexxusApiSession } from '../Session';
 
 import { NexxusDevice, NexxusDeviceProps, RedisKeyNotFoundException } from '@mayhem93/nexxus-redis';
@@ -80,7 +80,12 @@ export default class DeviceRoute extends NexxusApiBaseRoute {
     // Same resolver the auth responses use, so creating a device and linking it
     // to its owner is defined once. No id hint here: this endpoint is the
     // explicit "register another device" path, so it always creates.
-    const nxxDevice = await resolveDevice(app, userId, { name: req.body.name });
+    const nxxDevice = await NexxusApiDeviceRegistration.resolveDevice(app, userId, { name: req.body.name });
+
+    // The token outlived the account.
+    if (!nxxDevice) {
+      throw new NotFoundException(`User "${userId}" no longer exists`);
+    }
 
     // A session for the NEW device. Without it the caller has a device id it
     // can't use — every device-scoped route reads the device from the token, so
@@ -114,22 +119,29 @@ export default class DeviceRoute extends NexxusApiBaseRoute {
     // Non-null: RequiresUserMiddleware is wired on this route.
     const userId = req.user!.id;
 
-    const appUser = await NexxusApi.database.getItems({ ids: [ userId ], type: 'user', appId });
-    const devices = appUser[0]?.getData().devices || [];
+    const appUser = (await NexxusApi.database.getItems({ ids: [ userId ], type: 'user', appId })).get(userId);
+    const devices: string[] = appUser?.getData().devices || [];
     // `allSettled`, not `all`: the id list lives on the user document while the
-    // records themselves live in Redis, so the two drift — a reaped device
-    // leaves an id behind. Failing the whole listing over one dangling id would
-    // make a user's device list unreadable until someone pruned it by hand.
-    const deviceResults = await Promise.allSettled(devices.map((deviceId: string) => NexxusDevice.get(deviceId)));
+    // records themselves live in Redis, so an id can name nothing — a device
+    // whose save failed after its id was recorded. Failing the whole listing
+    // over one such id would make a user's device list unreadable.
+    const deviceResults = await Promise.allSettled(devices.map(deviceId => NexxusDevice.get(deviceId)));
     const deviceData = deviceResults
       .filter((result): result is PromiseFulfilledResult<NexxusDevice> => result.status === 'fulfilled')
       .map(result => result.value.getValue());
+    const unreadIds = devices.filter((_, i) => deviceResults[i]!.status === 'rejected');
 
-    if (deviceData.length !== devices.length) {
+    if (unreadIds.length > 0) {
       NexxusApi.logger.warn(
         `User "${userId}" lists ${devices.length} devices but only ${deviceData.length} could be read`,
         'DeviceRoute'
       );
+
+      // Non-null: the ids came from it. Best effort — the list is answered
+      // whether or not the ids naming nothing could be removed.
+      await NexxusApiDeviceRegistration.unlinkMissingDevices(appUser!, unreadIds).catch((e: Error) => {
+        NexxusApi.logger.warn(`Could not remove missing devices from user "${userId}": ${e.message}`, 'DeviceRoute');
+      });
     }
 
     res.status(200).send({ devices: deviceData });

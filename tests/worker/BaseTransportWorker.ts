@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { NexxusBaseTransportWorker, NexxusBaseWorker } from '@mayhem93/nexxus-worker-lib';
+import { NexxusBaseTransportWorker, NexxusBaseWorker, NexxusWorkerUnsupportedEventException } from '@mayhem93/nexxus-worker-lib';
 import { makeHarness, logger, mqState, resetWorkerStatics, type WorkerHarness } from './harness';
 
 class FakeTransport extends NexxusBaseTransportWorker<any> {
@@ -91,13 +91,15 @@ describe('NexxusBaseTransportWorker.processMessage', () => {
     expect(logger.has('warning', /device_logout for 1 device\(s\), but this transport holds no connections/)).toBe(true);
   });
 
-  it('warns and drops an unknown event type', async () => {
+  it('fails an unknown event type with a terminal error, so it is dead-lettered', async () => {
     const w = worker();
+    const err = await w.any().processMessage({ payload: { event: 'something_else' } })
+      .catch((e: unknown) => e) as NexxusWorkerUnsupportedEventException;
 
-    await w.any().processMessage({ payload: { event: 'something_else' } });
-
+    expect(err).toBeInstanceOf(NexxusWorkerUnsupportedEventException);
+    expect(err.terminal).toBe(true);
+    expect(err.message).toBe('Transports don\'t handle "something_else" events');
     expect(w.sent).toHaveLength(0);
-    expect(logger.has('warning', /Unknown event type: something_else/)).toBe(true);
   });
 
   it('warns and drops a device_message with no device ids', async () => {

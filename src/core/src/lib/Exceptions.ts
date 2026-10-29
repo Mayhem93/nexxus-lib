@@ -9,11 +9,19 @@ export enum NexxusExceptions {
   INVALID_USER_MODEL = "InvalidUserModelException",
   TOKEN_EXPIRED = "TokenExpiredException",
   INVALID_TOKEN = "InvalidTokenException",
-  SESSION_ENDED = "SessionEndedException"
+  SESSION_ENDED = "SessionEndedException",
+  UNKNOWN_APPLICATION = "UnknownApplicationException",
+  UNKNOWN_MODEL_TYPE = "UnknownModelTypeException"
 };
 
 export class NexxusException extends Error {
   public readonly subcode?: string;
+  /**
+   * Whether a queue message whose processing failed with this error would fail
+   * the same way on every retry. The message queue gives up on such a message
+   * at once instead of retrying it. Subclasses that always mean that set it.
+   */
+  public readonly terminal: boolean = false;
 
   constructor(type: string, message: string, subcode?: string) {
     super(message);
@@ -55,26 +63,52 @@ export class InvalidConfigException extends NexxusException {
 }
 
 export class InvalidJsonPatchException extends NexxusException {
+  public readonly terminal = true;
+
   constructor(message: string) {
     super(NexxusExceptions.INVALID_JSON_PATCH, message);
   }
 }
 
 export class InvalidQueryFilterException extends NexxusException {
+  public readonly terminal = true;
+
   constructor(message: string) {
     super(NexxusExceptions.INVALID_QUERY_FILTER, message);
   }
 }
 
 export class InvalidSchemaDataException extends NexxusException {
+  public readonly terminal = true;
+
   constructor(message: string) {
     super(NexxusExceptions.INVALID_SCHEMA_DATA, message);
   }
 }
 
 export class InvalidUserModelException extends NexxusException {
+  public readonly terminal = true;
+
   constructor(message: string) {
     super(NexxusExceptions.INVALID_USER_MODEL, message);
+  }
+}
+
+/** Data names an application this process hasn't loaded. */
+export class UnknownApplicationException extends NexxusException {
+  public readonly terminal = true;
+
+  constructor(message: string) {
+    super(NexxusExceptions.UNKNOWN_APPLICATION, message);
+  }
+}
+
+/** Data names a model type its application doesn't declare. */
+export class UnknownModelTypeException extends NexxusException {
+  public readonly terminal = true;
+
+  constructor(message: string) {
+    super(NexxusExceptions.UNKNOWN_MODEL_TYPE, message);
   }
 }
 

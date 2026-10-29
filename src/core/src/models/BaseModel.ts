@@ -3,6 +3,7 @@ import type { NexxusUser, INexxusUser } from './User';
 import type { NexxusSetting, INexxusSetting } from './Setting';
 import type { NexxusAclRole, INexxusAclRole } from './AclRole';
 import type { NexxusAppModel, INexxusAppModel } from './AppModel';
+import { InvalidSchemaDataException } from '../lib/Exceptions';
 
 import { randomUUID } from 'node:crypto'
 
@@ -32,7 +33,7 @@ export abstract class NexxusBaseModel<T extends INexxusBaseModel = INexxusBaseMo
     this.data = data;
 
     if (!this.data.type) {
-      throw new Error('Model \'type\' is required');
+      throw new InvalidSchemaDataException('Model \'type\' is required');
     }
 
     const now = Math.floor(Date.now()/1000);

@@ -105,9 +105,9 @@ export class NexxusApiAcl {
       return cached;
     }
 
-    const items = await NexxusApi.database.getItems({ ids: [id], type: model, appId });
+    const item = (await NexxusApi.database.getItems({ ids: [id], type: model, appId })).get(id);
 
-    return items.length > 0 && items[0] ? items[0].getData() as Record<string, unknown> : null;
+    return item ? item.getData() as Record<string, unknown> : null;
   }
 
   /**

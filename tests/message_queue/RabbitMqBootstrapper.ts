@@ -71,31 +71,92 @@ afterEach(() => {
 
 const OPTIONS = { runtimeUser: 'runtime', runtimePassword: 'runtime-pw' };
 
-const makeBootstrapper = (host: string, port: number) =>
+/** A bootstrapper whose adapter config is as validation leaves it, schema defaults included. */
+const makeBootstrapper = (host: string, port: number, over: Record<string, unknown> = {}) =>
   new NexxusRabbitMqBootstrapper(OPTIONS, {
     host,
     managementPort: port,
     user: 'admin',
     password: 'admin-pw',
+    deadLetterRetention: 259200,
+    deadLetterMaxLength: 100,
+    ...over,
   });
 
 describe('NexxusRabbitMqBootstrapper.bootstrapDeployment', () => {
-  it('declares vhost, user, permissions, exchange, and per-stage queues in order', async () => {
+  it('declares vhost, user, permissions, exchanges, per-stage queues and the dead-letter policy, in order', async () => {
     const srv = await startMgmtServer();
 
     servers.push(srv);
 
     await makeBootstrapper(srv.host, srv.port).bootstrapDeployment(['writer', 'aggregator']);
 
-    expect(srv.puts.map(p => p.url)).toEqual([
-      '/api/vhosts/%2Fnexxus',
-      '/api/users/runtime',
-      '/api/permissions/%2Fnexxus/runtime',
-      '/api/exchanges/%2Fnexxus/systemMessages',
-      '/api/queues/%2Fnexxus/writer',
-      '/api/queues/%2Fnexxus/aggregator',
+    expect(srv.puts.map(p => `${p.method} ${p.url}`)).toEqual([
+      'PUT /api/vhosts/%2Fnexxus',
+      'PUT /api/users/runtime',
+      'PUT /api/permissions/%2Fnexxus/runtime',
+      'PUT /api/exchanges/%2Fnexxus/systemMessages',
+      'PUT /api/exchanges/%2Fnexxus/deadLetters',
+      'PUT /api/queues/%2Fnexxus/writer',
+      'PUT /api/queues/%2Fnexxus/writer.dlq',
+      'POST /api/bindings/%2Fnexxus/e/deadLetters/q/writer.dlq',
+      'PUT /api/queues/%2Fnexxus/aggregator',
+      'PUT /api/queues/%2Fnexxus/aggregator.dlq',
+      'POST /api/bindings/%2Fnexxus/e/deadLetters/q/aggregator.dlq',
+      'PUT /api/policies/%2Fnexxus/nexxus-dead-letter',
+      'PUT /api/policies/%2Fnexxus/nexxus-dead-letter-retention',
     ]);
-    expect(srv.puts.every(p => p.method === 'PUT')).toBe(true);
+  });
+
+  it('dead-letters each stage into a queue of its own, through a policy', async () => {
+    const srv = await startMgmtServer();
+
+    servers.push(srv);
+
+    await makeBootstrapper(srv.host, srv.port).bootstrapDeployment(['writer', 'transport-manager', 'websockets-transport']);
+
+    const byCall = Object.fromEntries(srv.puts.map(p => [`${p.method} ${p.url}`, p.body]));
+
+    expect(byCall['PUT /api/exchanges/%2Fnexxus/deadLetters']).toEqual({ type: 'direct', durable: true });
+    expect(byCall['PUT /api/queues/%2Fnexxus/writer.dlq']).toEqual({ durable: true, arguments: { 'x-queue-type': 'quorum' } });
+    // A dead-lettered message keeps its routing key: the name of the queue it came from.
+    expect(byCall['POST /api/bindings/%2Fnexxus/e/deadLetters/q/writer.dlq']).toEqual({ routing_key: 'writer' });
+    // Only the stage queues — never the dead-letter queues, nor the per-slot ones.
+    expect(byCall['PUT /api/policies/%2Fnexxus/nexxus-dead-letter']).toEqual({
+      pattern: '^(writer|transport-manager)$',
+      definition: { 'dead-letter-exchange': 'deadLetters' },
+      'apply-to': 'queues',
+    });
+    // The dead-letter queues get a policy of their own, bounding how long and how many.
+    expect(byCall['PUT /api/policies/%2Fnexxus/nexxus-dead-letter-retention']).toEqual({
+      pattern: '^(writer\\.dlq|transport-manager\\.dlq)$',
+      definition: { 'message-ttl': 259200000, 'max-length': 100 },
+      'apply-to': 'queues',
+    });
+  });
+
+  it('bounds the dead-letter queues by the configured retention and length', async () => {
+    const srv = await startMgmtServer();
+
+    servers.push(srv);
+
+    await makeBootstrapper(srv.host, srv.port, { deadLetterRetention: 864000, deadLetterMaxLength: 250 })
+      .bootstrapDeployment(['writer']);
+
+    const retention = srv.puts.find(p => p.url === '/api/policies/%2Fnexxus/nexxus-dead-letter-retention');
+
+    // RabbitMQ takes the TTL in milliseconds; 864000 seconds is 10 days.
+    expect(retention?.body).toMatchObject({ definition: { 'message-ttl': 864000000, 'max-length': 250 } });
+  });
+
+  it('declares no policy when no stage has a queue of its own', async () => {
+    const srv = await startMgmtServer();
+
+    servers.push(srv);
+
+    await makeBootstrapper(srv.host, srv.port).bootstrapDeployment(['websockets-transport']);
+
+    expect(srv.puts.some(p => p.url?.startsWith('/api/policies/'))).toBe(false);
   });
 
   it('sends Basic auth built from the admin credentials', async () => {
@@ -134,7 +195,8 @@ describe('NexxusRabbitMqBootstrapper.bootstrapDeployment', () => {
 
     const queueUrls = srv.puts.filter(p => p.url?.startsWith('/api/queues/')).map(p => p.url);
 
-    expect(queueUrls).toEqual(['/api/queues/%2Fnexxus/writer']); // no dynamic-stage queues
+    // No dynamic-stage queues, and no dead-letter queues for them either.
+    expect(queueUrls).toEqual(['/api/queues/%2Fnexxus/writer', '/api/queues/%2Fnexxus/writer.dlq']);
   });
 
   it('throws with the broker error detail on a non-2xx response', async () => {

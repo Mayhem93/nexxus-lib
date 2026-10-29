@@ -223,11 +223,9 @@ export class NexxusWsClient extends EventEmitter<ClientEventMap> {
           NexxusBaseWorker.logger.warn(`Unknown client event: ${(message as NexxusWsBaseEvent).event}`, 'NexxusWsClient');
       }
     } catch (e : unknown) {
-      let err = e as Error;
-
-      if (!(e instanceof NexxusWsException)) {
-        err = new NexxusWsInternalServerException(`An unexpected error occurred while processing the message: ${e instanceof Error ? e.message : String(e)}`);
-      }
+      const err = e instanceof NexxusWsException
+        ? e
+        : new NexxusWsInternalServerException(`An unexpected error occurred while processing the message: ${e instanceof Error ? e.message : String(e)}`);
 
       NexxusBaseWorker.logger.error(`Error processing message from client "${this.id}"`, { error: err.message }, 'NexxusWsClient');
       this.sendError(err);

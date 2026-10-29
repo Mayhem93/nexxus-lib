@@ -2,7 +2,7 @@ openapi: 3.1.1
 
 info:
   title: Nexxus API
-  version: 0.0.11
+  version: 0.0.12
   summary: HTTP surface of a Nexxus deployment.
   description: |
     Nexxus is a config-driven, real-time backend-as-a-service. This document
@@ -237,6 +237,8 @@ paths:
                         const: UserAuthenticationFailedException
         '404':
           $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/Unavailable'
 
   /auth/refresh:
     post:
@@ -348,12 +350,15 @@ paths:
         call is needed. Requires an application with authentication and a
         configured `local` strategy.
 
-        Always creates the account's first device and binds the returned token to
-        it. There is no `device` parameter: a new account owns none, so there is
-        nothing to reuse or name yet. Rename it afterwards with `PUT /device`.
+        If the username already exists and the password is that account's, it
+        signs in to that account instead: the response has
+        `accountCreated: false`, and the user type and details sent are ignored.
+        Any other password, or an account that has none, is a `409`.
 
-        Reusing a device applies only when authenticating an account that already
-        exists — see `POST /auth/{strategy}`.
+        Always creates a new device and binds the returned token to it, including
+        when it signs in. There is no `device` parameter; to reuse a device, sign
+        in with `POST /auth/{strategy}`. Rename the device afterwards with
+        `PUT /device`.
 
         Any property beyond the ones listed is stored as a user **detail** and
         must be declared in the application's `auth.userDetailSchema`. An
@@ -391,7 +396,9 @@ paths:
         '404':
           $ref: '#/components/responses/AppNotFound'
         '409':
-          description: That username already exists on this application.
+          description: |
+            The username exists on this application, and the password is not
+            that account's.
           content:
             application/json:
               schema:
@@ -449,11 +456,13 @@ paths:
         Applies a patch to the account the token names. There is no user
         parameter.
 
-        Refused paths: `userType`, `authProviders`, `devices`, `createdAt`,
-        `updatedAt`, and anything under a `details.$…` key (see `UserDetails`).
+        Refused paths: `username`, `userType`, `authProviders`, `devices`,
+        `createdAt`, `updatedAt`, and anything under a `details.$…` key (see
+        `UserDetails`).
 
         Patching `password` hashes the value server-side and, on an account that
-        had none, adds `local` to `authProviders`.
+        had none, adds `local` to `authProviders`. A password can only be set
+        with `replace`, to a non-empty string; anything else is a `400`.
       parameters:
         - $ref: '#/components/parameters/AppId'
       requestBody:
@@ -481,7 +490,18 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
-          $ref: '#/components/responses/AppNotFound'
+          description: |
+            No application matches the `nxx-app-id` header, or the user the
+            token names no longer exists.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Error'
+                  - type: object
+                    properties:
+                      error:
+                        enum: [ ApplicationNotFoundException, NotFoundException ]
         '500':
           $ref: '#/components/responses/ServerError'
 
@@ -536,7 +556,18 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
-          $ref: '#/components/responses/AppNotFound'
+          description: |
+            No application matches the `nxx-app-id` header, or the user the
+            token names no longer exists.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Error'
+                  - type: object
+                    properties:
+                      error:
+                        enum: [ ApplicationNotFoundException, NotFoundException ]
         '503':
           $ref: '#/components/responses/Unavailable'
 
@@ -678,6 +709,8 @@ paths:
           $ref: '#/components/responses/ModelNotFound'
         '500':
           $ref: '#/components/responses/ServerError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
 
   /model/count:
     post:
@@ -872,6 +905,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/ModelNotFound'
+        '503':
+          $ref: '#/components/responses/Unavailable'
     delete:
       tags: [ Models ]
       summary: Delete one instance
@@ -903,6 +938,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/ModelNotFound'
+        '503':
+          $ref: '#/components/responses/Unavailable'
 
   /subscription:
     post:
@@ -1256,6 +1293,18 @@ components:
         op:
           type: string
           enum: [ replace, append, prepend, incr, decr, remove ]
+          description: |
+            - `replace` sets the field.
+            - `append` and `prepend` add an element to the end or the start of
+              an array, or text to the end or the start of a string.
+            - `incr` and `decr` add to or subtract from a number or a date. A
+              field with no value counts as `0`.
+            - `remove` takes elements out of an array. Each value is either
+              `{ "v": <element> }`, which removes every element equal to it (on
+              arrays of strings, numbers, booleans or dates), or
+              `{ "i": <index> }`, which removes the element at that zero-based
+              index. An index past the end removes nothing. Several removals in
+              one patch apply in order.
         path:
           type: array
           items:
@@ -1273,11 +1322,15 @@ components:
             description: |
               Any JSON value the target field accepts. Dates may be sent as a
               UNIX timestamp in seconds or as a parseable date string; both are
-              stored as seconds.
+              stored as seconds. For `remove`, an object as described under
+              `op`.
       examples:
         - op: replace
           path: [ details.age, details.nickname ]
           value: [ 31, ann ]
+        - op: remove
+          path: [ tags, tags ]
+          value: [ { v: archived }, { i: 0 } ]
 
     FilterQuery:
       type: object
@@ -1329,6 +1382,11 @@ components:
                     type: string
                   username:
                     type: string
+              accountCreated:
+                type: boolean
+                description: |
+                  Whether this request created the account. `false` when it
+                  signed in to an account that already existed.
 
     WriteAccepted:
       description: |
@@ -1455,7 +1513,9 @@ components:
 
     Unavailable:
       description: |
-        An upstream service is currently disconnected. Retry.
+        Retry. An upstream service is disconnected, the message queue didn't
+        confirm a write it was handed, or — on registration and OAuth sign-in —
+        another request for the same username is still in progress.
       content:
         application/json:
           schema:

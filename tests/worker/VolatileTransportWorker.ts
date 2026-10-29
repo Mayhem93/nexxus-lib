@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { NexxusVolatileTransportWorker, NexxusBaseWorker } from '@mayhem93/nexxus-worker-lib';
 import { NexxusDevice } from '@mayhem93/nexxus-redis';
 import { NexxusApplication, NexxusToken, InvalidTokenException, SessionEndedException } from '@mayhem93/nexxus-core-lib';
@@ -119,6 +119,19 @@ describe('NexxusVolatileTransportWorker.close', () => {
     await w.close();
 
     expect(mqState.deletedQueues).toEqual(['websockets-transport_0']);
+  });
+
+  it('stops consuming before it deletes the slot queue', async () => {
+    const w = await build();
+
+    await w.any().beforeConsume();
+
+    const stop = vi.spyOn(h.mq, 'stopConsuming');
+    const deleteQueue = vi.spyOn(h.mq, 'deleteQueue');
+
+    await w.close();
+
+    expect(stop.mock.invocationCallOrder[0]).toBeLessThan(deleteQueue.mock.invocationCallOrder[0]!);
   });
 
   it('logs an error but still closes when the queue delete fails', async () => {

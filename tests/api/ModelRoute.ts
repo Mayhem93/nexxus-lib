@@ -24,6 +24,7 @@ const SCHEMA = {
       note:     { type: 'string', required: false, filterable: true },
       distance: { type: 'int', required: false, filterable: true },
       owner:    { type: 'string', required: false, filterable: true, acl: true },
+      tags:     { type: 'array', arrayType: 'string', required: false },
     },
   },
   pings:   { transient: true, fields: { note: { type: 'string', required: false } } },
@@ -94,6 +95,16 @@ describe('POST /model — create', () => {
       queue: 'writer',
       message: { event: 'model_created', data: { type: 'runs', note: 'first run', distance: 5, appId: 'app1' } },
     });
+  });
+
+  it('answers 503 when the broker does not confirm the write, rather than a 202', async () => {
+    await serve(makeApp({ schema: SCHEMA }));
+    mqState.publishImpl = () => { throw new Error('message nacked'); };
+
+    const res = await send('POST', '/model', { type: 'runs', note: 'first run' });
+
+    expect(res.status).toBe(503);
+    expect(res.body.error).toBe('ServiceUnavailableException');
   });
 
   it('stamps the creating user as the owner', async () => {
@@ -245,6 +256,17 @@ describe('PUT /model/:id — update', () => {
     });
   });
 
+  it('publishes a remove patch with its values as sent', async () => {
+    await serve(makeApp({ schema: SCHEMA }));
+
+    const res = await patch({ type: 'runs', patch: { op: 'remove', path: [ 'tags', 'tags' ], value: [ { v: 'old' }, { i: 0 } ] } });
+
+    expect(res.status).toBe(202);
+    expect(mqState.published[0]!.message.data[0]).toMatchObject({
+      op: 'remove', path: [ 'tags', 'tags' ], value: [ { v: 'old' }, { i: 0 } ],
+    });
+  });
+
   it('rejects a patch the model schema does not allow', async () => {
     await serve(makeApp({ schema: SCHEMA }));
 
@@ -342,13 +364,14 @@ describe('DELETE /model/:id', () => {
     expect((await send('DELETE', '/model/m1', { type: 'pings' })).status).toBe(400);
   });
 
-  it('records who asked for the delete', async () => {
+  it('leaves the owner to the writer: a delete names no user', async () => {
     await serve(makeAuthApp({ schema: SCHEMA }));
 
     await send('DELETE', '/model/m1', { type: 'runs' }, as());
 
-    // The writer needs the requester to fan the deletion out correctly.
-    expect(mqState.published[0]!.message.data.userId).toBe('u1');
+    // Whoever asks for a delete needn't own the record. The writer reads the
+    // stored owner back and puts it on the event subscribers get.
+    expect(mqState.published[0]!.message.data).not.toHaveProperty('userId');
   });
 
   it('403s an object owned by someone else', async () => {

@@ -1,10 +1,14 @@
 import { NexxusApi, NexxusApiUser } from '../Api';
 
-import type { NexxusDevice } from '@mayhem93/nexxus-redis';
-import { resolveDevice, createDeviceForUser, type NexxusDeviceHint } from '../DeviceRegistration';
+import { NexxusUsernameLock, type NexxusDevice } from '@mayhem93/nexxus-redis';
+import { NexxusApiDeviceRegistration, type NexxusDeviceHint } from '../DeviceRegistration';
 import { NexxusApiSession } from '../Session';
 
-import { InvalidParametersException } from '../Exceptions';
+import {
+  InvalidParametersException,
+  ServiceUnavailableException,
+  UserAuthenticationFailedException
+} from '../Exceptions';
 
 import {
   NexxusUser,
@@ -293,13 +297,23 @@ export default abstract class NexxusAuthStrategy<T extends NexxusBaseAuthStrateg
 
   /**
    * Write the session response for a device the caller has already decided on:
-   * issue its tokens and hand back tokens, device and user.
+   * issue its tokens and hand back tokens, device and user, and whether this
+   * request created the account.
+   *
+   * `accountCreated` is the only way a client can tell a registration from a
+   * sign-in: `/user/register` signs in to an account that already exists when
+   * given its password, and a first OAuth sign-in creates one.
    *
    * Takes a device, not a hint, so a caller that has no business reusing one
    * cannot express the idea. `/user/register` uses this directly — it creates
    * the account's first device itself, alongside the user.
    */
-  public async sendSession(res: Response, user: NexxusApiUser, device: NexxusDevice): Promise<void> {
+  public async sendSession(
+    res: Response,
+    user: NexxusApiUser,
+    device: NexxusDevice,
+    { accountCreated }: { accountCreated: boolean }
+  ): Promise<void> {
     const { token, refreshToken } = await NexxusApiSession.issue(this.app, device, user);
     const { id, name } = device.getValue();
 
@@ -310,7 +324,8 @@ export default abstract class NexxusAuthStrategy<T extends NexxusBaseAuthStrateg
       user: {
         id: user.id,
         username: user.username
-      }
+      },
+      accountCreated
     });
   }
 
@@ -331,7 +346,14 @@ export default abstract class NexxusAuthStrategy<T extends NexxusBaseAuthStrateg
     user: NexxusApiUser,
     deviceHint?: NexxusDeviceHint
   ): Promise<void> {
-    await this.sendSession(res, user, await resolveDevice(this.app, user.id, deviceHint));
+    const device = await NexxusApiDeviceRegistration.resolveDevice(this.app, user.id, deviceHint);
+
+    // Signed in a moment ago, gone by the time its device was recorded.
+    if (!device) {
+      throw new UserAuthenticationFailedException(`User "${user.id}" no longer exists`);
+    }
+
+    await this.sendSession(res, user, device, { accountCreated: false });
   }
 
   /**
@@ -343,7 +365,14 @@ export default abstract class NexxusAuthStrategy<T extends NexxusBaseAuthStrateg
    * carry the question.
    */
   public async sendSessionForNewUser(res: Response, user: NexxusApiUser): Promise<void> {
-    await this.sendSession(res, user, await createDeviceForUser(this.appId, user.id));
+    const device = await NexxusApiDeviceRegistration.createDeviceForUser(this.appId, user.id);
+
+    // Created a moment ago, gone by the time its device was recorded.
+    if (!device) {
+      throw new UserAuthenticationFailedException(`User "${user.id}" no longer exists`);
+    }
+
+    await this.sendSession(res, user, device, { accountCreated: true });
   }
 
   /** This strategy's namespace inside a user's `details`. */
@@ -465,15 +494,14 @@ export default abstract class NexxusAuthStrategy<T extends NexxusBaseAuthStrateg
     authDetails?: Record<string, any>;
     /**
      * Pre-minted user id, for a caller that needs to know it BEFORE the user
-     * exists — registration creates the account's device first, and a device
-     * records its owner. Omit and one is generated.
+     * exists — registration builds the account's first device ahead of this
+     * insert, and a device records its owner. Omit and one is generated.
      */
     id?: string;
     /**
      * The account's first device, written into `devices` with the rest of the
-     * user. A caller that supplies this has already created that device and
-     * must NOT also link it: the id is stored by this write, not by a patch
-     * afterwards.
+     * user. The caller saves that device AFTER this insert, and must NOT also
+     * link it: the id is stored by this write, not by a patch afterwards.
      */
     deviceId?: string;
   }): Promise<NexxusUser> {
@@ -503,38 +531,70 @@ export default abstract class NexxusAuthStrategy<T extends NexxusBaseAuthStrateg
   }
 
   /**
+   * Run `work` holding the lock on `username` in this application.
+   *
+   * Creating an account is "look the username up, then insert it", and two
+   * requests doing that at once — two registrations, or a registration and a
+   * first OAuth sign-in — would both insert. Under the lock they take turns, so
+   * the second finds the account the first created. A request still waiting
+   * after a few seconds gets a 503.
+   */
+  public async withUsernameLock<T>(username: string, work: () => Promise<T>): Promise<T> {
+    const lock = await NexxusUsernameLock.acquire(this.appId, username);
+
+    if (!lock) {
+      throw new ServiceUnavailableException('Another request for this username is in progress, please retry');
+    }
+
+    try {
+      return await work();
+    } finally {
+      // It expires on its own if this fails.
+      await lock.release().catch((err: Error) => NexxusApi.logger.warn(
+        `Could not release the username lock: ${err.message}`, { appId: this.appId }, 'AuthStrategy'
+      ));
+    }
+  }
+
+  /**
    * Find user by username, create if doesn't exist (for OAuth)
    *
    * On the FOUND branch the provider's details are written too, not dropped:
    * that branch is how an existing account gets linked to this provider, and an
    * account linked to a provider with no record of what the provider said about
    * it is the same as not being linked.
+   *
+   * Runs under the username lock, so it can't create an account that a
+   * registration for the same username is creating at the same moment — and
+   * the other way round.
    */
-  protected async findOrCreateUser(data: {
+  protected findOrCreateUser(data: {
     username: string;
     userType?: string;
     authProvider: NexxusAuthProviders;
     authDetails?: Record<string, any>;
   }): Promise<[NexxusUser, 'found' | 'created']> {
-    const user = await this.findUserByUsername(data.username);
+    return this.withUsernameLock(data.username, async (): Promise<[NexxusUser, 'found' | 'created']> => {
+      const user = await this.findUserByUsername(data.username);
 
-    if (!user) {
-      return [
-        await this.createUser({
-          userType: data.userType,
-          authProviders: [data.authProvider],
-          username: data.username,
-          authDetails: data.authDetails
-        }),
-        'created'
-      ];
-    }
+      if (!user) {
+        return [
+          await this.createUser({
+            userType: data.userType,
+            authProviders: [data.authProvider],
+            username: data.username,
+            authDetails: data.authDetails
+          }),
+          'created'
+        ];
+      }
 
-    if (data.authDetails) {
-      await this.writeOwnAuthDetails(user, data.authDetails);
-    }
+      if (data.authDetails) {
+        await this.writeOwnAuthDetails(user, data.authDetails);
+      }
 
-    return [user, 'found'];
+      return [user, 'found'];
+    });
   }
 
   /**
@@ -556,7 +616,12 @@ export default abstract class NexxusAuthStrategy<T extends NexxusBaseAuthStrateg
     detailsPatch.validate(userSchema);
     updatedAtPatch.validate(userSchema);
 
-    await NexxusApi.database.updateItems([ detailsPatch, updatedAtPatch ]);
+    const written = (await NexxusApi.database.updateItems([ detailsPatch, updatedAtPatch ])).get(metadata.id);
+
+    // Found by username a moment ago, gone by the time it was written to.
+    if (!written) {
+      throw new UserAuthenticationFailedException(`User "${metadata.id}" no longer exists`);
+    }
 
     user.getData().details = { ...user.getData().details, [this.authDetailKey]: validated };
   }
@@ -597,7 +662,14 @@ export default abstract class NexxusAuthStrategy<T extends NexxusBaseAuthStrateg
     return bcrypt.hash(password, 10);
   }
 
-  protected static verifyPassword(password: string, hash: string): Promise<boolean> {
-    return bcrypt.compare(password, hash);
+  /**
+   * Whether `password` signs in to the account holding `hash`. Public because
+   * `/user/register` asks the same question of an existing account.
+   *
+   * No hash means no password: the account was created through an OAuth
+   * provider, and no password signs in to it.
+   */
+  public static verifyPassword(password: string, hash: string | null): Promise<boolean> {
+    return hash ? bcrypt.compare(password, hash) : Promise.resolve(false);
   }
 }

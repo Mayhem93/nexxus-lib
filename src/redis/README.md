@@ -175,9 +175,11 @@ Partition count is a fixed internal constant (16), not a configuration knob.
 ## Key classes
 
 - **`NexxusRedis`** — the connection wrapper (`init`, `getClient`, `close`, `getStats`); the single entry point to the client.
-- **`NexxusDevice`** — the device JSON document and its subscription list; create/get/update plus add/remove-subscription helpers.
+- **`NexxusDevice`** — the device JSON document and its subscription list; create/get/update, add/remove-subscription helpers, and `exists`, which checks many devices at once with one `EXISTS` per device, so it works on a cluster.
 - **`NexxusRedisSubscription`** — a channel's reverse index; builds the keys, manages partition membership, the scope registry, and the filter registry, and expands fan-out scopes.
-- **`NexxusRedisBaseModel`** — the small abstract base both models extend.
+- **`NexxusAuthNonce`** — single-use, expiring nonces scoped to an application, at `nxx:auth-nonce:{appId}:{nonce}`; `issue`, and `consume` as one atomic read-and-delete.
+- **`NexxusModelFieldCache`** — the per-object fields ACL conditions are checked against, at `nxx:field-cache:{objectId}`; kept by the Writer, and expiring.
+- **`NexxusUsernameLock`** — a lock on one username of one application, at `nxx:username_lock:{appId}:{username}`, held while an account is looked up and created. `acquire` waits up to a few seconds for the holder; `release` frees it only for its holder. It expires on its own after 10 seconds.
 - **Exception types** — `RedisConnectionErrorException`, `RedisCommandErrorException`, `RedisKeyNotFoundException`, `RedisDeviceInvalidParamsException`, `RedisDeviceNotConnectedException`.
 
 ---

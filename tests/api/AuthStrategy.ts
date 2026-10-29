@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   NexxusToken,
   NexxusUser,
@@ -8,12 +8,15 @@ import {
   type NexxusUserDetailSchema,
 } from '@mayhem93/nexxus-core-lib';
 
+import { NexxusUsernameLock } from '@mayhem93/nexxus-redis';
+
 import NexxusAuthStrategy, { type NexxusAuthStatePayload } from '../../src/api/src/lib/auth/AuthStrategy';
-import { InvalidParametersException } from '../../src/api/src/lib/Exceptions';
+import { InvalidParametersException, ServiceUnavailableException } from '../../src/api/src/lib/Exceptions';
 import type { NexxusApiUser } from '../../src/api/src/lib/Api';
 
 import { installApiStatics, seedApp, makeAuthApp, dbState, startTestServer, type TestServer } from './harness';
 import { installFakeRedis } from '../redis/helpers';
+import type { FakeRedis } from '../redis/fakeRedis';
 
 import * as path from 'node:path';
 import { createHmac } from 'node:crypto';
@@ -57,10 +60,6 @@ class TestStrategy extends NexxusAuthStrategy {
     authDetails?: Record<string, any>;
   }): Promise<[ NexxusUser, 'found' | 'created' ]> {
     return this.findOrCreateUser(data as never);
-  }
-
-  public static checkPassword(password: string, hash: string): Promise<boolean> {
-    return TestStrategy.verifyPassword(password, hash);
   }
 }
 
@@ -420,7 +419,25 @@ describe('NexxusAuthStrategy.findOrCreateUser', () => {
 
   beforeEach(() => {
     installApiStatics();
+    installFakeRedis(); // the username lock lives in Redis
     strategy = new TestStrategy({}, authApp());
+  });
+
+  /**
+   * Both look the username up before either inserts, so without the username
+   * lock both would create an account.
+   */
+  it('creates one account when two sign-ins for the same username race', async () => {
+    // The search sees what was inserted, as Elasticsearch does once the insert's refresh lands.
+    dbState.searchImpl = () => dbState.created.flat().filter((u: any) => u.getData().username === 'ann');
+
+    const results = await Promise.all([
+      strategy.findOrCreate({ username: 'ann', authProvider: 'test' }),
+      strategy.findOrCreate({ username: 'ann', authProvider: 'test' }),
+    ]);
+
+    expect(results.map(([ , status ]) => status).sort()).toEqual([ 'created', 'found' ]);
+    expect(dbState.created).toHaveLength(1);
   });
 
   it('creates when no account has that username', async () => {
@@ -503,6 +520,37 @@ describe('NexxusAuthStrategy.findOrCreateUser', () => {
   });
 });
 
+describe('NexxusAuthStrategy.withUsernameLock', () => {
+  let strategy: TestStrategy;
+  let redis: FakeRedis;
+
+  beforeEach(() => {
+    installApiStatics();
+    redis = installFakeRedis();
+    strategy = new TestStrategy({}, authApp());
+  });
+
+  const locked = () => redis.store.has(NexxusUsernameLock.getKey('app1', 'ann'));
+
+  it('runs the work, then releases the lock', async () => {
+    expect(await strategy.withUsernameLock('ann', async () => 'done')).toBe('done');
+    expect(locked()).toBe(false);
+  });
+
+  it('releases the lock when the work fails', async () => {
+    await expect(strategy.withUsernameLock('ann', async () => { throw new Error('boom'); })).rejects.toThrow('boom');
+    expect(locked()).toBe(false);
+  });
+
+  it('answers 503 when another request keeps the username locked', async () => {
+    const acquire = vi.spyOn(NexxusUsernameLock, 'acquire').mockResolvedValueOnce(null);
+
+    await expect(strategy.withUsernameLock('ann', async () => 'done')).rejects.toBeInstanceOf(ServiceUnavailableException);
+
+    acquire.mockRestore();
+  });
+});
+
 describe('NexxusAuthStrategy.sendSessionForExistingUser', () => {
   let server: TestServer;
   let strategy: TestStrategy;
@@ -536,6 +584,10 @@ describe('NexxusAuthStrategy.sendSessionForExistingUser', () => {
     expect(res.body.user).toEqual({ id: 'u1', username: 'ann' });
   });
 
+  it('reports that the account already existed', async () => {
+    expect((await login()).body.accountCreated).toBe(false);
+  });
+
   it('binds the token to the resolved device', async () => {
     // Every authentication of an existing user funnels through here, so none of
     // them can forget to bind a token to a device.
@@ -566,6 +618,58 @@ describe('NexxusAuthStrategy.sendSessionForExistingUser', () => {
 
     expect(Object.keys(res.body.user)).toEqual([ 'id', 'username' ]);
   });
+
+  it('401s when the account is deleted before its device is recorded', async () => {
+    dbState.missingIds = [ 'u1' ];
+
+    const res = await login();
+
+    expect(res.status).toBe(401);
+    expect(res.body).toMatchObject({ error: 'UserAuthenticationFailedException', message: 'User "u1" no longer exists' });
+  });
+});
+
+describe('NexxusAuthStrategy.sendSessionForNewUser', () => {
+  let server: TestServer;
+  let strategy: TestStrategy;
+
+  beforeEach(async () => {
+    installApiStatics();
+    installFakeRedis();
+    strategy = new TestStrategy({}, authApp());
+
+    server = await startTestServer(app => {
+      app.post('/signup', (async (_req, res) => {
+        await strategy.sendSessionForNewUser(res, USER);
+      }) as RequestHandler);
+    });
+  });
+
+  afterEach(async () => { await server.close(); });
+
+  const signUp = () => server.request('/signup', { method: 'POST' });
+
+  it('creates the account\'s first device and records it on the account', async () => {
+    const res = await signUp();
+
+    expect(res.status).toBe(200);
+    expect(dbState.updateCalls[0]!.patches[0].get()).toMatchObject({
+      op: 'append', path: [ 'devices' ], value: [ res.body.device.id ],
+    });
+  });
+
+  it('reports that the account was created', async () => {
+    expect((await signUp()).body.accountCreated).toBe(true);
+  });
+
+  it('401s when the account is deleted before its device is recorded', async () => {
+    dbState.missingIds = [ 'u1' ];
+
+    const res = await signUp();
+
+    expect(res.status).toBe(401);
+    expect(res.body).toMatchObject({ error: 'UserAuthenticationFailedException', message: 'User "u1" no longer exists' });
+  });
 });
 
 describe('NexxusAuthStrategy — password hashing', () => {
@@ -585,13 +689,19 @@ describe('NexxusAuthStrategy — password hashing', () => {
     // that on the event loop and stalled every concurrent request behind each
     // login.
     expect(NexxusAuthStrategy.hashPassword('hunter2')).toBeInstanceOf(Promise);
-    expect(TestStrategy.checkPassword('hunter2', '$2b$10$invalid')).toBeInstanceOf(Promise);
+    expect(NexxusAuthStrategy.verifyPassword('hunter2', '$2b$10$invalid')).toBeInstanceOf(Promise);
   });
 
   it('verifies the right password and rejects the wrong one', async () => {
     const hash = await NexxusAuthStrategy.hashPassword('hunter2');
 
-    expect(await TestStrategy.checkPassword('hunter2', hash)).toBe(true);
-    expect(await TestStrategy.checkPassword('hunter3', hash)).toBe(false);
+    expect(await NexxusAuthStrategy.verifyPassword('hunter2', hash)).toBe(true);
+    expect(await NexxusAuthStrategy.verifyPassword('hunter3', hash)).toBe(false);
+  });
+
+  it('accepts no password for an account that has none', async () => {
+    // An account created through an OAuth provider stores no hash. A match here
+    // would let anyone sign in to it with any password.
+    expect(await NexxusAuthStrategy.verifyPassword('hunter2', null)).toBe(false);
   });
 });

@@ -346,7 +346,12 @@ export abstract class NexxusBaseWorker<
 
     await NexxusBaseWorker.loadApps();
     await this.beforeConsume();
-    await NexxusBaseWorker.messageQueue.consumeMessages(this.queueName, this.processMessage.bind(this) as any);
+    // A message that fails while a service is down waits for it to come back,
+    // instead of using up its retries on the outage.
+    await NexxusBaseWorker.messageQueue.consumeMessages(this.queueName, this.processMessage.bind(this) as any, {
+      isReady: () => this.isAvailable,
+      waitUntilReady: () => this.waitUntilAllConnected()
+    });
 
     this.initialized = true;
 
@@ -389,12 +394,12 @@ export abstract class NexxusBaseWorker<
     await this.managementServer?.close();
     this.managementServer = null;
 
-    // Upstream service shutdown happens after Hub deregistration + local
-    // ports go away, so any in-flight `processMessage` has had a chance
-    // to finish (concrete workers that need graceful message drain
-    // should override this method, drain, then call `super.close()`).
-    // `allSettled` so one broker's sticky close doesn't block the
-    // others.
+    // Messages being processed get to finish while the services they use are
+    // still up; anything left after the drain timeout goes back to its queue
+    // when the connection closes.
+    await NexxusBaseWorker.messageQueue.stopConsuming();
+
+    // `allSettled` so one broker's sticky close doesn't block the others.
     const results = await Promise.allSettled([
       NexxusBaseWorker.database.disconnect(),
       NexxusBaseWorker.messageQueue.disconnect(),
@@ -544,7 +549,8 @@ export abstract class NexxusBaseWorker<
    * already succeeded, so letting a broker hiccup reject the message would only
    * redeliver it and repeat that write. A failure is therefore logged and
    * swallowed rather than propagated — which also keeps callers from turning a
-   * forgotten `await` into an unhandled rejection.
+   * forgotten `await` into an unhandled rejection. Logged as an error: the
+   * broker didn't confirm the message, so the event it carries is lost.
    */
   protected async publish<Q extends NexxusQueueName>(
     queueName: Q,
@@ -554,7 +560,7 @@ export abstract class NexxusBaseWorker<
     try {
       await NexxusBaseWorker.messageQueue.publishMessage(queueName, message, metadata);
     } catch (e) {
-      NexxusBaseWorker.logger.warn(
+      NexxusBaseWorker.logger.error(
         `Publish to "${queueName}" failed for event "${(message as NexxusBaseQueuePayload).event}" ` +
         `; non-fatal: ${(e as Error).message}`,
         NexxusBaseWorker.loggerLabel
