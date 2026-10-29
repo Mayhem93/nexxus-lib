@@ -1,6 +1,6 @@
 {
   "name": "@mayhem93/nexxus-api-lib",
-  "version": "0.0.11",
+  "version": "0.0.12",
   "description": "API library for the Nexxus backend",
   "main": "dist-cjs/index.js",
   "module": "dist-esm/index.js",
@@ -41,10 +41,10 @@
     "tslib": "2.8.1"
   },
   "peerDependencies": {
-    "@mayhem93/nexxus-core-lib": "~0.0.10",
-    "@mayhem93/nexxus-database-lib": "~0.0.10",
-    "@mayhem93/nexxus-message-queue-lib": "~0.0.9",
-    "@mayhem93/nexxus-redis": "~0.0.10"
+    "@mayhem93/nexxus-core-lib": "~0.0.11",
+    "@mayhem93/nexxus-database-lib": "~0.0.11",
+    "@mayhem93/nexxus-message-queue-lib": "~0.0.10",
+    "@mayhem93/nexxus-redis": "~0.0.11"
   },
   "devDependencies": {
     "@tsconfig/node24": "^24.0.1",
@@ -55,7 +55,7 @@
     "@types/passport": "^1.0.17",
     "@types/passport-google-oauth20": "^2.0.17",
     "@types/passport-local": "^1.0.38",
-    "concurrently": "^9.2.1",
+    "concurrently": "^10.0.5",
     "typescript": "^6.0.0",
     "yaml": "^2.9.1"
   },
