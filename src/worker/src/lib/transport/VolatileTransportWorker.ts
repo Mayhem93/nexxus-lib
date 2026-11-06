@@ -15,7 +15,8 @@ import {
 import {
   NexxusBaseWorker,
   NexxusBaseWorkerEvents,
-  NexxusWorkerServices
+  NexxusWorkerServices,
+  NexxusWorkerServiceName
 } from '../BaseWorker';
 
 export type NexxusVolatileTransportWorkerConfig = NexxusBaseTransportWorkerConfig & {};
@@ -23,7 +24,7 @@ export type NexxusVolatileTransportWorkerConfig = NexxusBaseTransportWorkerConfi
 export type NexxusVolatileTransportWorkerStats = NexxusBaseTransportWorkerStats & {};
 
 /** Why a transport ends a device's connection. It travels to the client with the close. */
-export type NexxusDeviceDisconnectReason = 'logged_out' | 'token_expired';
+export type NexxusDeviceDisconnectReason = 'logged_out' | 'token_expired' | 'service_restart';
 
 /** What a verified device token proves about the connection presenting it. */
 export type NexxusVolatileDeviceIdentity = {
@@ -40,8 +41,23 @@ export abstract class NexxusVolatileTransportWorker<
 
   protected static loggerLabel: Readonly<string> = 'NxxVolatileTransport';
 
+  /**
+   * Where the slot queue stands: not declared yet, declared, or lost with the
+   * message-queue connection it was declared on, until `beforeResume` declares
+   * it again.
+   */
+  private slotQueueState: 'undeclared' | 'declared' | 'lost' = 'undeclared';
+
   constructor(services: NexxusWorkerServices) {
     super(services);
+  }
+
+  /**
+   * True while the slot queue is lost: nothing reaches a device connected here,
+   * so a new connection should be turned away until it is back.
+   */
+  protected get isSlotQueueLost(): boolean {
+    return this.slotQueueState === 'lost';
   }
 
   /**
@@ -105,10 +121,83 @@ export abstract class NexxusVolatileTransportWorker<
 
     await NexxusBaseWorker.messageQueue.createVolatileQueue(this.queueName);
 
+    this.slotQueueState = 'declared';
+
     NexxusVolatileTransportWorker.logger.info(
       `Picked slot ${slot} — consuming from ${this.queueName}`,
       NexxusVolatileTransportWorker.loggerLabel,
     );
+  }
+
+  /**
+   * A volatile queue goes with the message-queue connection that declared it.
+   * Until `beforeResume` declares it again, nothing reaches the devices
+   * connected here: every connection is ended, which marks its device offline
+   * so nothing is routed here, and new ones are turned away (see
+   * `isSlotQueueLost`).
+   */
+  protected onServiceDown(name: NexxusWorkerServiceName): void {
+    if (name !== 'mq' || this.slotQueueState !== 'declared') {
+      return;
+    }
+
+    this.slotQueueState = 'lost';
+
+    NexxusVolatileTransportWorker.logger.warn(
+      `Slot queue ${this.queueName} went with the message-queue connection; ending every connection until it is declared again`,
+      NexxusVolatileTransportWorker.loggerLabel,
+    );
+
+    void this.disconnectAllDevices('service_restart').catch((err: Error) => {
+      NexxusVolatileTransportWorker.logger.error(
+        `Failed to end connections after losing slot queue ${this.queueName}: ${err.message}`,
+        NexxusVolatileTransportWorker.loggerLabel,
+      );
+    });
+  }
+
+  /**
+   * Declare the slot queue again, before consuming resumes from it. Since a
+   * volatile queue goes with the connection that declared it, one that exists
+   * now is another worker's, which took the slot meanwhile: that is fatal.
+   *
+   * Losing a service again while declaring isn't. It can fail the declaration,
+   * or make the queue look taken; either way the reconnect brings this back
+   * round.
+   */
+  protected async beforeResume(): Promise<void> {
+    if (this.slotQueueState !== 'lost') {
+      return;
+    }
+
+    let failure: string | null = null;
+
+    try {
+      if (await NexxusBaseWorker.messageQueue.queueExists(this.queueName)) {
+        failure = 'it exists on the broker, so another worker took the slot meanwhile';
+      } else {
+        await NexxusBaseWorker.messageQueue.createVolatileQueue(this.queueName);
+      }
+    } catch (err) {
+      failure = (err as Error).message;
+    }
+
+    if (failure === null) {
+      this.slotQueueState = 'declared';
+
+      NexxusVolatileTransportWorker.logger.info(
+        `Declared slot queue ${this.queueName} again; taking connections`,
+        NexxusVolatileTransportWorker.loggerLabel,
+      );
+
+      return;
+    }
+
+    if (!this.isAvailable) {
+      return;
+    }
+
+    throw new FatalErrorException(`Can't get slot queue ${this.queueName} back: ${failure}`);
   }
 
   /**
@@ -129,23 +218,35 @@ export abstract class NexxusVolatileTransportWorker<
   }
 
   /**
-   * Delete our per-slot queue on shutdown so the slot number becomes
-   * available to future workers. For RabbitMQ the exclusive+auto-delete
-   * combo usually beats us to it once the channel closes; we call
-   * `deleteQueue` explicitly anyway (safe if already gone) so brokers
-   * without auto-delete semantics behave consistently.
+   * Shut down without leaving a device routed to this node:
+   *
+   * 1. Stop taking new connections.
+   * 2. Stop consuming. Messages already being delivered still reach their
+   *    devices.
+   * 3. End every connection with `service_restart`. Each one is torn down the
+   *    usual way, while Redis is still up.
+   * 4. Delete the per-slot queue while it is still ours, so the slot number
+   *    becomes available to future workers. A broker that drops an exclusive
+   *    queue with its connection usually beats us to it; deleting it anyway
+   *    (safe if already gone) keeps brokers without that behaviour consistent.
+   *    A lost one went with its connection, and a queue by that name now may
+   *    be another worker's.
+   * 5. The base shutdown: Hub, management server, then the service connections.
    */
   public async close(): Promise<void> {
-    // Before the queue goes, so messages already being delivered can finish.
+    this.stopAcceptingConnections();
     await NexxusBaseWorker.messageQueue.stopConsuming();
+    await this.disconnectAllDevices('service_restart');
 
-    try {
-      await NexxusBaseWorker.messageQueue.deleteQueue(this.queueName);
-    } catch (err) {
-      NexxusVolatileTransportWorker.logger.error(
-        `Failed to delete slot queue ${this.queueName} on shutdown: ${(err as Error).message}`,
-        NexxusVolatileTransportWorker.loggerLabel,
-      );
+    if (this.slotQueueState === 'declared') {
+      try {
+        await NexxusBaseWorker.messageQueue.deleteQueue(this.queueName);
+      } catch (err) {
+        NexxusVolatileTransportWorker.logger.error(
+          `Failed to delete slot queue ${this.queueName} on shutdown: ${(err as Error).message}`,
+          NexxusVolatileTransportWorker.loggerLabel,
+        );
+      }
     }
 
     await super.close();
@@ -243,6 +344,21 @@ export abstract class NexxusVolatileTransportWorker<
    */
   protected abstract disconnectDevice(deviceId: string, reason: NexxusDeviceDisconnectReason): Promise<void>;
 
+  /**
+   * Stop taking new connections; the open ones stay up. `close()` calls this
+   * first, so no connection can arrive after `disconnectAllDevices` has ended
+   * the others.
+   */
+  protected abstract stopAcceptingConnections(): void;
+
+  /**
+   * End every connection on this node, telling each client why, and resolve
+   * once each one has been torn down, through the same path as any other
+   * disconnect (see `disconnectDevice`). A client that doesn't close its end in
+   * time is cut off, and torn down all the same.
+   */
+  protected abstract disconnectAllDevices(reason: NexxusDeviceDisconnectReason): Promise<void>;
+
   protected async handleDeviceLogout(deviceIds: Array<string>): Promise<void> {
     for (const deviceId of deviceIds) {
       await this.disconnectDevice(deviceId, 'logged_out');
@@ -252,28 +368,39 @@ export abstract class NexxusVolatileTransportWorker<
   /**
    * Called by the subclass once a client's device id is established (see
    * `authenticateDevice`). Records the volatile-flavor device state in Redis.
+   *
+   * Starts from the state a clean disconnect leaves. A connection that ended
+   * without one, because its node crashed for example, leaves routes behind
+   * that point at that node. Subscribing again would find those subscriptions
+   * already listed and add no route here, so they are removed first.
+   *
+   * The session is checked again as the device goes online: `authenticateDevice`
+   * saw it alive, but a logout can end it in between. Throws
+   * `SessionEndedException` when it has.
    */
   protected async registerDevice(deviceId: string): Promise<void> {
-    await NexxusDevice.update(deviceId, {
-      lastSeen: new Date(),
-      type: 'volatile',
-      transport: this.queueName,
-      status: 'online',
-    });
+    await NexxusDevice.removeAllSubscriptions(deviceId);
+
+    if (!await NexxusDevice.attachTransport(deviceId, this.queueName)) {
+      throw new SessionEndedException('The session this token belongs to has ended.');
+    }
   }
 
   /**
    * Called by the subclass when a client disconnects (whatever "disconnect" means in its protocol).
-   * Tears down all subscriptions for the device and marks it offline in Redis.
-   * Note: `transport` is intentionally not cleared — once a device is classified by a transport,
-   * that association persists so we can still see which worker pool the device lives on.
+   * Removes the device's routes through this node and marks it offline in Redis.
+   *
+   * A device that has registered on another node since is left alone: its
+   * state belongs to that connection now. So is one the API has detached
+   * already, on logout.
    */
   protected async unregisterDevice(deviceId: string): Promise<void> {
-    await NexxusDevice.removeAllSubscriptions(deviceId);
-    await NexxusDevice.update(deviceId, {
-      lastSeen: new Date(),
-      status: 'offline',
-      transport: null
-    });
+    if (!await NexxusDevice.detachTransport(deviceId, this.queueName)) {
+      NexxusVolatileTransportWorker.logger.debug(
+        `Device "${deviceId}" is no longer on this transport (registered elsewhere since, or logged out); left its state alone`,
+        { deviceId },
+        NexxusVolatileTransportWorker.loggerLabel
+      );
+    }
   }
 }

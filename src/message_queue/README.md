@@ -78,7 +78,7 @@ abstract class NexxusMessageQueueAdapter<
 | `doConsume(queue, deliver)` | Start a broker consumer that hands each message to `deliver` as a `NexxusMessageDelivery`; track whatever handle is needed to cancel it. |
 | `doCancelAll()` | Cancel all active consumers (for pause); swallow per-consumer errors. |
 | `doPublish(queue, content, metadata?)` | Send the encoded bytes. Resolve once the broker confirms the message; reject when it refuses it or the connection goes first, and at once when there's no connection. |
-| `queueExists` / `createVolatileQueue` / `deleteQueue` | Support the per-slot volatile queues transport workers claim. |
+| `queueExists` / `createVolatileQueue` / `deleteQueue` | Support the per-slot volatile queues transport workers claim. A volatile queue goes with the connection that declared it. |
 | `getBootstrapper(options)` | Return this adapter's `NexxusMessageQueueBootstrapper`. |
 | `reconnectDelayMs` | The retry interval the base's loop uses. |
 

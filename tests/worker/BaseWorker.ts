@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { NexxusBaseWorker } from '@mayhem93/nexxus-worker-lib';
-import { NexxusApplication, NexxusAclRole, DEFAULT_ACL_ROLE_ID, WinstonNexxusLogger } from '@mayhem93/nexxus-core-lib';
+import { NexxusApplication, NexxusAclRole, DEFAULT_ACL_ROLE_ID, WinstonNexxusLogger, FatalErrorException } from '@mayhem93/nexxus-core-lib';
 import { NexxusElasticsearchDb } from '@mayhem93/nexxus-database-lib';
 import { NexxusRabbitMq } from '@mayhem93/nexxus-message-queue-lib';
 import { makeHarness, logger, dbState, mqState, resetWorkerStatics, fakeDelivery, type WorkerHarness } from './harness';
@@ -92,7 +92,7 @@ describe('NexxusBaseWorker upstream availability', () => {
     expect(w.isAvailable).toBe(true);
   });
 
-  it('resumes MQ consumption once everything is up (and is idempotent per service)', () => {
+  it('resumes MQ consumption once everything is up (and is idempotent per service)', async () => {
     const w = worker();
     const resume = vi.spyOn(h.mq, 'resumeConsuming');
 
@@ -102,7 +102,78 @@ describe('NexxusBaseWorker upstream availability', () => {
     h.redis.emit('connect'); // duplicate — must not re-trigger
 
     expect(w.isAvailable).toBe(true);
+
+    await tick();
+
     expect(resume).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets beforeResume finish before it resumes consuming', async () => {
+    const w = worker();
+    const steps: string[] = [];
+
+    vi.spyOn(w.any(), 'beforeResume').mockImplementation(async () => {
+      await tick();
+      steps.push('beforeResume');
+    });
+    vi.spyOn(h.mq, 'resumeConsuming').mockImplementation(async () => { steps.push('resumeConsuming'); });
+
+    h.db.emit('connect');
+    h.mq.emit('connect');
+    h.redis.emit('connect');
+
+    await vi.waitFor(() => expect(steps).toEqual([ 'beforeResume', 'resumeConsuming' ]));
+  });
+
+  it('stays paused when a service drops again while beforeResume runs', async () => {
+    const w = worker();
+    const resume = vi.spyOn(h.mq, 'resumeConsuming');
+
+    vi.spyOn(w.any(), 'beforeResume').mockImplementationOnce(async () => {
+      h.db.emit('disconnect');
+    });
+
+    h.db.emit('connect');
+    h.mq.emit('connect');
+    h.redis.emit('connect');
+
+    await tick();
+
+    expect(resume).not.toHaveBeenCalled();
+  });
+
+  /** The process exits on an unhandled 'error', which is the point: the worker can't go on. */
+  it('emits error, and stays paused, when beforeResume fails', async () => {
+    const w = worker();
+    const resume = vi.spyOn(h.mq, 'resumeConsuming');
+    const failed = new Promise<Error>(resolve => w.any().on('error', resolve));
+
+    vi.spyOn(w.any(), 'beforeResume').mockRejectedValueOnce(new FatalErrorException('slot taken'));
+
+    h.db.emit('connect');
+    h.mq.emit('connect');
+    h.redis.emit('connect');
+
+    expect(await failed).toBeInstanceOf(FatalErrorException);
+    expect(resume).not.toHaveBeenCalled();
+    expect(logger.has('error', /Can't resume consuming: slot taken/)).toBe(true);
+  });
+
+  it('tells the worker which service dropped, except while it closes', async () => {
+    const w = worker();
+    const down = vi.spyOn(w.any(), 'onServiceDown');
+
+    h.db.emit('connect');
+    h.mq.emit('connect');
+    h.redis.emit('connect');
+
+    h.mq.emit('disconnect');
+    expect(down).toHaveBeenCalledWith('mq');
+
+    await w.close();
+    h.db.emit('disconnect');
+
+    expect(down).toHaveBeenCalledTimes(1);
   });
 
   it('pauses consumption on the availability→unavailability edge only', () => {

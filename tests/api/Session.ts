@@ -1,6 +1,6 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { NexxusToken, NexxusUser, type INexxusUser, type NexxusApplication } from '@mayhem93/nexxus-core-lib';
-import { NexxusDevice } from '@mayhem93/nexxus-redis';
+import { NexxusDevice, NexxusRedisSubscription } from '@mayhem93/nexxus-redis';
 
 import { NexxusApiSession } from '../../src/api/src/lib/Session';
 import { InvalidRefreshTokenException } from '../../src/api/src/lib/Exceptions';
@@ -244,7 +244,8 @@ describe('NexxusApiSession.revoke', () => {
 
   const signIn = async (): Promise<string> =>
     (await NexxusApiSession.issue(app, await NexxusDevice.get('d1'), USER)).refreshToken;
-  const storedSession = (): any => (redis.store.get(NexxusDevice.getKey('d1')) as { value: any }).value.session;
+  const storedDevice = (): any => (redis.store.get(NexxusDevice.getKey('d1')) as { value: any }).value;
+  const storedSession = (): any => storedDevice().session;
 
   it('ends the session a matching token belongs to', async () => {
     const refreshToken = await signIn();
@@ -285,6 +286,68 @@ describe('NexxusApiSession.revoke', () => {
 
     await NexxusApiSession.revoke(app, await signIn());
 
+    expect(mqState.published).toEqual([
+      { queue: 'websockets-transport_0', message: { event: 'device_logout', deviceIds: [ 'd1' ] }, metadata: undefined },
+    ]);
+  });
+
+  /**
+   * The transport may never get the message: its node crashed, or lost its slot
+   * queue. The device mustn't stay routed there.
+   */
+  it('marks the device offline and removes its routes itself, in case its transport is gone', async () => {
+    const sub = new NexxusRedisSubscription({ appId: 'app1', model: 'runs' });
+
+    await NexxusDevice.update('d1', { type: 'volatile', transport: 'websockets-transport_0', status: 'online' });
+    expect(await (await NexxusDevice.get('d1', true)).addSubscription(sub)).toBe(true);
+
+    await NexxusApiSession.revoke(app, await signIn());
+
+    expect(storedDevice()).toMatchObject({ status: 'offline', transport: null, subscriptions: [] });
+    expect(await sub.getAllDevices()).toEqual(new Set());
+  });
+
+  /**
+   * A registration past its session check can still go online after logout
+   * first read the device. Reading it again once the session has ended finds
+   * it: no registration can go online after that.
+   */
+  it('drops the connection of a device that went online while it was logging out', async () => {
+    const refreshToken = await signIn();
+    const revokeSession = NexxusDevice.revokeSession.bind(NexxusDevice);
+    const revoke = vi.spyOn(NexxusDevice, 'revokeSession').mockImplementationOnce(async (id, secret) => {
+      // The registration going online, after logout read the device.
+      await NexxusDevice.update('d1', { type: 'volatile', transport: 'websockets-transport_3', status: 'online' });
+
+      return revokeSession(id, secret);
+    });
+
+    try {
+      await NexxusApiSession.revoke(app, refreshToken);
+    } finally {
+      revoke.mockRestore();
+    }
+
+    expect(storedDevice()).toMatchObject({ status: 'offline', transport: null });
+    expect(mqState.published).toEqual([
+      { queue: 'websockets-transport_3', message: { event: 'device_logout', deviceIds: [ 'd1' ] }, metadata: undefined },
+    ]);
+  });
+
+  it('still tells the transport to drop the connection when the device can\'t be marked offline', async () => {
+    await NexxusDevice.update('d1', { type: 'volatile', transport: 'websockets-transport_0', status: 'online' });
+
+    const refreshToken = await signIn();
+    const detach = vi.spyOn(NexxusDevice, 'detachTransport').mockRejectedValueOnce(new Error('redis down'));
+
+    try {
+      await expect(NexxusApiSession.revoke(app, refreshToken)).resolves.toBeUndefined();
+    } finally {
+      detach.mockRestore();
+    }
+
+    expect(storedSession()).toBeUndefined();
+    expect(logger.has('warning', /could not mark it offline: redis down/)).toBe(true);
     expect(mqState.published).toEqual([
       { queue: 'websockets-transport_0', message: { event: 'device_logout', deviceIds: [ 'd1' ] }, metadata: undefined },
     ]);

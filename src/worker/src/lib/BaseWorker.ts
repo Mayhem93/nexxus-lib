@@ -40,6 +40,9 @@ import { randomUUID } from 'node:crypto';
 
 export type NexxusBaseWorkerEvents = Record<string, any[]>;
 
+/** The upstream services a worker depends on. */
+export type NexxusWorkerServiceName = 'db' | 'mq' | 'redis';
+
 export interface NexxusWorkerServices extends INexxusBaseServices {
   database: NexxusDatabaseAdapter<NexxusConfig, NexxusDatabaseAdapterEvents>;
   messageQueue: NexxusMessageQueueAdapter<NexxusConfig, NexxusMessageQueueAdapterEvents, any>;
@@ -138,6 +141,13 @@ export abstract class NexxusBaseWorker<
    * message consumption.
    */
   private allConnectedResolvers: Array<() => void> = [];
+
+  /**
+   * The resume in progress, if any. Each one starts after the last has
+   * finished, so one still in `beforeResume` can't overlap the next (see
+   * `resume`).
+   */
+  private resuming: Promise<void> = Promise.resolve();
 
   /**
    * True from `close()` onwards. Suppresses the "service disconnected"
@@ -255,7 +265,7 @@ export abstract class NexxusBaseWorker<
     return this.serviceState.db && this.serviceState.mq && this.serviceState.redis;
   }
 
-  private markServiceUp(name: 'db' | 'mq' | 'redis'): void {
+  private markServiceUp(name: NexxusWorkerServiceName): void {
     if (this.serviceState[name]) {
       return;
     }
@@ -270,19 +280,51 @@ export abstract class NexxusBaseWorker<
 
       for (const resolve of resolvers) resolve();
 
-      // Resume MQ consumption after any prior pauseConsuming. Idempotent
-      // if we were never paused, so the initial connect wave flows
-      // through here safely as a no-op.
-      void NexxusBaseWorker.messageQueue.resumeConsuming().catch((err: Error) => {
-        NexxusBaseWorker.logger.warn(
-          `resumeConsuming failed: ${err.message}`,
-          NexxusBaseWorker.loggerLabel,
-        );
-      });
+      this.resuming = this.resuming.then(() => this.resume());
     }
   }
 
-  private markServiceDown(name: 'db' | 'mq' | 'redis'): void {
+  /**
+   * Resume MQ consumption after any prior pauseConsuming, once `beforeResume`
+   * has prepared for it. Idempotent if we were never paused, so the initial
+   * connect wave flows through here safely as a no-op. Never rejects.
+   */
+  private async resume(): Promise<void> {
+    try {
+      await this.beforeResume();
+    } catch (err) {
+      NexxusBaseWorker.logger.error(
+        `Can't resume consuming: ${(err as Error).message}`,
+        NexxusBaseWorker.loggerLabel,
+      );
+
+      // Raised outside this promise chain, where nothing can swallow it. With no
+      // 'error' listener, the process exits. The cast: any worker can emit
+      // 'error', but its event map is still generic here.
+      process.nextTick(() => {
+        (this as unknown as NexxusBaseService<T, { error: [Error] }>).emit('error', err as Error);
+      });
+
+      return;
+    }
+
+    // A service lost while preparing: it comes back through here once it
+    // reconnects.
+    if (!this.isAvailable) {
+      return;
+    }
+
+    try {
+      await NexxusBaseWorker.messageQueue.resumeConsuming();
+    } catch (err) {
+      NexxusBaseWorker.logger.warn(
+        `resumeConsuming failed: ${(err as Error).message}`,
+        NexxusBaseWorker.loggerLabel,
+      );
+    }
+  }
+
+  private markServiceDown(name: NexxusWorkerServiceName): void {
     if (!this.serviceState[name]) {
       return;
     }
@@ -308,6 +350,10 @@ export abstract class NexxusBaseWorker<
           NexxusBaseWorker.loggerLabel,
         );
       });
+    }
+
+    if (!this.closing) {
+      this.onServiceDown(name);
     }
   }
 
@@ -578,6 +624,21 @@ export abstract class NexxusBaseWorker<
    * which slot queues already exist). Default: no-op.
    */
   protected async beforeConsume(): Promise<void> {}
+
+  /**
+   * Hook called when an upstream service disconnects, outside shutdown.
+   * Consuming is already paused by then. Default: no-op.
+   */
+  protected onServiceDown(_name: NexxusWorkerServiceName): void {}
+
+  /**
+   * Hook awaited once every upstream service is connected again, before
+   * consuming resumes. Throw only when the worker can't go on: it then emits
+   * `error` and stays paused. Default: no-op.
+   */
+  protected beforeResume(): Promise<void> {
+    return Promise.resolve();
+  }
 
   protected static async loadApps(): Promise<void> {
     const results = await NexxusBaseWorker.database.searchItems({ type: MODEL_REGISTRY.application });

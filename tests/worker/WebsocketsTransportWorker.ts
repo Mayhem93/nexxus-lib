@@ -6,7 +6,7 @@
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { NexxusWebsocketsTransportWorker, NexxusBaseWorker, NexxusWorkerUnsupportedEventException } from '@mayhem93/nexxus-worker-lib';
-import { NexxusDevice, RedisDeviceInvalidParamsException } from '@mayhem93/nexxus-redis';
+import { NexxusDevice, NexxusRedisSubscription, RedisDeviceInvalidParamsException } from '@mayhem93/nexxus-redis';
 import { NexxusApplication, NexxusToken } from '@mayhem93/nexxus-core-lib';
 import { makeHarness, logger, mqState, getFreePort, resetWorkerStatics, type WorkerHarness } from './harness';
 
@@ -38,11 +38,11 @@ const SIGNING_SECRET = 'ws-test-secret';
 let app: NexxusApplication;
 
 /** A worker with its WS server already listening on a free port, and an app loaded. */
-const build = async (): Promise<any> => {
+const build = async (appConfig: Record<string, unknown> = {}): Promise<any> => {
   wsPort = await getFreePort();
 
   resetWorkerStatics(NexxusBaseWorker);
-  h = await makeHarness({ port: wsPort });
+  h = await makeHarness({ port: wsPort, ...appConfig });
 
   // The worker verifies device tokens against the app registry it loads at
   // boot, so registration needs a loaded app — not just a device in Redis.
@@ -88,8 +88,8 @@ const seedDevice = (id: string, over: Record<string, unknown> = {}) => {
 const storedDevice = (id: string): any =>
   (h.redisClient.store.get(NexxusDevice.getKey(id)) as { value: any } | undefined)?.value;
 
-const connect = (): Promise<WebSocket> => new Promise((resolve, reject) => {
-  const ws = new WebSocket(`ws://127.0.0.1:${wsPort}`);
+const connect = (options?: WebSocket.ClientOptions): Promise<WebSocket> => new Promise((resolve, reject) => {
+  const ws = new WebSocket(`ws://127.0.0.1:${wsPort}`, options);
 
   sockets.push(ws);
   ws.once('open', () => resolve(ws));
@@ -357,7 +357,7 @@ describe('NexxusWebsocketsTransportWorker registration', () => {
 
     const client = await connect();
 
-    vi.spyOn(h.redisClient.json, 'mSet').mockResolvedValueOnce(null); // → RedisCommandErrorException
+    vi.spyOn(h.redisClient, 'evalSha').mockRejectedValueOnce(new Error('connection lost'));
 
     const failure = nextFrame(client);
 
@@ -384,7 +384,7 @@ describe('NexxusWebsocketsTransportWorker registration', () => {
 
     const client = await connect();
 
-    vi.spyOn(NexxusDevice, 'update').mockRejectedValueOnce(new RedisDeviceInvalidParamsException('bad field'));
+    vi.spyOn(NexxusDevice, 'attachTransport').mockRejectedValueOnce(new RedisDeviceInvalidParamsException('bad field'));
 
     const reply = nextFrame(client);
 
@@ -676,7 +676,7 @@ describe('NexxusWebsocketsTransportWorker disconnect', () => {
     const w = await build();
     const client = await registered(w);
 
-    vi.spyOn(h.redisClient.json, 'mSet').mockResolvedValue(null); // → RedisCommandErrorException
+    vi.spyOn(h.redisClient, 'evalSha').mockRejectedValue(new Error('connection lost'));
 
     client.close();
 
@@ -695,7 +695,7 @@ describe('NexxusWebsocketsTransportWorker disconnect', () => {
     const w = await build();
     const client = await registered(w);
 
-    vi.spyOn(NexxusDevice, 'update').mockRejectedValueOnce(new RedisDeviceInvalidParamsException('bad field'));
+    vi.spyOn(NexxusDevice, 'detachTransport').mockRejectedValueOnce(new RedisDeviceInvalidParamsException('bad field'));
 
     client.close();
 
@@ -723,6 +723,172 @@ describe('NexxusWebsocketsTransportWorker disconnect', () => {
     await new Promise(resolve => setImmediate(resolve));
 
     expect(disconnectLogs()).toBe(1);
+  });
+
+  /**
+   * A client that reconnects before its old socket's close reaches the server
+   * registers the device again on a new socket. The old socket closing after
+   * that must not tear down the new one.
+   */
+  it('leaves the device to a newer connection that registered it on this node', async () => {
+    const w = await build();
+    const older = await registered(w);
+    const newer = await connect();
+    const reply = nextFrame(newer);
+
+    newer.send(register(tokenFor('d1')));
+    expect(await reply).toEqual({ event: 'register', data: { success: true } });
+
+    older.close();
+
+    await waitFor(() => w.wsToNexxusClientMap.size === 1, 'the older connection to be forgotten');
+
+    expect(w.registeredClients.size).toBe(1);
+    expect(storedDevice('d1')).toMatchObject({ status: 'online', transport: 'websockets-transport_0' });
+
+    const delivered = nextFrame(newer);
+
+    await w.sendToDevice('d1', CREATED);
+
+    expect((await delivered).event).toBe('model_created');
+  });
+
+  it('leaves a device that has registered on another node since alone', async () => {
+    const w = await build();
+    const client = await registered(w);
+
+    // The device's registration on another node, which happened first.
+    Object.assign(storedDevice('d1'), { transport: 'websockets-transport_9', status: 'online' });
+
+    client.close();
+
+    await waitFor(() => w.wsToNexxusClientMap.size === 0, 'the disconnect to be handled');
+
+    expect(w.registeredClients.size).toBe(0);
+    expect(storedDevice('d1')).toMatchObject({ status: 'online', transport: 'websockets-transport_9' });
+  });
+
+  /**
+   * Without waiting, the teardown finds no device registered on the connection,
+   * and the registration finishing after it records the device as online here,
+   * with no connection behind it.
+   */
+  it('tears down a device whose registration was still in flight when its connection closed', async () => {
+    const w = await build();
+
+    seedDevice('d1');
+
+    const client = await connect();
+
+    await waitFor(() => w.wsToNexxusClientMap.size === 1, 'the connection to be tracked');
+
+    const serverWs = [ ...w.wsToNexxusClientMap.keys() ][0];
+
+    let release: () => void = () => {};
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const realGet = h.redisClient.json.get.bind(h.redisClient.json);
+    // Holds the registration at its first Redis read.
+    const get = vi.spyOn(h.redisClient.json, 'get').mockImplementationOnce(async (...args: any[]) => {
+      await gate;
+
+      return realGet(...(args as [string]));
+    });
+
+    client.send(register(tokenFor('d1')));
+    await waitFor(() => get.mock.calls.length === 1, 'the registration to reach Redis');
+
+    client.close();
+    await waitFor(() => serverWs.readyState === WebSocket.CLOSED, 'the server to see the close');
+
+    release();
+
+    await waitFor(() => w.wsToNexxusClientMap.size === 0, 'the disconnect to be handled');
+
+    expect(w.registeredClients.size).toBe(0);
+    expect(storedDevice('d1')).toMatchObject({ status: 'offline', transport: null });
+  });
+});
+
+describe('NexxusWebsocketsTransportWorker heartbeat', () => {
+  /** The server side of the only connection the worker holds. */
+  const serverSocket = (w: any): WebSocket => [ ...w.wsToNexxusClientMap.keys() ][0];
+  /** The worker's client for that connection; its `heartbeat` is what its timer calls. */
+  const serverClient = (w: any): any => [ ...w.wsToNexxusClientMap.values() ][0];
+
+  /**
+   * A device that disappears without closing, on a dropped network or a
+   * sleeping laptop, never answers a ping. Its connection has to end and be
+   * torn down, instead of looking open until a write to it fails.
+   */
+  it('ends a connection that stops answering pings, and tears it down', async () => {
+    const w = await build();
+
+    seedDevice('d1');
+
+    const client = await connect({ autoPong: false });
+    const reply = nextFrame(client);
+
+    client.send(register(tokenFor('d1')));
+    expect(await reply).toEqual({ event: 'register', data: { success: true } });
+
+    const closed = closeOf(client);
+    const connection = serverClient(w);
+
+    connection.heartbeat();
+    // Time for a pong that never comes.
+    await new Promise(resolve => setTimeout(resolve, 50));
+    connection.heartbeat();
+
+    expect((await closed).code).toBe(1006);
+    await waitFor(() => storedDevice('d1').status === 'offline', 'the device to go offline');
+    expect(w.registeredClients.size).toBe(0);
+    expect(logger.has('info', /stopped answering pings/)).toBe(true);
+  });
+
+  it('keeps a connection that answers', async () => {
+    const w = await build();
+
+    await registered(w);
+
+    const connection = serverClient(w);
+    const answered = new Promise(resolve => serverSocket(w).once('pong', resolve));
+
+    connection.heartbeat();
+    await answered;
+    connection.heartbeat();
+
+    expect(serverSocket(w).readyState).toBe(WebSocket.OPEN);
+  });
+
+  it('pings each connection every heartbeatInterval seconds, every 30 when it is not set', async () => {
+    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+
+    for (const config of [ { heartbeatInterval: 45 }, {} ]) {
+      const w = await build(config);
+
+      await connect();
+      await waitFor(() => w.wsToNexxusClientMap.size === 1, 'the connection to be tracked');
+    }
+
+    const delays = setIntervalSpy.mock.calls.map(call => call[1]);
+
+    expect(delays).toContain(45_000);
+    expect(delays).toContain(30_000);
+  });
+
+  it('stops pinging a connection once it closes', async () => {
+    const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval');
+    const w = await build();
+    const client = await connect();
+
+    await waitFor(() => w.wsToNexxusClientMap.size === 1, 'the connection to be tracked');
+
+    const timer = serverClient(w).heartbeatTimer;
+
+    client.close();
+    await waitFor(() => w.wsToNexxusClientMap.size === 0, 'the disconnect to be handled');
+
+    expect(clearIntervalSpy).toHaveBeenCalledWith(timer);
   });
 });
 
@@ -765,6 +931,123 @@ describe('NexxusWebsocketsTransportWorker.close', () => {
     // Second time round the ws server is already down, so its close callback
     // hands back an error rather than resolving.
     await expect(w.close()).rejects.toThrow(/not running/i);
+  });
+
+  /**
+   * Nothing tears a device's routes down once Redis has closed: they would keep
+   * pointing the Transport Manager at a queue that no longer exists.
+   */
+  it('ends every connection with 1012, and tears each down before Redis closes', async () => {
+    const w = await build();
+    const sub = () => new NexxusRedisSubscription({ appId: 'app1', model: 'runs' });
+    const subscribed = await registered(w, 'd1');
+    const unregistered = await connect();
+
+    expect(await (await NexxusDevice.get('d1', true)).addSubscription(sub())).toBe(true);
+    await waitFor(() => w.wsToNexxusClientMap.size === 2, 'both connections to be tracked');
+
+    // What Redis holds at the moment it closes.
+    let atRedisClose: { device: any; routes: Set<string> } | undefined;
+
+    h.redis.close = async () => {
+      atRedisClose = { device: structuredClone(storedDevice('d1')), routes: await sub().getAllDevices() };
+    };
+
+    const closes = Promise.all([ closeOf(subscribed), closeOf(unregistered) ]);
+
+    await w.close();
+    workers.length = 0;
+
+    expect(await closes).toEqual([
+      { code: 1012, reason: 'service_restart' },
+      { code: 1012, reason: 'service_restart' },
+    ]);
+    expect(atRedisClose?.device).toMatchObject({ status: 'offline', transport: null, subscriptions: [] });
+    expect(atRedisClose?.routes).toEqual(new Set());
+  });
+
+  it('cuts off a connection whose client does not answer the close in time', async () => {
+    const cls = NexxusWebsocketsTransportWorker as unknown as { DISCONNECT_ALL_GRACE_MS: number };
+    const grace = cls.DISCONNECT_ALL_GRACE_MS;
+    const w = await build();
+    const client = await registered(w, 'd1');
+
+    // Stops reading, so the server's close frame is never answered.
+    client.pause();
+    cls.DISCONNECT_ALL_GRACE_MS = 50;
+
+    try {
+      await w.close();
+    } finally {
+      cls.DISCONNECT_ALL_GRACE_MS = grace;
+    }
+
+    workers.length = 0;
+
+    expect(logger.has('info', /Cutting off 1 connection\(s\) still open after 50 ms/)).toBe(true);
+    expect(storedDevice('d1')).toMatchObject({ status: 'offline', transport: null });
+  });
+});
+
+describe('NexxusWebsocketsTransportWorker losing the message queue', () => {
+  /**
+   * The slot queue goes with the message-queue connection, so nothing reaches
+   * this node's devices until it is declared again.
+   */
+  it('ends every connection with 1012, and turns new ones away with 1013 until the slot queue is back', async () => {
+    const w = await build();
+
+    h.db.emit('connect');
+    h.redis.emit('connect');
+
+    const client = await registered(w, 'd1');
+    const closed = closeOf(client);
+
+    h.mq.emit('disconnect');
+
+    expect(await closed).toEqual({ code: 1012, reason: 'service_restart' });
+    await waitFor(() => storedDevice('d1').status === 'offline', 'the device to go offline');
+
+    const turnedAway = await connect();
+
+    expect(await closeOf(turnedAway)).toEqual({ code: 1013, reason: 'try_again_later' });
+
+    h.mq.emit('connect');
+
+    await waitFor(() => !w.isSlotQueueLost, 'the slot queue to be declared again');
+    expect(mqState.createdQueues).toEqual([ 'websockets-transport_0', 'websockets-transport_0' ]);
+
+    // Taking connections again.
+    await registered(w, 'd2');
+  });
+
+  /**
+   * Waiting for every connection instead would wait for ones that arrive after
+   * the slot queue is back, perhaps for good, and keep the ended clients
+   * around meanwhile.
+   */
+  it('waits only for the connections it ended, not for one that arrives meanwhile', async () => {
+    const cls = NexxusWebsocketsTransportWorker as unknown as { DISCONNECT_ALL_GRACE_MS: number };
+    const grace = cls.DISCONNECT_ALL_GRACE_MS;
+    const w = await build();
+    const client = await registered(w, 'd1');
+
+    // Holds its connection open until it is cut off.
+    client.pause();
+    cls.DISCONNECT_ALL_GRACE_MS = 50;
+
+    try {
+      const ended = w.disconnectAllDevices('service_restart');
+      const newcomer = await connect();
+
+      await ended;
+
+      expect(newcomer.readyState).toBe(WebSocket.OPEN);
+    } finally {
+      cls.DISCONNECT_ALL_GRACE_MS = grace;
+    }
+
+    expect(storedDevice('d1')).toMatchObject({ status: 'offline' });
   });
 });
 
@@ -963,5 +1246,35 @@ describe('NexxusWebsocketsTransportWorker registration after a session ends', ()
         data: { message: 'The session this token belongs to has ended.', code: 'SESSION_ENDED' },
       });
     }
+  });
+
+  /**
+   * The session was alive when the token was checked, then a logout ended it
+   * before the device went online. The logout read the device after ending the
+   * session, so it can't know about this connection: the device has to stay
+   * offline.
+   */
+  it('refuses a device whose session a logout ends mid-registration', async () => {
+    const w = await build();
+
+    seedDevice('d1');
+
+    const client = await connect();
+    const reply = nextFrame(client);
+
+    // The logout, landing just before the device goes online.
+    h.redisClient.beforeEval = () => {
+      h.redisClient.beforeEval = null;
+      delete storedDevice('d1').session;
+    };
+
+    client.send(register(tokenFor('d1')));
+
+    expect(await reply).toEqual({
+      event: 'error',
+      data: { message: 'The session this token belongs to has ended.', code: 'SESSION_ENDED' },
+    });
+    expect(w.registeredClients.size).toBe(0);
+    expect(storedDevice('d1').status).not.toBe('online');
   });
 });

@@ -129,9 +129,9 @@ export class NexxusApiSession {
    * result as one that ended a session, so the endpoint can't be used to test
    * which tokens are live. Only a token the session recognises ends anything.
    *
-   * A session that does end also has its live connection dropped, if the device
-   * holds one: its access token stays valid until it expires, and without this
-   * an open socket would go on receiving until then.
+   * A session that does end also has its device marked offline and its live
+   * connection dropped, if it holds one: its access token stays valid until it
+   * expires, and without this an open socket would go on receiving until then.
    */
   public static async revoke(app: NexxusApplication, refreshToken: string): Promise<void> {
     const appId = app.getData().id as string;
@@ -148,25 +148,61 @@ export class NexxusApiSession {
 
     NexxusApi.logger.debug(`Ended the session of device "${parsed.deviceId}"`, { appId }, LOG_LABEL);
 
-    await NexxusApiSession.dropLiveConnection(device);
+    await NexxusApiSession.dropLiveConnection(parsed.deviceId);
   }
 
   /**
-   * Tell the transport worker holding `device`'s live connection to drop it.
-   *
-   * Published straight to the queue named in the device's `transport` — that is
-   * the node with the socket. Only volatile devices have one; a device with no
+   * Mark the device offline, and tell the transport worker holding its live
+   * connection to drop it. Only volatile devices have one; a device with no
    * `transport` isn't connected, and a persistent one holds no connection to
    * drop.
    *
-   * A failure here doesn't undo the logout: the session is already ended, and the
-   * connection still can't outlive its access token. So it is logged, not thrown.
+   * The device is read here, after its session ended, not before: a
+   * registration that got in first has written its transport by now, and none
+   * can after, since going online checks the session in the same step (see
+   * `NexxusDevice.attachTransport`).
+   *
+   * The device's routes are removed and it is marked offline here, rather than
+   * left to the transport, which may be gone: a node that crashed, or lost its
+   * slot queue, never gets the message below. Guarded like any teardown, so a
+   * device that has registered on another transport since is left alone.
+   *
+   * The message goes straight to the queue named in the device's `transport` —
+   * that is the node with the socket.
+   *
+   * A failure in any of it doesn't undo the logout: the session is already
+   * ended, and the connection gets nothing past its access token's expiry
+   * anyway. So it is logged, not thrown.
    */
-  private static async dropLiveConnection(device: NexxusDevice): Promise<void> {
-    const { id, type, transport } = device.getValue();
+  private static async dropLiveConnection(id: string): Promise<void> {
+    let device: NexxusDevice;
+
+    try {
+      device = await NexxusDevice.get(id);
+    } catch (e) {
+      NexxusApi.logger.warn(
+        `Ended the session of device "${id}", but could not look up its connection: ${(e as Error).message}`,
+        { deviceId: id },
+        LOG_LABEL
+      );
+
+      return;
+    }
+
+    const { type, transport } = device.getValue();
 
     if (type !== 'volatile' || !transport) {
       return;
+    }
+
+    try {
+      await NexxusDevice.detachTransport(id, transport);
+    } catch (e) {
+      NexxusApi.logger.warn(
+        `Ended the session of device "${id}", but could not mark it offline: ${(e as Error).message}`,
+        { deviceId: id, transport },
+        LOG_LABEL
+      );
     }
 
     try {

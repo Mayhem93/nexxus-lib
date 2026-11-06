@@ -15,7 +15,8 @@
   "sideEffects": false,
   "files": [
     "dist-*/**",
-    "src/schemas/**/*.json"
+    "src/schemas/**/*.json",
+    "src/lib/scripts/**/*.lua"
   ],
   "homepage": "https://github.com/Mayhem93/nexxus-lib/tree/main/src/redis",
   "keywords": [

@@ -205,7 +205,7 @@ Each request is logged at `info` when it completes, with its method, URL, status
 - **`refreshToken`** goes to `POST /auth/refresh`, which returns a new `token` and `refreshToken`. The session ends `session.refreshTokenExpiresIn` after it started (default 30 days), however often it is refreshed. After that, `/auth/refresh` answers `401 InvalidRefreshTokenException`, and the user signs in again.
 - **`accountCreated`** is `true` when the request created the account — a new registration, or a first sign-in through an OAuth provider — and `false` for any other sign-in. `/device/register` doesn't send it.
 - A refresh token works once. The one it replaced is still accepted for 10 seconds, so a retried refresh succeeds; presented any later, it ends the session.
-- `POST /auth/logout` ends the session and closes the device's live transport connection. It answers `200` whether or not the refresh token was valid.
+- `POST /auth/logout` ends the session, marks the device offline with its subscriptions removed, and closes its live transport connection. It answers `200` whether or not the refresh token was valid.
 - Applications without authentication refresh and log out the same way.
 
 Which device a session is bound to:

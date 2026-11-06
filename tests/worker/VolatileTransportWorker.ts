@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { NexxusVolatileTransportWorker, NexxusBaseWorker } from '@mayhem93/nexxus-worker-lib';
-import { NexxusDevice } from '@mayhem93/nexxus-redis';
-import { NexxusApplication, NexxusToken, InvalidTokenException, SessionEndedException } from '@mayhem93/nexxus-core-lib';
+import { NexxusDevice, NexxusRedisSubscription } from '@mayhem93/nexxus-redis';
+import { NexxusApplication, NexxusToken, InvalidTokenException, SessionEndedException, FatalErrorException } from '@mayhem93/nexxus-core-lib';
 import { makeHarness, logger, mqState, resetWorkerStatics, type WorkerHarness } from './harness';
 
 class FakeVolatile extends NexxusVolatileTransportWorker<any> {
@@ -10,11 +10,17 @@ class FakeVolatile extends NexxusVolatileTransportWorker<any> {
 
   /** Every `disconnectDevice` call, in order. */
   public disconnected: Array<[ string, string ]> = [];
+  /** The reason of every `disconnectAllDevices` call, in order. */
+  public disconnectedAll: string[] = [];
 
   protected async initTransport(): Promise<void> {}
   protected async sendToDevice(): Promise<void> {}
   protected async disconnectDevice(deviceId: string, reason: string): Promise<void> {
     this.disconnected.push([ deviceId, reason ]);
+  }
+  protected stopAcceptingConnections(): void {}
+  protected async disconnectAllDevices(reason: string): Promise<void> {
+    this.disconnectedAll.push(reason);
   }
 
   public any(): any { return this; }
@@ -45,11 +51,19 @@ afterEach(async () => {
   workers.length = 0;
 });
 
-/** Seed a device document in the in-memory redis so NexxusDevice ops work. */
+/**
+ * Seed a device document in the in-memory redis so NexxusDevice ops work. It
+ * has a live session unless told otherwise; registering refuses one whose
+ * session has ended.
+ */
 const seedDevice = (id: string, over: Record<string, unknown> = {}) => {
   h.redisClient.store.set(NexxusDevice.getKey(id), {
     type: 'json',
-    value: { id, appId: 'app1', name: 'D', type: 'unknown', transport: 'tq', subscriptions: [], ...over },
+    value: {
+      id, appId: 'app1', name: 'D', type: 'unknown', transport: 'tq', subscriptions: [],
+      session: { hash: 'h', expiresAt: Math.floor(Date.now() / 1000) + 3600 },
+      ...over,
+    },
   } as never);
 };
 
@@ -121,17 +135,34 @@ describe('NexxusVolatileTransportWorker.close', () => {
     expect(mqState.deletedQueues).toEqual(['websockets-transport_0']);
   });
 
-  it('stops consuming before it deletes the slot queue', async () => {
+  /**
+   * Every connection has to be torn down while Redis is still up, and none may
+   * arrive after the others have been ended: either way a device would stay
+   * routed to a node that is gone.
+   */
+  it('stops taking connections, stops consuming and ends every connection before the slot queue and Redis go', async () => {
     const w = await build();
 
     await w.any().beforeConsume();
 
-    const stop = vi.spyOn(h.mq, 'stopConsuming');
-    const deleteQueue = vi.spyOn(h.mq, 'deleteQueue');
+    const steps: string[] = [];
+
+    vi.spyOn(w.any(), 'stopAcceptingConnections').mockImplementation(() => { steps.push('stop accepting'); });
+    // Once: the base shutdown stops consuming again, which is a no-op by then.
+    vi.spyOn(h.mq, 'stopConsuming').mockImplementationOnce(async () => { steps.push('stop consuming'); });
+    vi.spyOn(w.any(), 'disconnectAllDevices').mockImplementation(async (reason: any) => { steps.push(`end connections: ${reason}`); });
+    vi.spyOn(h.mq, 'deleteQueue').mockImplementation(async () => { steps.push('delete slot queue'); });
+    vi.spyOn(h.redis, 'close').mockImplementation(async () => { steps.push('close redis'); });
 
     await w.close();
 
-    expect(stop.mock.invocationCallOrder[0]).toBeLessThan(deleteQueue.mock.invocationCallOrder[0]!);
+    expect(steps).toEqual([
+      'stop accepting',
+      'stop consuming',
+      'end connections: service_restart',
+      'delete slot queue',
+      'close redis',
+    ]);
   });
 
   it('logs an error but still closes when the queue delete fails', async () => {
@@ -145,6 +176,123 @@ describe('NexxusVolatileTransportWorker.close', () => {
     // Error, not warning: a slot queue left behind on the broker blocks that
     // slot for future workers, so it needs to be visible.
     expect(logger.has('error', /Failed to delete slot queue .* broker busy/)).toBe(true);
+  });
+});
+
+describe('NexxusVolatileTransportWorker losing the message queue', () => {
+  /** Lets the resume that a service reconnecting starts run its course. */
+  const settle = () => new Promise(resolve => setTimeout(resolve, 10));
+
+  /** A worker holding slot 0, with every service up and the first resume done. */
+  const running = async (): Promise<FakeVolatile> => {
+    const w = await build();
+
+    await w.any().beforeConsume();
+    h.db.emit('connect');
+    h.redis.emit('connect');
+    await settle();
+
+    return w;
+  };
+
+  it('ends every connection when the message-queue connection drops, and reports the slot queue lost', async () => {
+    const w = await running();
+
+    h.mq.emit('disconnect');
+
+    expect(w.disconnectedAll).toEqual([ 'service_restart' ]);
+    expect(w.any().isSlotQueueLost).toBe(true);
+    expect(logger.has('warning', /Slot queue websockets-transport_0 went with the message-queue connection/)).toBe(true);
+  });
+
+  it('ignores other services, and a message-queue drop before the slot queue exists', async () => {
+    const w = await build();
+
+    h.db.emit('connect');
+    h.redis.emit('connect');
+    h.mq.emit('disconnect');
+    h.mq.emit('connect');
+    await settle();
+
+    await w.any().beforeConsume();
+    h.redis.emit('disconnect');
+
+    expect(w.disconnectedAll).toEqual([]);
+    expect(w.any().isSlotQueueLost).toBe(false);
+  });
+
+  it('declares the slot queue again before consuming resumes from it', async () => {
+    const w = await running();
+    const steps: string[] = [];
+
+    h.mq.emit('disconnect');
+
+    vi.spyOn(h.mq, 'createVolatileQueue').mockImplementation(async (name: string) => { steps.push(`declare ${name}`); });
+    vi.spyOn(h.mq, 'resumeConsuming').mockImplementation(async () => { steps.push('resume'); });
+
+    h.mq.emit('connect');
+
+    await vi.waitFor(() => expect(steps).toEqual([ 'declare websockets-transport_0', 'resume' ]));
+    expect(w.any().isSlotQueueLost).toBe(false);
+    expect(logger.has('info', /Declared slot queue websockets-transport_0 again/)).toBe(true);
+  });
+
+  it('is fatal when another worker took the slot meanwhile', async () => {
+    const w = await running();
+    const resume = vi.spyOn(h.mq, 'resumeConsuming');
+    const failed = new Promise<Error>(resolve => w.any().on('error', resolve));
+
+    h.mq.emit('disconnect');
+    mqState.queueExistsResult = true; // the other worker's queue, by our slot's name
+
+    h.mq.emit('connect');
+
+    const err = await failed;
+
+    expect(err).toBeInstanceOf(FatalErrorException);
+    expect(err.message).toMatch(/Can't get slot queue websockets-transport_0 back: .*another worker took the slot/);
+    expect(resume).not.toHaveBeenCalled();
+    expect(w.any().isSlotQueueLost).toBe(true);
+  });
+
+  /**
+   * A connection lost again mid-declaration fails it, or makes the queue look
+   * taken. Neither means the slot is gone: the reconnect tries again.
+   */
+  it('tries again on the next reconnect when the connection drops while declaring', async () => {
+    const w = await running();
+    const onError = vi.fn();
+
+    w.any().on('error', onError);
+    h.mq.emit('disconnect');
+
+    vi.spyOn(h.mq, 'createVolatileQueue').mockImplementationOnce(async () => {
+      h.mq.emit('disconnect');
+
+      throw new Error('channel closed');
+    });
+
+    h.mq.emit('connect');
+    await settle();
+
+    expect(onError).not.toHaveBeenCalled();
+    expect(w.any().isSlotQueueLost).toBe(true);
+    // Already lost: the second drop ends no more connections.
+    expect(w.disconnectedAll).toEqual([ 'service_restart' ]);
+
+    h.mq.emit('connect');
+
+    await vi.waitFor(() => expect(w.any().isSlotQueueLost).toBe(false));
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('leaves a slot queue it lost alone on shutdown', async () => {
+    const w = await running();
+
+    h.mq.emit('disconnect');
+    await w.close();
+
+    expect(mqState.deletedQueues).toEqual([]);
   });
 });
 
@@ -165,10 +313,35 @@ describe('NexxusVolatileTransportWorker device registration', () => {
     expect(typeof stored.lastSeen).toBe('string'); // ISO timestamp
   });
 
+  /**
+   * `authenticateDevice` saw the session alive; a logout ending it before the
+   * device goes online must still keep it offline, or the logout would miss the
+   * new connection.
+   */
+  it('refuses a device whose session ends while it registers', async () => {
+    const w = await build();
+
+    await w.any().beforeConsume();
+    seedDevice('d1', { transport: null, status: 'offline' });
+
+    // The logout, landing just before the device goes online.
+    h.redisClient.beforeEval = () => {
+      h.redisClient.beforeEval = null;
+      delete (h.redisClient.store.get(NexxusDevice.getKey('d1')) as { value: any }).value.session;
+    };
+
+    await expect(w.any().registerDevice('d1')).rejects.toThrow(SessionEndedException);
+
+    const stored = (h.redisClient.store.get(NexxusDevice.getKey('d1')) as { value: any }).value;
+
+    expect(stored).toMatchObject({ status: 'offline', transport: null });
+  });
+
   it('marks a device offline and clears its transport on unregister', async () => {
     const w = await build();
 
-    seedDevice('d1', { subscriptions: [] });
+    await w.any().beforeConsume();
+    seedDevice('d1', { transport: 'websockets-transport_0', status: 'online' });
 
     await w.any().unregisterDevice('d1');
 
@@ -176,6 +349,48 @@ describe('NexxusVolatileTransportWorker device registration', () => {
 
     expect(stored.status).toBe('offline');
     expect(stored.transport).toBeNull();
+  });
+
+  /**
+   * A connection here that closes after its device has registered on another
+   * node must not undo that registration.
+   */
+  it('leaves a device that has registered on another transport since alone on unregister', async () => {
+    const w = await build();
+
+    await w.any().beforeConsume();
+    seedDevice('d1', { transport: 'websockets-transport_7', status: 'online' });
+
+    await w.any().unregisterDevice('d1');
+
+    const stored = (h.redisClient.store.get(NexxusDevice.getKey('d1')) as { value: any }).value;
+
+    expect(stored.status).toBe('online');
+    expect(stored.transport).toBe('websockets-transport_7');
+  });
+
+  /**
+   * A node that crashed never tore its connections down. A device that
+   * reconnects elsewhere has to be able to subscribe again; the leftovers
+   * would otherwise make that a no-op that adds no route here.
+   */
+  it('clears what a previous connection left before registering, so the device can subscribe again', async () => {
+    const w = await build();
+    const sub = () => new NexxusRedisSubscription({ appId: 'app1', model: 'runs' });
+
+    await w.any().beforeConsume();
+    seedDevice('d1', { transport: 'websockets-transport_7', status: 'online', subscriptions: [ sub().getKey() ] });
+    await sub().addDevice('d1', 'websockets-transport_7');
+
+    await w.any().registerDevice('d1');
+
+    expect(await sub().getAllDevices()).toEqual(new Set());
+
+    const device = await NexxusDevice.get('d1', true);
+
+    expect(device.getValue()).toMatchObject({ transport: 'websockets-transport_0', subscriptions: [] });
+    expect(await device.addSubscription(sub())).toBe(true);
+    expect(await sub().getAllDevices()).toEqual(new Set([ 'd1|websockets-transport_0' ]));
   });
 });
 

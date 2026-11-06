@@ -5,12 +5,16 @@
  * etc.) so multi-step lifecycles (partition counting, scope decrement-to-zero
  * cleanup) are exercised for real. TTL is not modeled (expire is a no-op that
  * only reports whether the key exists). The JSON namespace supports the paths
- * the models use: '$' (whole doc), '$.subscriptions' and '$.session'. EVAL
- * supports the two scripts the models run: the device-session compare-and-set
- * and the username-lock release.
+ * the models use: '$' (whole doc), '$.subscriptions' and '$.session'. Scripting
+ * holds scripts by SHA1 as Redis does (SCRIPT LOAD, EVALSHA, EVAL) and runs the
+ * four the models use, recognised by their source: the device-session
+ * compare-and-set, the device attach and detach, and the username-lock release.
  */
-import { NEXXUS_DEVICE_SESSION_CAS_SCRIPT } from '../../src/redis/src/lib/models/Device';
-import { NEXXUS_USERNAME_LOCK_RELEASE_SCRIPT } from '../../src/redis/src/lib/models/UsernameLock';
+import { NexxusRedisScriptLoader, type NexxusRedisScriptName } from '@mayhem93/nexxus-redis';
+
+import { createHash } from 'node:crypto';
+
+type ScriptOptions = { keys: string[]; arguments: string[] };
 
 type Entry =
   | { type: 'hash'; value: Map<string, string> }
@@ -20,10 +24,23 @@ type Entry =
   | { type: 'string'; value: string; ttl?: number };
 
 export class FakeRedis {
+  /** Each script's name, by its source: how a script sent here is recognised. */
+  private static readonly SCRIPT_NAMES = new Map(
+    Object.entries(NexxusRedisScriptLoader.readSources())
+      .map(([ name, source ]) => [ source, name as NexxusRedisScriptName ])
+  );
+
   public store = new Map<string, Entry>();
 
   /**
-   * Runs at the start of the next `eval`, before the script reads anything —
+   * The scripts this server holds, by SHA1. ES-private because the worker
+   * harness deletes every own property between tests, to drop per-test
+   * overrides.
+   */
+  readonly #scripts = new Map<string, string>();
+
+  /**
+   * Runs at the start of the next device script, before it reads anything —
    * lets a test land a competing write between a caller's read and its
    * compare-and-set.
    */
@@ -192,15 +209,54 @@ export class FakeRedis {
   }
 
   // ---- SCRIPTING ----
+  /** Holds the script and answers with its SHA1, as Redis does. */
+  async scriptLoad(source: string): Promise<string> {
+    const sha = FakeRedis.sha1(source);
+
+    this.#scripts.set(sha, source);
+
+    return sha;
+  }
+
+  /** Drops every script held, as a Redis restart or SCRIPT FLUSH does. */
+  async scriptFlush(): Promise<string> {
+    this.#scripts.clear();
+
+    return 'OK';
+  }
+
+  /** Runs a script held here; refuses one that isn't, with Redis's NOSCRIPT error. */
+  async evalSha(sha: string, opts: ScriptOptions): Promise<number> {
+    const source = this.#scripts.get(sha);
+
+    if (source === undefined) {
+      throw new Error('NOSCRIPT No matching script. Please use EVAL.');
+    }
+
+    return this.runScript(source, opts);
+  }
+
+  /** Runs a script from its source, and holds it from then on, as Redis does. */
+  async eval(source: string, opts: ScriptOptions): Promise<number> {
+    this.#scripts.set(FakeRedis.sha1(source), source);
+
+    return this.runScript(source, opts);
+  }
+
   /**
    * Emulates each script with its own return contract. The username-lock
    * release: 1 deleted, 0 the lock holds another token (or is gone). The
    * device-session compare-and-set: 1 swapped, 0 the stored hash moved on (or
-   * there is no session), -1 no such device. Any other script is refused, so a
-   * new one can't silently hit a fake that does nothing.
+   * there is no session), -1 no such device. The device attach: 1 marked
+   * online, 0 its session has ended or expired, -1 no such device. The device
+   * detach: 1 marked offline, 0 the device is on another transport (or none),
+   * -1 no such device. Any other script is refused, so a new one can't silently
+   * hit a fake that does nothing.
    */
-  async eval(script: string, opts: { keys: string[]; arguments: string[] }): Promise<number> {
-    if (script === NEXXUS_USERNAME_LOCK_RELEASE_SCRIPT) {
+  private runScript(source: string, opts: ScriptOptions): number {
+    const name = FakeRedis.SCRIPT_NAMES.get(source);
+
+    if (name === 'username-lock-release') {
       const lock = this.store.get(opts.keys[0]!);
 
       if (lock?.type !== 'string' || lock.value !== opts.arguments[0]) return 0;
@@ -210,8 +266,46 @@ export class FakeRedis {
       return 1;
     }
 
-    if (script !== NEXXUS_DEVICE_SESSION_CAS_SCRIPT) {
-      throw new Error('FakeRedis.eval: unsupported script');
+    if (name === 'device-attach') {
+      this.beforeEval?.();
+
+      const device = this.store.get(opts.keys[0]!);
+
+      if (!device) return -1;
+
+      const doc = (device as { value: any }).value;
+      const expiresAt = doc.session?.expiresAt;
+
+      if (expiresAt === undefined || expiresAt <= Number(opts.arguments[1])) return 0;
+
+      Object.assign(doc, {
+        type: 'volatile', status: 'online',
+        transport: JSON.parse(opts.arguments[0]!), lastSeen: JSON.parse(opts.arguments[2]!),
+      });
+
+      return 1;
+    }
+
+    if (name === 'device-detach') {
+      this.beforeEval?.();
+
+      const device = this.store.get(opts.keys[0]!);
+
+      if (!device) return -1;
+
+      const doc = (device as { value: any }).value;
+
+      if (doc.transport !== opts.arguments[0]) return 0;
+
+      Object.assign(doc, {
+        subscriptions: [], status: 'offline', transport: null, lastSeen: JSON.parse(opts.arguments[1]!),
+      });
+
+      return 1;
+    }
+
+    if (name !== 'device-session-cas') {
+      throw new Error('FakeRedis: unsupported script');
     }
 
     this.beforeEval?.();
@@ -227,6 +321,10 @@ export class FakeRedis {
     doc.session = JSON.parse(opts.arguments[1]!);
 
     return 1;
+  }
+
+  private static sha1(source: string): string {
+    return createHash('sha1').update(source).digest('hex');
   }
 
   // ---- JSON ----

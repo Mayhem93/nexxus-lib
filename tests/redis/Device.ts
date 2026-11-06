@@ -197,6 +197,112 @@ describe('NexxusDevice subscriptions', () => {
     expect(logger.has('warning', /not connected to any transport/)).toBe(true);
     expect((await NexxusDevice.get('d2', true)).getValue().subscriptions).toHaveLength(0);
   });
+
+  it('removeAllSubscriptions writes nothing for a device with none listed', async () => {
+    await makeConnectedDevice().save();
+
+    const clear = vi.spyOn(redis.json, 'clear');
+
+    await NexxusDevice.removeAllSubscriptions('d1');
+
+    expect(clear).not.toHaveBeenCalled();
+  });
+});
+
+describe('NexxusDevice.detachTransport', () => {
+  const storedDevice = (): any => (redis.store.get(NexxusDevice.getKey('d1')) as { value: any }).value;
+
+  /** A device on `transport`, subscribed to r1 and r2. */
+  const connectedDevice = async (transport: string): Promise<void> => {
+    const d = new NexxusDevice({ appId: 'a', id: 'd1', name: 'N', transport, status: 'online', subscriptions: [] });
+
+    await d.save();
+    await d.addSubscription(makeSub('r1'));
+    await d.addSubscription(makeSub('r2'));
+  };
+
+  it('removes the routes through the transport and marks the device offline', async () => {
+    await connectedDevice('tq');
+
+    expect(await NexxusDevice.detachTransport('d1', 'tq')).toBe(true);
+
+    expect(storedDevice()).toMatchObject({ subscriptions: [], status: 'offline', transport: null });
+    expect(typeof storedDevice().lastSeen).toBe('string'); // ISO timestamp
+    expect(await makeSub('r1').getAllDevices()).toEqual(new Set());
+    expect(await makeSub('r2').getAllDevices()).toEqual(new Set());
+  });
+
+  /**
+   * A connection that closes after its device has registered on another
+   * transport must not touch what that registration set up.
+   */
+  it('leaves a device that has registered on another transport alone', async () => {
+    await connectedDevice('tq2');
+
+    expect(await NexxusDevice.detachTransport('d1', 'tq')).toBe(false);
+
+    expect(storedDevice()).toMatchObject({ status: 'online', transport: 'tq2' });
+    expect(storedDevice().subscriptions).toHaveLength(2);
+    expect(await makeSub('r1').getAllDevices()).toEqual(new Set([ 'd1|tq2' ]));
+  });
+
+  it('leaves the record alone when the other registration lands between the read and the write', async () => {
+    await connectedDevice('tq');
+
+    // The registration elsewhere: it clears what this connection listed and
+    // takes the device over.
+    redis.beforeEval = () => {
+      Object.assign(storedDevice(), { subscriptions: [], status: 'online', transport: 'tq2' });
+    };
+
+    expect(await NexxusDevice.detachTransport('d1', 'tq')).toBe(false);
+
+    expect(storedDevice()).toMatchObject({ status: 'online', transport: 'tq2' });
+    // Its routes through `tq` are gone all the same.
+    expect(await makeSub('r1').getAllDevices()).toEqual(new Set());
+  });
+
+  it('throws when the device does not exist', async () => {
+    await expect(NexxusDevice.detachTransport('ghost', 'tq')).rejects.toThrow(/not found/);
+  });
+});
+
+describe('NexxusDevice.attachTransport', () => {
+  const storedDevice = (): any => (redis.store.get(NexxusDevice.getKey('d1')) as { value: any }).value;
+
+  /** A device that has never connected, with a session ending at `expiresAt`, or none. */
+  const deviceWithSession = async (expiresAt?: number): Promise<void> => {
+    await new NexxusDevice({ appId: 'a', id: 'd1', name: 'N', subscriptions: [] }).save();
+
+    if (expiresAt !== undefined) {
+      await NexxusDevice.setSession('d1', 'secret', expiresAt);
+    }
+  };
+
+  it('marks a device with a live session online on the transport', async () => {
+    await deviceWithSession(nowSeconds() + DAY);
+
+    expect(await NexxusDevice.attachTransport('d1', 'tq')).toBe(true);
+
+    expect(storedDevice()).toMatchObject({ type: 'volatile', status: 'online', transport: 'tq' });
+    expect(typeof storedDevice().lastSeen).toBe('string'); // ISO timestamp
+  });
+
+  /** A logout landing mid-registration ends the session before the device goes online. */
+  it('leaves a device whose session has ended or expired as it is', async () => {
+    for (const expiresAt of [ undefined, nowSeconds() - 1 ]) {
+      redis.store.clear();
+      await deviceWithSession(expiresAt);
+
+      expect(await NexxusDevice.attachTransport('d1', 'tq')).toBe(false);
+      expect(storedDevice().status).toBeUndefined();
+      expect(storedDevice().transport).toBeUndefined();
+    }
+  });
+
+  it('throws when the device does not exist', async () => {
+    await expect(NexxusDevice.attachTransport('ghost', 'tq')).rejects.toThrow(/not found/);
+  });
 });
 
 const DAY = 24 * 60 * 60;

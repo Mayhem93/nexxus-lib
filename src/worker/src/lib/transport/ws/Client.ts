@@ -94,13 +94,31 @@ export class NexxusWsClient extends EventEmitter<ClientEventMap> {
   private tokenExpiresAt?: number;
   /** True between emitting `register` and the worker confirming or failing it. */
   private registering: boolean = false;
+  /**
+   * Whether the client answered the last ping. Each ping clears it and the
+   * pong sets it again; browsers send that pong on their own.
+   */
+  private answeredPing: boolean = true;
+  /** Calls `heartbeat` every heartbeat interval, until the connection closes. */
+  private readonly heartbeatTimer: NodeJS.Timeout;
   public readonly id: string;
 
-  constructor(clientId: string, ws: WebSocket) {
+  constructor(clientId: string, ws: WebSocket, heartbeatIntervalMs: number) {
     super();
 
     this.socket = ws;
     this.id = clientId;
+
+    this.socket.on('pong', () => {
+      this.answeredPing = true;
+    });
+
+    this.heartbeatTimer = setInterval(() => this.heartbeat(), heartbeatIntervalMs);
+
+    // 'close' follows however the connection ends, so the timer never outlives it.
+    this.socket.on('close', () => {
+      clearInterval(this.heartbeatTimer);
+    });
 
     // Nothing in here may throw or reject: an unhandled rejection from a socket
     // listener takes the whole worker process down, and with it every other
@@ -198,6 +216,16 @@ export class NexxusWsClient extends EventEmitter<ClientEventMap> {
     this.socket.close(code, reason);
   }
 
+  /** Whether the connection has finished closing. */
+  public isClosed(): boolean {
+    return this.socket.readyState === WebSocket.CLOSED;
+  }
+
+  /** End the connection at once, without waiting for the client to answer a close. */
+  public terminate(): void {
+    this.socket.terminate();
+  }
+
   /**
    * Called by the transport worker when the handshake it owns failed. The client
    * stays unregistered and is free to send another `register` frame.
@@ -257,6 +285,34 @@ export class NexxusWsClient extends EventEmitter<ClientEventMap> {
   }
 
   /**
+   * Ping the client, or end the connection when it never answered the previous
+   * ping. A device that disappears without closing, on a dropped network or a
+   * laptop gone to sleep, leaves a socket that looks open until a write to it
+   * fails. Terminating it emits 'close', so the worker tears the connection
+   * down the usual way.
+   */
+  private heartbeat(): void {
+    if (this.socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    if (!this.answeredPing) {
+      NexxusBaseWorker.logger.info(
+        `Client "${this.id}" stopped answering pings; ending its connection`,
+        { clientId: this.id, deviceId: this.deviceId },
+        'NexxusWsClient'
+      );
+
+      this.socket.terminate();
+
+      return;
+    }
+
+    this.answeredPing = false;
+    this.socket.ping();
+  }
+
+  /**
    * `ws.send()` on a socket that is no longer OPEN doesn't throw — it emits
    * 'error' on the socket, which is fatal to the process if nothing is
    * listening. Losing a race with a disconnect is normal and not worth that, so
@@ -276,7 +332,7 @@ export class NexxusWsClient extends EventEmitter<ClientEventMap> {
     this.socket.send(JSON.stringify(payload));
   }
 
-  private async registerDevice(msg: NexxusWsClientEvent<'register'>) {
+  private registerDevice(msg: NexxusWsClientEvent<'register'>) {
     if (this.isRegistered()) {
       NexxusBaseWorker.logger.warn(`Client ${this.id} is already registered with device ID: "${this.deviceId}"`, 'NexxusWsClient');
 

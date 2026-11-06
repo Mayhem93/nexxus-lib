@@ -95,29 +95,6 @@ export type NexxusSessionRevocation = 'revoked' | 'invalid';
 /** How a presented secret relates to the stored session. */
 type NexxusSessionMatch = 'none' | 'unknown' | 'current' | 'previous' | 'replayed' | 'expired';
 
-/**
- * Swap `$.session` only if its `hash` is still the one the caller read.
- *
- * The rotation DECISION is made in TypeScript, from state already read; this
- * script only makes the write conditional, so two refreshes racing on the same
- * secret can't both swap. Keeping it this small is what keeps the decision
- * unit-testable.
- *
- * Touches one key, passed as KEYS[1], so it is single-slot and runs unchanged on
- * a cluster.
- *
- * Returns 1 when swapped, 0 when the stored hash differs (including when there is
- * no session at all), -1 when the device does not exist.
- */
-export const NEXXUS_DEVICE_SESSION_CAS_SCRIPT = `
-local raw = redis.call('JSON.GET', KEYS[1], '$.session.hash')
-if not raw then return -1 end
-local found = cjson.decode(raw)
-if found[1] ~= ARGV[1] then return 0 end
-redis.call('JSON.SET', KEYS[1], '$.session', ARGV[2])
-return 1
-`;
-
 export class NexxusDevice {
   /**
    * How long after a rotation the previous secret still rotates, in seconds.
@@ -414,9 +391,9 @@ export class NexxusDevice {
    * moved on since the caller read it.
    */
   private static async swapSession(id: string, expectedHash: string, next: NexxusDeviceSession): Promise<boolean> {
-    const result = await NexxusRedis.instance.getClient().eval(NEXXUS_DEVICE_SESSION_CAS_SCRIPT, {
+    const result = await NexxusRedis.instance.scripts.run('device-session-cas', {
       keys: [ NexxusDevice.getKey(id) ],
-      arguments: [ expectedHash, JSON.stringify(next) ]
+      args: [ expectedHash, JSON.stringify(next) ]
     });
 
     if (result === -1) {
@@ -486,6 +463,11 @@ export class NexxusDevice {
   public static async removeAllSubscriptions(deviceId: string): Promise<void> {
     const redis = NexxusRedis.instance.getClient();
     const device = await NexxusDevice.get(deviceId, true);
+
+    if (device.data.subscriptions.length === 0) {
+      return;
+    }
+
     const promises : Promise<boolean>[] = [];
 
     for (const subInstance of device.data.subscriptions) {
@@ -502,6 +484,67 @@ export class NexxusDevice {
     await redis.json.clear(`${NEXXUS_PREFIX_LC}:device:${deviceId}`, { path: '$.subscriptions' });
 
     NexxusRedis.logger.debug(`Removed ${removedCount} subscriptions from device with id "${deviceId}"`);
+  }
+
+  /**
+   * End a device's connection on `transport`: remove its routes through that
+   * transport and mark it offline. A device that has registered on another
+   * transport since is left alone; that registration owns its state.
+   *
+   * Returns whether the device was marked offline. Throws
+   * `RedisKeyNotFoundException` when the device does not exist.
+   */
+  public static async detachTransport(deviceId: string, transport: string): Promise<boolean> {
+    const device = await NexxusDevice.get(deviceId, true);
+
+    // Registering elsewhere removed what this connection left.
+    if (device.data.transport !== transport) {
+      return false;
+    }
+
+    // Routes before the record: a failure between the two leaves the record
+    // listing routes that are gone, which is harmless, rather than routes that
+    // nothing lists.
+    await Promise.all(device.data.subscriptions.map(sub => sub.removeDevice(deviceId, transport)));
+
+    // Checked again, together with the write: a registration elsewhere can land
+    // between the read above and here.
+    const result = await NexxusRedis.instance.scripts.run('device-detach', {
+      keys: [ NexxusDevice.getKey(deviceId) ],
+      args: [ transport, JSON.stringify(new Date().toISOString()) ]
+    });
+
+    if (result === -1) {
+      throw new RedisKeyNotFoundException(`Device with id "${deviceId}" not found`);
+    }
+
+    return result === 1;
+  }
+
+  /**
+   * Start a device's connection on `transport`, as a volatile one: mark it online
+   * there, but only while its session is active. A device whose session ended
+   * after the caller checked it — a logout landing mid-registration — is left as
+   * it is.
+   *
+   * Returns whether the device was marked online. Throws
+   * `RedisKeyNotFoundException` when the device does not exist.
+   */
+  public static async attachTransport(deviceId: string, transport: string): Promise<boolean> {
+    const result = await NexxusRedis.instance.scripts.run('device-attach', {
+      keys: [ NexxusDevice.getKey(deviceId) ],
+      args: [
+        JSON.stringify(transport),
+        String(NexxusDevice.nowSeconds()),
+        JSON.stringify(new Date().toISOString())
+      ]
+    });
+
+    if (result === -1) {
+      throw new RedisKeyNotFoundException(`Device with id "${deviceId}" not found`);
+    }
+
+    return result === 1;
   }
 
   public async addSubscription(subscription: NexxusRedisSubscription): Promise<boolean> {

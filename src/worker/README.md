@@ -17,7 +17,7 @@ How a change travels:
 3. The **Transport Manager** finds every device subscribed to the change, and publishes a `device_message` to each device's transport queue.
 4. The **transport** delivers it — the websockets transport over the device's open connection.
 
-On logout, the API publishes `device_logout` to the device's transport queue, and the transport closes the device's connection.
+On logout, the API marks the device offline and removes its routes, then publishes `device_logout` to the device's transport queue, and the transport closes the device's connection.
 
 ---
 
@@ -83,6 +83,8 @@ process.once('SIGINT',  () => worker.close());
 
 While the database, the message queue or Redis is disconnected, the worker stops consuming. It resumes once all three are connected again.
 
+A worker that can't go on emits `error` with a `FatalErrorException` and stops consuming for good; without an `error` listener, the process exits. A websockets transport does when it can't get its slot back after the message queue reconnects.
+
 A message whose processing fails is retried or dead-lettered:
 
 - **Invalid data, an application or model type the worker doesn't know, or an event it doesn't handle** — dead-lettered at once.
@@ -96,7 +98,15 @@ When the broker doesn't confirm a message a worker publishes on to the next stag
 
 Messages dead-lettered from `writer` and `transport-manager` land in `writer.dlq` and `transport-manager.dlq`, created by the deployment bootstrap. Each keeps the newest `message_queue.deadLetterMaxLength` messages (100 by default), for `message_queue.deadLetterRetention` seconds (3 days by default); a transport's are dropped. Each one is logged with its queue, event and error. See [`nexxus-message-queue-lib`](../message_queue/README.md#failed-messages).
 
-`close()` deregisters from the Hub, stops the management server, stops consuming and gives the messages being processed up to 10 seconds to finish, then disconnects from the database, message queue and Redis. A message still running after that goes back to its queue. A websockets transport also deletes its slot queue and closes its WebSocket server.
+`close()` deregisters from the Hub, stops the management server, stops consuming and gives the messages being processed up to 10 seconds to finish, then disconnects from the database, message queue and Redis. A message still running after that goes back to its queue.
+
+A websockets transport's `close()`, in order:
+
+1. Stops accepting connections.
+2. Stops consuming, giving the messages being processed up to 10 seconds to finish.
+3. Closes every connection with code `1012`. Each device is marked offline and its subscriptions are removed. A connection still open after 3 seconds is cut off.
+4. Deletes its slot queue.
+5. Deregisters from the Hub, stops the management server, and disconnects from the database, message queue and Redis.
 
 ---
 
@@ -129,6 +139,7 @@ Every worker reads the `app` section of the config file. The `database`, `messag
 | `management.port`, `management.token` | yes | Port and bearer token of the management server. |
 | `hub.endpoint`, `hub.token` | no | Hub to register with. Without it the worker runs standalone. |
 | `port` | websockets transport only | Port of the WebSocket server. |
+| `heartbeatInterval` | no | Websockets transport: seconds between pings to each connection, 5 to 300, default 30. Keep it below the idle timeout of a load balancer in front of the transport. |
 
 No worker reads environment variables of its own.
 
@@ -163,8 +174,9 @@ A stored filter that no longer compiles against the model's schema — after a f
 ### Websockets transport
 
 - Each instance consumes its own queue, `websockets-transport_<slot>`. The slot is the lowest number the Hub doesn't list as taken. Without a Hub the slot is 0, and a second instance fails to start.
-- A connected device is recorded in Redis as online on that queue, which is where the Transport Manager sends its events. On disconnect it is marked offline.
-- Messages of 2 KB or more are compressed for clients that support `permessage-deflate`. The server answers pings and sends none.
+- A connected device is recorded in Redis as online on that queue, which is where the Transport Manager sends its events. Registering drops the subscriptions an earlier connection of the device left behind, so a device subscribes again after every reconnect. On disconnect the device is marked offline, unless it has registered again since, on this instance or another.
+- Messages of 2 KB or more are compressed for clients that support `permessage-deflate`. The server answers pings, and pings every connection every `heartbeatInterval` seconds; a connection that hasn't answered by the next ping is closed.
+- When its message-queue connection drops, the instance loses its slot queue with it. It closes every connection with code `1012`, and new ones with `1013`. Once the message queue is back, it declares the slot queue again and takes connections again. If the queue exists by then, another instance has taken the slot, and the worker emits `error`.
 
 ---
 
@@ -217,6 +229,8 @@ Every frame is JSON: `{ "event": "<name>", "data": { … } }`.
 | --- | --- | --- |
 | `4001` | `logged_out` | The session was ended with `POST /auth/logout`. Don't reconnect with it. |
 | `4002` | `token_expired` | Refresh the token, reconnect, and register again. |
+| `1012` | `service_restart` | The transport instance is shutting down, or has lost its message queue. Reconnect after a short random delay. |
+| `1013` | `try_again_later` | The transport instance can't take connections right now. Reconnect later, waiting longer after each attempt. |
 
 ---
 
@@ -224,8 +238,8 @@ Every frame is JSON: `{ "event": "<name>", "data": { … } }`.
 
 The built-in workers are subclasses of the exported base classes.
 
-- **`NexxusBaseWorker`** — set `queueName` and `nodeRole`, a static `schemaPath` for the worker's `app` config, and implement `processMessage(msg)`. `publish(queue, payload)` sends to another queue; `getOwnStats()` adds fields to `/stats`. Nothing built in publishes to a custom queue.
-- **`NexxusVolatileTransportWorker`** — for transports that hold a connection per device. Implement `initTransport()`, `sendToDevice(deviceId, data)` and `disconnectDevice(deviceId, reason)`. `authenticateDevice(token)`, `authenticateRefreshedToken(token, deviceId, appId)`, `registerDevice(deviceId)` and `unregisterDevice(deviceId)` cover token checks and the device's Redis state. Slot queues come with it.
+- **`NexxusBaseWorker`** — set `queueName` and `nodeRole`, a static `schemaPath` for the worker's `app` config, and implement `processMessage(msg)`. `publish(queue, payload)` sends to another queue; `getOwnStats()` adds fields to `/stats`. Nothing built in publishes to a custom queue. `onServiceDown(name)` runs when the database (`db`), message queue (`mq`) or Redis (`redis`) disconnects; `beforeResume()` runs before consuming resumes, once all three are back, and rejecting from it is fatal.
+- **`NexxusVolatileTransportWorker`** — for transports that hold a connection per device. Implement `initTransport()`, `sendToDevice(deviceId, data)`, `disconnectDevice(deviceId, reason)`, `stopAcceptingConnections()` and `disconnectAllDevices(reason)`; the last resolves once every connection has been torn down. `authenticateDevice(token)`, `authenticateRefreshedToken(token, deviceId, appId)`, `registerDevice(deviceId)` and `unregisterDevice(deviceId)` cover token checks and the device's Redis state. Slot queues come with it.
 - **`NexxusPersistentTransportWorker`** — for push services (APNs, FCM, …). All instances share one queue. Implement `initTransport()` and `sendToDevice(deviceId, data)`. No push transport ships yet.
 
 `processMessage` or `sendToDevice` handed an event it doesn't handle throws `NexxusWorkerUnsupportedEventException`, so the message is dead-lettered at once.

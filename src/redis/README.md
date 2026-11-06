@@ -165,6 +165,7 @@ Notable client behavior:
 - **RESP3 + client-side caching** — the client negotiates RESP3 and keeps a small local cache (FIFO, ~1000 entries, 5-minute TTL) to shave round trips off hot reads.
 - **Cluster or single node** — `cluster: true` switches to a cluster client (with replica reads); otherwise a single-node client.
 - **Lifecycle events** — like the other adapters, it emits `connect` / `disconnect` (mapped from the underlying client's `ready` / `error` / `end`), which the API and workers use to gate availability.
+- **Lua scripts** — writes that check and change a key in one step run as Lua scripts, kept as `.lua` files in [`src/lib/scripts`](src/lib/scripts) and read when `NexxusRedis` is created. Each is sent with `SCRIPT LOAD` on its first run on a connection, then run by its SHA1 (`EVALSHA`). After a disconnect each is sent again, and one Redis no longer holds is run from its source.
 
 The Redis config declares no env-var or CLI specs, so it comes from the config file (or a custom provider) rather than `NXX_`-prefixed vars.
 
@@ -174,8 +175,9 @@ Partition count is a fixed internal constant (16), not a configuration knob.
 
 ## Key classes
 
-- **`NexxusRedis`** — the connection wrapper (`init`, `getClient`, `close`, `getStats`); the single entry point to the client.
-- **`NexxusDevice`** — the device JSON document and its subscription list; create/get/update, add/remove-subscription helpers, and `exists`, which checks many devices at once with one `EXISTS` per device, so it works on a cluster.
+- **`NexxusRedis`** — the connection wrapper (`init`, `getClient`, `scripts`, `close`, `getStats`); the single entry point to the client.
+- **`NexxusRedisScriptLoader`** — runs the Lua scripts: `run(name, { keys, args })` returns the script's result. `NexxusRedis.instance.scripts` is the one for the current connection.
+- **`NexxusDevice`** — the device JSON document and its subscription list; create/get/update, add/remove-subscription helpers, and `exists`, which checks many devices at once with one `EXISTS` per device, so it works on a cluster. `attachTransport(deviceId, transport)` marks the device online on `transport` as a volatile connection, if its session is still active; it returns whether it did. `detachTransport(deviceId, transport)` removes the device's routes through `transport` and marks it offline, unless the device has registered on another transport since; it returns whether it marked it offline.
 - **`NexxusRedisSubscription`** — a channel's reverse index; builds the keys, manages partition membership, the scope registry, and the filter registry, and expands fan-out scopes.
 - **`NexxusAuthNonce`** — single-use, expiring nonces scoped to an application, at `nxx:auth-nonce:{appId}:{nonce}`; `issue`, and `consume` as one atomic read-and-delete.
 - **`NexxusModelFieldCache`** — the per-object fields ACL conditions are checked against, at `nxx:field-cache:{objectId}`; kept by the Writer, and expiring.

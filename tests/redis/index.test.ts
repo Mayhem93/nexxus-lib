@@ -14,6 +14,7 @@ vi.mock('redis', async () => {
 });
 
 import './Exceptions';
+import './ScriptLoader';
 import './Redis';
 import './Subscription';
 import './FieldCache';
