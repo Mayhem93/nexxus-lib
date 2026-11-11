@@ -100,6 +100,11 @@ import passport from 'passport';
 
 export type NexxusApiHeaders = {
   'nxx-app-id'?: Readonly<string>;
+  /**
+   * The connection a subscription request is for, as the transport's `register`
+   * reply named it. Only connections of the token's own device can be named.
+   */
+  'nxx-connection-id'?: Readonly<string>;
 };
 
 export interface NexxusApiRequest extends Express.Request {

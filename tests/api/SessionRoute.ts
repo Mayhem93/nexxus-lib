@@ -35,7 +35,7 @@ async function serve(): Promise<void> {
 
 /** Register device `d1` and issue it a session, returning the refresh token. */
 async function signIn(): Promise<string> {
-  await new NexxusDevice({ id: 'd1', appId: 'app1', name: 'Kiosk', subscriptions: [] }).save();
+  await new NexxusDevice({ id: 'd1', appId: 'app1', name: 'Kiosk' }).save();
 
   return (await NexxusApiSession.issue(app, await NexxusDevice.get('d1'))).refreshToken;
 }

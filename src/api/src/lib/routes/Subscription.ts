@@ -57,8 +57,10 @@ export default class SubscriptionRoute extends NexxusApiBaseRoute {
       RequiredHeadersMiddleware('nxx-app-id') as RequestHandler,
       AppExistsMiddleware() as RequestHandler,
       AuthMiddleware as RequestHandler,
-      // Subscriptions belong to the calling device, which the token identifies.
-      RequiresDeviceMiddleware as RequestHandler
+      // Subscriptions belong to one connection of the calling device, which the
+      // token identifies.
+      RequiresDeviceMiddleware as RequestHandler,
+      RequiredHeadersMiddleware('nxx-connection-id') as RequestHandler
     );
 
     // ACL enforcement for subscribe/unsubscribe is wired inside the handlers
@@ -70,6 +72,7 @@ export default class SubscriptionRoute extends NexxusApiBaseRoute {
   private async subscribe(req: SubscribeRequest, res: NexxusApiResponse): Promise<void> {
     // Non-null: RequiresDeviceMiddleware is wired on this router.
     const deviceId = req.deviceId!;
+    const connectionId = SubscriptionRoute.connectionId(req);
 
     const validated = NexxusApiModelParams.validate(req, req.body, req.body.model);
     const { appId, app, model, id, userId, filter } = validated;
@@ -115,14 +118,12 @@ export default class SubscriptionRoute extends NexxusApiBaseRoute {
     });
 
     try {
-      const device = await NexxusDevice.get(deviceId, true);
-
-      await device.addSubscription(sub);
+      await NexxusDevice.addSubscription(deviceId, connectionId, sub);
     } catch (e) {
       if (e instanceof RedisKeyNotFoundException) {
         throw new NotFoundException(`Device with id "${deviceId}" not found`);
       } else if (e instanceof RedisDeviceNotConnectedException) {
-        throw new DeviceNotConnectedException(`Device with id "${deviceId}" is not connected to any transport`);
+        throw new DeviceNotConnectedException(`Connection "${connectionId}" of device "${deviceId}" is not open`);
       }
 
       throw e;
@@ -150,6 +151,7 @@ export default class SubscriptionRoute extends NexxusApiBaseRoute {
   private async unsubscribe(req: UnsubscribeRequest, res: NexxusApiResponse): Promise<void> {
     // Non-null: RequiresDeviceMiddleware is wired on this router.
     const deviceId = req.deviceId!;
+    const connectionId = SubscriptionRoute.connectionId(req);
 
     const validated = NexxusApiModelParams.validate(req, req.body, req.body.model);
     const { appId, app, model, id, userId, filter } = validated;
@@ -181,23 +183,36 @@ export default class SubscriptionRoute extends NexxusApiBaseRoute {
     let removed: boolean;
 
     try {
-      const device = await NexxusDevice.get(deviceId, true);
-
-      removed = await device.removeSubscription(sub);
+      removed = await NexxusDevice.removeSubscription(deviceId, connectionId, sub);
     } catch (e) {
       if (e instanceof RedisKeyNotFoundException) {
         throw new NotFoundException(`Device with id "${deviceId}" not found`);
       } else if (e instanceof RedisDeviceNotConnectedException) {
-        throw new DeviceNotConnectedException(`Device with id "${deviceId}" is not connected to any transport`);
+        throw new DeviceNotConnectedException(`Connection "${connectionId}" of device "${deviceId}" is not open`);
       }
 
       throw e;
     }
 
     if (!removed) {
-      throw new NotFoundException(`Subscription "${sub.getKey()}" not found on device "${deviceId}"`);
+      throw new NotFoundException(`Subscription "${sub.getKey()}" not found on connection "${connectionId}"`);
     }
 
     res.status(200).json({ data: { channel: sub.getKey() } });
+  }
+
+  /**
+   * The connection a request is for, from its `nxx-connection-id` header. It is
+   * looked up on the token's own device, so a client can only name its own
+   * device's connections.
+   */
+  private static connectionId(req: NexxusApiRequest): string {
+    const connectionId = req.headers['nxx-connection-id'];
+
+    if (typeof connectionId !== 'string' || !NexxusDevice.isValidConnectionId(connectionId)) {
+      throw new InvalidParametersException('Invalid nxx-connection-id header');
+    }
+
+    return connectionId;
   }
 }

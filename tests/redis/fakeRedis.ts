@@ -5,10 +5,10 @@
  * etc.) so multi-step lifecycles (partition counting, scope decrement-to-zero
  * cleanup) are exercised for real. TTL is not modeled (expire is a no-op that
  * only reports whether the key exists). The JSON namespace supports the paths
- * the models use: '$' (whole doc), '$.subscriptions' and '$.session'. Scripting
- * holds scripts by SHA1 as Redis does (SCRIPT LOAD, EVALSHA, EVAL) and runs the
- * four the models use, recognised by their source: the device-session
- * compare-and-set, the device attach and detach, and the username-lock release.
+ * the models use: '$' (whole doc), '$.session' and a connection's entry,
+ * `$.connections['<id>']`. Scripting holds scripts by SHA1
+ * as Redis does (SCRIPT LOAD, EVALSHA, EVAL) and runs the ones the models use,
+ * recognised by their source.
  */
 import { NexxusRedisScriptLoader, type NexxusRedisScriptName } from '@mayhem93/nexxus-redis';
 
@@ -29,6 +29,9 @@ export class FakeRedis {
     Object.entries(NexxusRedisScriptLoader.readSources())
       .map(([ name, source ]) => [ source, name as NexxusRedisScriptName ])
   );
+
+  /** A connection's entry path, `$.connections['<id>']`, capturing the id. */
+  private static readonly CONNECTION_PATH = /^\$\.connections\['([^']+)'\]$/;
 
   public store = new Map<string, Entry>();
 
@@ -226,7 +229,7 @@ export class FakeRedis {
   }
 
   /** Runs a script held here; refuses one that isn't, with Redis's NOSCRIPT error. */
-  async evalSha(sha: string, opts: ScriptOptions): Promise<number> {
+  async evalSha(sha: string, opts: ScriptOptions): Promise<number | string | null> {
     const source = this.#scripts.get(sha);
 
     if (source === undefined) {
@@ -237,7 +240,7 @@ export class FakeRedis {
   }
 
   /** Runs a script from its source, and holds it from then on, as Redis does. */
-  async eval(source: string, opts: ScriptOptions): Promise<number> {
+  async eval(source: string, opts: ScriptOptions): Promise<number | string | null> {
     this.#scripts.set(FakeRedis.sha1(source), source);
 
     return this.runScript(source, opts);
@@ -247,14 +250,39 @@ export class FakeRedis {
    * Emulates each script with its own return contract. The username-lock
    * release: 1 deleted, 0 the lock holds another token (or is gone). The
    * device-session compare-and-set: 1 swapped, 0 the stored hash moved on (or
-   * there is no session), -1 no such device. The device attach: 1 marked
-   * online, 0 its session has ended or expired, -1 no such device. The device
-   * detach: 1 marked offline, 0 the device is on another transport (or none),
-   * -1 no such device. Any other script is refused, so a new one can't silently
-   * hit a fake that does nothing.
+   * there is no session), -1 no such device. The counter release: what is left
+   * on the counter. The connection scripts: see `runConnectionScript`. Any
+   * other script is refused, so a new one can't silently hit a fake that does
+   * nothing.
    */
-  private runScript(source: string, opts: ScriptOptions): number {
+  private runScript(source: string, opts: ScriptOptions): number | string | null {
     const name = FakeRedis.SCRIPT_NAMES.get(source);
+
+    if (name?.startsWith('connection-')) {
+      return this.runConnectionScript(name, opts);
+    }
+
+    // One off the counter; at zero it goes, with the fields named after it.
+    if (name === 'counter-release') {
+      const [ counter, ...alongside ] = opts.arguments as [ string, ...string[] ];
+      const hash = this.hash(opts.keys[0]!);
+      const count = parseInt(hash.get(counter) ?? '0', 10) - 1;
+
+      if (count > 0) {
+        hash.set(counter, String(count));
+      } else {
+        for (const field of [ counter, ...alongside ]) {
+          hash.delete(field);
+        }
+
+        // As Redis does, a hash with no fields left is deleted.
+        if (hash.size === 0) {
+          this.store.delete(opts.keys[0]!);
+        }
+      }
+
+      return count;
+    }
 
     if (name === 'username-lock-release') {
       const lock = this.store.get(opts.keys[0]!);
@@ -262,44 +290,6 @@ export class FakeRedis {
       if (lock?.type !== 'string' || lock.value !== opts.arguments[0]) return 0;
 
       this.store.delete(opts.keys[0]!);
-
-      return 1;
-    }
-
-    if (name === 'device-attach') {
-      this.beforeEval?.();
-
-      const device = this.store.get(opts.keys[0]!);
-
-      if (!device) return -1;
-
-      const doc = (device as { value: any }).value;
-      const expiresAt = doc.session?.expiresAt;
-
-      if (expiresAt === undefined || expiresAt <= Number(opts.arguments[1])) return 0;
-
-      Object.assign(doc, {
-        type: 'volatile', status: 'online',
-        transport: JSON.parse(opts.arguments[0]!), lastSeen: JSON.parse(opts.arguments[2]!),
-      });
-
-      return 1;
-    }
-
-    if (name === 'device-detach') {
-      this.beforeEval?.();
-
-      const device = this.store.get(opts.keys[0]!);
-
-      if (!device) return -1;
-
-      const doc = (device as { value: any }).value;
-
-      if (doc.transport !== opts.arguments[0]) return 0;
-
-      Object.assign(doc, {
-        subscriptions: [], status: 'offline', transport: null, lastSeen: JSON.parse(opts.arguments[1]!),
-      });
 
       return 1;
     }
@@ -323,6 +313,89 @@ export class FakeRedis {
     return 1;
   }
 
+  /**
+   * The connection scripts, each acting on the entry its first argument's path
+   * names. Open: 1 open (an entry already there is kept), 0 the session has
+   * ended or expired, -1 no such device. Subscribe: the transport once the
+   * channel is listed, -2 no entry or a closing one, -1 no such device.
+   * Unsubscribe: 1 removed, 0 not listed, -2 no entry, -1 no such device.
+   * Close: the entry as it was, inside a JSON list, now marked closing; null
+   * when there is none.
+   */
+  private runConnectionScript(name: NexxusRedisScriptName, opts: ScriptOptions): number | string | null {
+    this.beforeEval?.();
+
+    const device = this.store.get(opts.keys[0]!) as { value: any } | undefined;
+    const id = FakeRedis.connectionId(opts.arguments[0]!);
+    const entry = device?.value.connections?.[id];
+
+    switch (name) {
+      case 'connection-open': {
+        if (!device) return -1;
+
+        const expiresAt = device.value.session?.expiresAt;
+
+        if (expiresAt === undefined || expiresAt <= Number(opts.arguments[2])) return 0;
+
+        device.value.connections ??= {};
+        device.value.connections[id] ??= JSON.parse(opts.arguments[1]!);
+        device.value.lastSeen = JSON.parse(opts.arguments[3]!);
+
+        return 1;
+      }
+
+      case 'connection-subscribe': {
+        if (!device) return -1;
+        if (!entry || entry.closing) return -2;
+
+        const channel = JSON.parse(opts.arguments[1]!);
+
+        if (!entry.subscriptions.includes(channel)) {
+          entry.subscriptions.push(channel);
+        }
+
+        return entry.transport;
+      }
+
+      case 'connection-unsubscribe': {
+        if (!device) return -1;
+        if (!entry) return -2;
+
+        const i = entry.subscriptions.indexOf(JSON.parse(opts.arguments[1]!));
+
+        if (i === -1) return 0;
+
+        entry.subscriptions.splice(i, 1);
+
+        return 1;
+      }
+
+      case 'connection-close': {
+        if (!entry) return null;
+
+        const before = JSON.stringify([ entry ]);
+
+        entry.closing = true;
+
+        return before;
+      }
+
+      default:
+        throw new Error('FakeRedis: unsupported script');
+    }
+  }
+
+  /** The connection id inside an entry path, `$.connections['<id>']`. */
+  private static connectionId(path: string): string {
+    const match = FakeRedis.CONNECTION_PATH.exec(path);
+
+    if (!match) {
+      throw new Error(`FakeRedis: not a connection path: ${path}`);
+    }
+
+    return match[1]!;
+  }
+
   private static sha1(source: string): string {
     return createHash('sha1').update(source).digest('hex');
   }
@@ -334,16 +407,22 @@ export class FakeRedis {
 
       if (!e) return null;
 
-      const obj = (e as { value: any }).value;
-
-      if (opts?.path === '$.subscriptions') {
-        return obj.subscriptions ?? null;
-      }
+      // Every read is a copy, as one from a real server is: the caller can't
+      // reach into the store, or see it change after the read.
+      const obj = structuredClone((e as { value: any }).value);
 
       // Faithful to real RedisJSON: a JSONPath read returns an ARRAY of matches,
       // empty when the path matches nothing.
       if (opts?.path === '$.session') {
         return obj.session === undefined ? [] : [ obj.session ];
+      }
+
+      const connection = FakeRedis.CONNECTION_PATH.exec(opts?.path ?? '');
+
+      if (connection) {
+        const entry = obj.connections?.[connection[1]!];
+
+        return entry === undefined ? [] : [ entry ];
       }
 
       return obj;
@@ -374,8 +453,18 @@ export class FakeRedis {
 
       if (!e) return 0;
 
-      const field = (opts?.path ?? '$').replace('$.', '');
       const doc = (e as { value: any }).value;
+      const connection = FakeRedis.CONNECTION_PATH.exec(opts?.path ?? '');
+
+      if (connection) {
+        if (doc.connections?.[connection[1]!] === undefined) return 0;
+
+        delete doc.connections[connection[1]!];
+
+        return 1;
+      }
+
+      const field = (opts?.path ?? '$').replace('$.', '');
 
       if (!(field in doc)) return 0;
 
@@ -395,35 +484,6 @@ export class FakeRedis {
       }
 
       return 'OK';
-    },
-    arrAppend: async (key: string, _path: string, value: any): Promise<number | null> => {
-      const e = this.store.get(key);
-
-      if (!e) return null;
-
-      (e as { value: any }).value.subscriptions.push(value);
-
-      return (e as { value: any }).value.subscriptions.length;
-    },
-    arrPop: async (key: string, opts: { path: string; index: number }): Promise<any> => {
-      const e = this.store.get(key);
-
-      if (!e) return null;
-
-      const arr = (e as { value: any }).value.subscriptions as any[];
-
-      if (opts.index < 0 || opts.index >= arr.length) return null;
-
-      return arr.splice(opts.index, 1)[0];
-    },
-    clear: async (key: string, _opts: { path: string }): Promise<number> => {
-      const e = this.store.get(key);
-
-      if (e) {
-        (e as { value: any }).value.subscriptions = [];
-      }
-
-      return 1;
     },
   };
 }

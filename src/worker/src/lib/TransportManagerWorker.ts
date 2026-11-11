@@ -7,6 +7,7 @@ import {
   NexxusTransportManagerModelUpdatedPayload,
   NexxusTransportManagerModelDeletedPayload,
   NexxusTransportDeviceMessagePayload,
+  NexxusTransportRecipient,
   NexxusBaseQueuePayload,
   NexxusFilterQuery,
   INexxusAppModel,
@@ -47,12 +48,12 @@ type NexxusTransportManagerWorkerEvents = NexxusBaseWorkerEvents & {
 type NexxusTransportManagerWorkerStats = NexxusBaseWorkerStats & {}
 
 /**
- * One fan-out message's worth of recipients: every device that matched the
+ * One fan-out message's worth of recipients: every connection that matched the
  * exact same set of channels, and therefore shares a single transport payload.
  */
 type NexxusFanOutGroup = {
   channels: string[];
-  deviceIds: string[];
+  recipients: NexxusTransportRecipient[];
 };
 
 /** One `device_message`, and the transport queue it goes to. */
@@ -133,14 +134,14 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<
     const messages: NexxusFanOutMessage[] = [];
 
     for (const [transport, groups] of this.groupDevicesForFanOut(deviceToChannelsMap).entries()) {
-      let deviceCount = 0;
+      let connectionCount = 0;
 
-      for (const { channels, deviceIds } of groups) {
-        deviceCount += deviceIds.length;
+      for (const { channels, recipients } of groups) {
+        connectionCount += recipients.length;
 
         messages.push({ transport, payload: {
           event: 'device_message',
-          deviceIds,
+          recipients,
           data: {
             event: 'model_created',
             model: data,
@@ -152,14 +153,14 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<
       }
 
       NexxusTransportManagerWorker.logger.info(
-        `Notifying ${deviceCount} devices about new model with ID: "${data.id}" via transport: "${transport}" ` +
+        `Notifying ${connectionCount} connection(s) about new model with ID: "${data.id}" via transport: "${transport}" ` +
         `in ${groups.length} message(s)`,
         {
           appId: data.appId,
           modelId: data.id,
           modelType: data.type,
           transport,
-          deviceCount,
+          connectionCount,
           messageCount: groups.length
         },
         NexxusTransportManagerWorker.loggerLabel
@@ -211,14 +212,14 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<
     const messages: NexxusFanOutMessage[] = [];
 
     for (const [transport, groups] of this.groupDevicesForFanOut(deviceToChannelsMap).entries()) {
-      let deviceCount = 0;
+      let connectionCount = 0;
 
-      for (const { channels, deviceIds } of groups) {
-        deviceCount += deviceIds.length;
+      for (const { channels, recipients } of groups) {
+        connectionCount += recipients.length;
 
         messages.push({ transport, payload: {
           event: 'device_message',
-          deviceIds,
+          recipients,
           data: {
             event: 'model_updated',
             model: modelIdentity,
@@ -229,14 +230,14 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<
       }
 
       NexxusTransportManagerWorker.logger.info(
-        `Notified ${deviceCount} devices about update to model ID: "${data[0].metadata.id}" via transport: "${transport}" ` +
+        `Notified ${connectionCount} connection(s) about update to model ID: "${data[0].metadata.id}" via transport: "${transport}" ` +
         `in ${groups.length} message(s)`,
         {
           appId: data[0].metadata.appId,
           modelId: data[0].metadata.id,
           modelType: data[0].metadata.type,
           transport,
-          deviceCount,
+          connectionCount,
           messageCount: groups.length
         },
         NexxusTransportManagerWorker.loggerLabel
@@ -262,14 +263,14 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<
     const messages: NexxusFanOutMessage[] = [];
 
     for (const [transport, groups] of this.groupDevicesForFanOut(deviceToChannelsMap).entries()) {
-      let deviceCount = 0;
+      let connectionCount = 0;
 
-      for (const { channels, deviceIds } of groups) {
-        deviceCount += deviceIds.length;
+      for (const { channels, recipients } of groups) {
+        connectionCount += recipients.length;
 
         messages.push({ transport, payload: {
           event: 'device_message',
-          deviceIds,
+          recipients,
           data: {
             event: 'model_deleted',
             model,
@@ -281,14 +282,14 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<
       }
 
       NexxusTransportManagerWorker.logger.info(
-        `Notifying ${deviceCount} devices about deleted model with ID: "${data.id}" via transport: "${transport}" ` +
+        `Notifying ${connectionCount} connection(s) about deleted model with ID: "${data.id}" via transport: "${transport}" ` +
         `in ${groups.length} message(s)`,
         {
           appId: data.appId,
           modelId: data.id,
           modelType: data.type,
           transport,
-          deviceCount,
+          connectionCount,
           messageCount: groups.length
         },
         NexxusTransportManagerWorker.loggerLabel
@@ -321,25 +322,25 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<
   }
 
   /**
-   * Batches the flat device→channels map into as few transport messages as
+   * Batches the flat route→channels map into as few transport messages as
    * possible: one per (transport, distinct channel set).
    *
-   * A `device_message` carries `deviceIds` as an array precisely so a single
-   * publish can serve many devices, but its `metadata.channels` is shared by
-   * every recipient in that message — clients use it to correlate the event
-   * with their local subscription containers, so devices that matched on
-   * different channels cannot be merged into the same message. Devices that
+   * A `device_message` carries `recipients` as an array precisely so a single
+   * publish can serve many connections, but its `metadata.channels` is shared
+   * by every recipient in that message — clients use it to correlate the event
+   * with their local subscription containers, so connections that matched on
+   * different channels cannot be merged into the same message. Connections that
    * matched the *same* channels can, which is the common case: most recipients
-   * come from the same unfiltered channel, so a fan-out to N devices collapses
-   * to a handful of messages instead of N.
+   * come from the same unfiltered channel, so a fan-out to N connections
+   * collapses to a handful of messages instead of N.
    */
   private groupDevicesForFanOut(
     deviceToChannelsMap: Map<NexxusDeviceTransportString, Set<string>>
   ): Map<NexxusQueueName, NexxusFanOutGroup[]> {
     const transportToGroups = new Map<NexxusQueueName, Map<string, NexxusFanOutGroup>>();
 
-    for (const [deviceTransport, channelKeys] of deviceToChannelsMap.entries()) {
-      const [deviceId, transport] = deviceTransport.split('|') as [string, NexxusQueueName];
+    for (const [route, channelKeys] of deviceToChannelsMap.entries()) {
+      const [deviceId, transport, connectionId] = route.split('|') as [string, NexxusQueueName, string];
       // Sorted so two devices that matched the same channels in a different
       // order still land in the same group. Channel keys are colon-delimited
       // and never contain a newline, so it's a collision-free separator.
@@ -356,9 +357,9 @@ export class NexxusTransportManagerWorker extends NexxusBaseWorker<
       const existing = groups.get(signature);
 
       if (existing) {
-        existing.deviceIds.push(deviceId);
+        existing.recipients.push({ deviceId, connectionId });
       } else {
-        groups.set(signature, { channels, deviceIds: [ deviceId ] });
+        groups.set(signature, { channels, recipients: [ { deviceId, connectionId } ] });
       }
     }
 

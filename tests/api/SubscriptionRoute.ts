@@ -33,9 +33,10 @@ let app: NexxusApplication;
 
 const APP_ONLY: Record<string, string> = { 'nxx-app-id': 'app1' };
 
-function as(user?: unknown, deviceId = 'd1'): Record<string, string> {
+function as(user?: unknown, deviceId = 'd1', connectionId = 'c1'): Record<string, string> {
   return {
     'nxx-app-id': 'app1',
+    'nxx-connection-id': connectionId,
     authorization: `Bearer ${NexxusToken.issue(app, { appId: 'app1', deviceId, user: user as never })}`,
   };
 }
@@ -50,13 +51,19 @@ const send = (method: string, body: unknown, headers: Record<string, string>) =>
 const subscribe = (body: unknown, headers = as()) => send('POST', body, headers);
 const unsubscribe = (body: unknown, headers = as()) => send('DELETE', body, headers);
 
-/** A device that is connected to a transport — required to hold subscriptions. */
-async function connectedDevice(id = 'd1', userId?: string): Promise<void> {
-  const device = new NexxusDevice({ id, appId: 'app1', userId, name: 'Phone', subscriptions: [] });
+/** A signed-in device with the connections named open — a subscription belongs to one. */
+async function connectedDevice(id = 'd1', userId?: string, connectionIds = [ 'c1' ]): Promise<void> {
+  await new NexxusDevice({ id, appId: 'app1', userId, name: 'Phone' }).save();
+  await NexxusDevice.setSession(id, 'secret', Math.floor(Date.now() / 1000) + 3600);
 
-  await device.save();
-  await NexxusDevice.update(id, { transport: 'websockets-transport_0', type: 'volatile', status: 'online' });
+  for (const connectionId of connectionIds) {
+    await NexxusDevice.openConnection(id, connectionId, { transport: 'websockets-transport_0', type: 'volatile' });
+  }
 }
+
+/** The channels connection `connectionId` of device `id` subscribes to. */
+const subscriptionsOf = async (id: string, connectionId: string): Promise<string[]> =>
+  (await NexxusDevice.get(id)).getConnections()[connectionId]!.subscriptions;
 
 async function serve(application: NexxusApplication): Promise<void> {
   app = seedApp(application);
@@ -99,10 +106,35 @@ describe('POST /subscription', () => {
     expect(res.status).toBe(200);
     expect(res.body.data.channelId).toEqual(expect.any(String));
     expect(res.body.data.items).toHaveLength(1);
+    expect(await subscriptionsOf('d1', 'c1')).toEqual([ res.body.data.channelId ]);
+  });
 
-    const device = await NexxusDevice.get('d1', true);
+  /** Two tabs: each subscribes on its own, and only its own connection gets the events. */
+  it('subscribes only the connection the request names', async () => {
+    await serve(makeApp({ schema: SCHEMA }));
+    await connectedDevice('d1', undefined, [ 'c1', 'c2' ]);
 
-    expect(device.getValue().subscriptions).toHaveLength(1);
+    const res = await subscribe({ model: 'runs' }, as(undefined, 'd1', 'c2'));
+
+    expect(res.status).toBe(200);
+    expect(await subscriptionsOf('d1', 'c2')).toEqual([ res.body.data.channelId ]);
+    expect(await subscriptionsOf('d1', 'c1')).toEqual([]);
+  });
+
+  it('400s a request with no connection id, or one that is not valid', async () => {
+    await serve(makeApp({ schema: SCHEMA }));
+    await connectedDevice();
+
+    const { 'nxx-connection-id': _omitted, ...withoutConnection } = as();
+    const missing = await subscribe({ model: 'runs' }, withoutConnection);
+
+    expect(missing.status).toBe(400);
+    expect(missing.body.message).toMatch(/Missing required header: nxx-connection-id/);
+
+    const malformed = await subscribe({ model: 'runs' }, as(undefined, 'd1', 'a|b'));
+
+    expect(malformed.status).toBe(400);
+    expect(malformed.body.message).toMatch(/Invalid nxx-connection-id header/);
   });
 
   it('asks the database for a consistent first page', async () => {
@@ -135,16 +167,17 @@ describe('POST /subscription', () => {
     expect(res.body.error).toBe('NotFoundException');
   });
 
-  it('409s a device that is not connected to a transport', async () => {
+  it('409s a connection that is not open', async () => {
     await serve(makeApp({ schema: SCHEMA }));
-    await new NexxusDevice({ id: 'd1', appId: 'app1', name: 'Phone', subscriptions: [] }).save();
+    await new NexxusDevice({ id: 'd1', appId: 'app1', name: 'Phone' }).save();
 
-    // Subscriptions are delivered over a transport — recording one for a device
-    // with nowhere to send it would accrue state nothing can consume.
+    // Subscriptions are delivered over a connection — recording one for a
+    // connection that isn't open would accrue state nothing can consume.
     const res = await subscribe({ model: 'runs' });
 
     expect(res.status).toBe(409);
     expect(res.body.error).toBe('DeviceNotConnectedException');
+    expect(res.body.message).toMatch(/Connection "c1" of device "d1" is not open/);
   });
 
   it('400s a request carrying no device', async () => {
@@ -254,17 +287,17 @@ describe('DELETE /subscription', () => {
     // Same inputs must derive the same key, or a subscription could never be
     // removed by the client that made it.
     expect(removed.body.data.channel).toBe(created.body.data.channelId);
-    expect((await NexxusDevice.get('d1', true)).getValue().subscriptions).toHaveLength(0);
+    expect(await subscriptionsOf('d1', 'c1')).toEqual([]);
   });
 
-  it('404s a subscription the device does not have', async () => {
+  it('404s a subscription the connection does not have', async () => {
     await serve(makeApp({ schema: SCHEMA }));
     await connectedDevice();
 
     const res = await unsubscribe({ model: 'runs' });
 
     expect(res.status).toBe(404);
-    expect(res.body.message).toMatch(/not found on device "d1"/);
+    expect(res.body.message).toMatch(/not found on connection "c1"/);
   });
 
   it('does not match a subscription made with a different filter', async () => {
@@ -305,9 +338,9 @@ describe('DELETE /subscription', () => {
     expect((await unsubscribe({ model: 'runs' })).status).toBe(404);
   });
 
-  it('409s a device that is not connected to a transport', async () => {
+  it('409s a connection that does not exist', async () => {
     await serve(makeApp({ schema: SCHEMA }));
-    await new NexxusDevice({ id: 'd1', appId: 'app1', name: 'Phone', subscriptions: [] }).save();
+    await new NexxusDevice({ id: 'd1', appId: 'app1', name: 'Phone' }).save();
 
     expect((await unsubscribe({ model: 'runs' })).status).toBe(409);
   });

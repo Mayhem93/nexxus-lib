@@ -78,7 +78,7 @@ const seedDevice = (id: string, over: Record<string, unknown> = {}) => {
   h.redisClient.store.set(NexxusDevice.getKey(id), {
     type: 'json',
     value: {
-      id, appId: 'app1', name: 'D', type: 'unknown', subscriptions: [],
+      id, appId: 'app1', name: 'D', connections: {},
       session: { hash: 'not-read-by-the-transport', expiresAt: Math.floor(Date.now() / 1000) + 86400 },
       ...over,
     },
@@ -87,6 +87,12 @@ const seedDevice = (id: string, over: Record<string, unknown> = {}) => {
 
 const storedDevice = (id: string): any =>
   (h.redisClient.store.get(NexxusDevice.getKey(id)) as { value: any } | undefined)?.value;
+
+/** The ids of the connections device `id` has open in Redis. */
+const openConnections = (id: string): string[] => Object.keys(storedDevice(id)?.connections ?? {});
+
+/** What a successful `register` answers: the new connection's id. */
+const REGISTERED = { event: 'register', data: { success: true, connectionId: expect.any(String) } };
 
 const connect = (options?: WebSocket.ClientOptions): Promise<WebSocket> => new Promise((resolve, reject) => {
   const ws = new WebSocket(`ws://127.0.0.1:${wsPort}`, options);
@@ -121,18 +127,34 @@ const waitFor = async (predicate: () => boolean, label: string): Promise<void> =
   }
 };
 
-const register = (token: unknown) => JSON.stringify({ event: 'register', data: { token } });
+const register = (token: unknown, previousConnectionId?: unknown) =>
+  JSON.stringify({ event: 'register', data: { token, previousConnectionId } });
 
-/** Register a device end-to-end and hand back its live socket. */
+/** The connection id each socket's `register` reply named. */
+const connectionIds = new WeakMap<WebSocket, string>();
+
+/** The connection id `client` registered with. */
+const connectionIdOf = (client: WebSocket): string => connectionIds.get(client)!;
+
+/**
+ * Register a connection of a device end-to-end and hand back its live socket.
+ * The device is seeded unless it exists, so a second call adds a second
+ * connection to it.
+ */
 const registered = async (w: any, deviceId = 'd1', token = tokenFor(deviceId)): Promise<WebSocket> => {
-  seedDevice(deviceId);
+  if (!storedDevice(deviceId)) {
+    seedDevice(deviceId);
+  }
 
   const client = await connect();
   const reply = nextFrame(client);
 
   client.send(register(token));
 
-  expect(await reply).toEqual({ event: 'register', data: { success: true } });
+  const frame = await reply;
+
+  expect(frame).toEqual(REGISTERED);
+  connectionIds.set(client, frame.data.connectionId);
 
   return client;
 };
@@ -179,19 +201,27 @@ describe('NexxusWebsocketsTransportWorker.initTransport', () => {
 });
 
 describe('NexxusWebsocketsTransportWorker registration', () => {
-  it('registers a device and records it as online on this worker\'s slot queue', async () => {
+  it('registers a connection and opens it on this worker\'s slot queue', async () => {
     const w = await build();
+    const client = await registered(w);
 
-    await registered(w);
-
-    expect(storedDevice('d1')).toMatchObject({
-      type: 'volatile',
-      status: 'online',
-      transport: 'websockets-transport_0',
+    expect(storedDevice('d1').connections[connectionIdOf(client)]).toMatchObject({
+      transport: 'websockets-transport_0', type: 'volatile', subscriptions: [],
     });
-    expect(w.registeredClients.size).toBe(1);
+    expect(w.registeredClients.get(connectionIdOf(client))).toBeDefined();
     expect(w.unregisteredClients.size).toBe(0);
     expect(logger.has('info', /Client "[0-9a-f-]{36}" registered with device ID: "d1"/)).toBe(true);
+  });
+
+  /** Two tabs of one browser are one device with one session. */
+  it('registers each connection of a device on its own', async () => {
+    const w = await build();
+    const tab1 = await registered(w);
+    const tab2 = await registered(w);
+
+    expect(connectionIdOf(tab1)).not.toBe(connectionIdOf(tab2));
+    expect(openConnections('d1').sort()).toEqual([ connectionIdOf(tab1), connectionIdOf(tab2) ].sort());
+    expect(w.registeredClients.size).toBe(2);
   });
 
   it('rejects a valid token whose device no longer exists', async () => {
@@ -372,9 +402,9 @@ describe('NexxusWebsocketsTransportWorker registration', () => {
 
     client.send(register(tokenFor('d1')));
 
-    expect(await success).toEqual({ event: 'register', data: { success: true } });
+    expect(await success).toEqual(REGISTERED);
     expect(w.registeredClients.size).toBe(1);
-    expect(storedDevice('d1')).toMatchObject({ status: 'online' });
+    expect(openConnections('d1')).toHaveLength(1);
   });
 
   it('reports an invalid-parameters error when the device update is rejected', async () => {
@@ -384,7 +414,7 @@ describe('NexxusWebsocketsTransportWorker registration', () => {
 
     const client = await connect();
 
-    vi.spyOn(NexxusDevice, 'attachTransport').mockRejectedValueOnce(new RedisDeviceInvalidParamsException('bad field'));
+    vi.spyOn(NexxusDevice, 'openConnection').mockRejectedValueOnce(new RedisDeviceInvalidParamsException('bad field'));
 
     const reply = nextFrame(client);
 
@@ -427,7 +457,7 @@ describe('NexxusWebsocketsTransportWorker registration', () => {
 
     await waitFor(() => frames.length > 0, 'the registration reply');
 
-    expect(frames).toEqual([ { event: 'register', data: { success: true } } ]); // exactly one reply
+    expect(frames).toEqual([ REGISTERED ]); // exactly one reply
     expect(w.registeredClients.size).toBe(1);
   });
 
@@ -481,7 +511,7 @@ describe('NexxusWebsocketsTransportWorker inbound frame handling', () => {
 
     client.send(register(tokenFor('d1')));
 
-    expect(await success).toEqual({ event: 'register', data: { success: true } });
+    expect(await success).toEqual(REGISTERED);
     expect(w.registeredClients.size).toBe(1);
   });
 
@@ -578,16 +608,33 @@ describe('NexxusWebsocketsTransportWorker inbound frame handling', () => {
   });
 });
 
-describe('NexxusWebsocketsTransportWorker.sendToDevice', () => {
-  it('delivers a model event to the registered device over the wire', async () => {
+describe('NexxusWebsocketsTransportWorker.sendToConnection', () => {
+  it('delivers a model event to the registered connection over the wire', async () => {
     const w = await build();
     const client = await registered(w);
 
     const frame = nextFrame(client);
 
-    await w.sendToDevice('d1', CREATED);
+    await w.sendToConnection('d1', connectionIdOf(client), CREATED);
 
     expect(await frame).toEqual({ event: 'model_created', data: CREATED });
+  });
+
+  it('delivers to that connection only, not to the device\'s others', async () => {
+    const w = await build();
+    const tab1 = await registered(w);
+    const tab2 = await registered(w);
+    let reachedTab2 = false;
+
+    tab2.on('message', () => { reachedTab2 = true; });
+
+    const frame = nextFrame(tab1);
+
+    await w.sendToConnection('d1', connectionIdOf(tab1), CREATED);
+
+    expect(await frame).toEqual({ event: 'model_created', data: CREATED });
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(reachedTab2).toBe(false);
   });
 
   it('delivers update and delete events the same way', async () => {
@@ -600,25 +647,24 @@ describe('NexxusWebsocketsTransportWorker.sendToDevice', () => {
     ] as any[]) {
       const frame = nextFrame(client);
 
-      await w.sendToDevice('d1', data);
+      await w.sendToConnection('d1', connectionIdOf(client), data);
 
       expect(await frame).toEqual({ event: data.event, data });
     }
   });
 
-  it('logs and ignores a device with no live connection', async () => {
+  it('logs and ignores a connection it does not hold', async () => {
     const w = await build();
 
-    await expect(w.sendToDevice('ghost', CREATED)).resolves.toBeUndefined();
-    expect(logger.has('info', /No registered client found for device ID: "ghost"/)).toBe(true);
+    await expect(w.sendToConnection('ghost', 'c-ghost', CREATED)).resolves.toBeUndefined();
+    expect(logger.has('info', /No registered connection "c-ghost" for device ID: "ghost"/)).toBe(true);
   });
 
   it('fails a device event it does not deliver with a terminal error, so the message is dead-lettered', async () => {
     const w = await build();
+    const client = await registered(w);
 
-    await registered(w);
-
-    const err = await w.sendToDevice('d1', { event: 'model_imploded', metadata: { channels: [] } } as any)
+    const err = await w.sendToConnection('d1', connectionIdOf(client), { event: 'model_imploded', metadata: { channels: [] } } as any)
       .catch((e: unknown) => e) as NexxusWorkerUnsupportedEventException;
 
     expect(err).toBeInstanceOf(NexxusWorkerUnsupportedEventException);
@@ -628,20 +674,19 @@ describe('NexxusWebsocketsTransportWorker.sendToDevice', () => {
 
   it('drops the message instead of erroring when the socket is already closing', async () => {
     const w = await build();
-
-    await registered(w);
+    const client = await registered(w);
 
     const serverWs = [ ...w.wsToNexxusClientMap.keys() ][0];
 
     serverWs.close(); // readyState → CLOSING, synchronously
 
-    await expect(w.sendToDevice('d1', CREATED)).resolves.toBeUndefined();
+    await expect(w.sendToConnection('d1', connectionIdOf(client), CREATED)).resolves.toBeUndefined();
     expect(logger.entries.some(e => /Dropped a message for client .* socket is not open/.test(e.message))).toBe(true);
   });
 });
 
 describe('NexxusWebsocketsTransportWorker disconnect', () => {
-  it('marks the device offline and forgets the connection', async () => {
+  it('tears the connection down and forgets it', async () => {
     const w = await build();
     const client = await registered(w);
 
@@ -650,7 +695,7 @@ describe('NexxusWebsocketsTransportWorker disconnect', () => {
     await waitFor(() => w.wsToNexxusClientMap.size === 0, 'the disconnect to be handled');
 
     expect(w.registeredClients.size).toBe(0);
-    expect(storedDevice('d1')).toMatchObject({ status: 'offline', transport: null });
+    expect(openConnections('d1')).toEqual([]);
     expect(logger.has('info', /disconnected with device ID: "d1/)).toBe(true);
   });
 
@@ -695,7 +740,7 @@ describe('NexxusWebsocketsTransportWorker disconnect', () => {
     const w = await build();
     const client = await registered(w);
 
-    vi.spyOn(NexxusDevice, 'detachTransport').mockRejectedValueOnce(new RedisDeviceInvalidParamsException('bad field'));
+    vi.spyOn(NexxusDevice, 'closeConnection').mockRejectedValueOnce(new RedisDeviceInvalidParamsException('bad field'));
 
     client.close();
 
@@ -726,54 +771,56 @@ describe('NexxusWebsocketsTransportWorker disconnect', () => {
   });
 
   /**
-   * A client that reconnects before its old socket's close reaches the server
-   * registers the device again on a new socket. The old socket closing after
-   * that must not tear down the new one.
+   * A tab that reloads opens its new connection while the old one's close is
+   * still on its way. The old one closing must leave the new one, and its
+   * routes, alone.
    */
-  it('leaves the device to a newer connection that registered it on this node', async () => {
+  it('leaves the device\'s other connection on this node alone when one closes', async () => {
     const w = await build();
+    const sub = () => new NexxusRedisSubscription({ appId: 'app1', model: 'runs' });
     const older = await registered(w);
-    const newer = await connect();
-    const reply = nextFrame(newer);
+    const newer = await registered(w);
 
-    newer.send(register(tokenFor('d1')));
-    expect(await reply).toEqual({ event: 'register', data: { success: true } });
+    await NexxusDevice.addSubscription('d1', connectionIdOf(newer), sub());
 
     older.close();
 
     await waitFor(() => w.wsToNexxusClientMap.size === 1, 'the older connection to be forgotten');
 
     expect(w.registeredClients.size).toBe(1);
-    expect(storedDevice('d1')).toMatchObject({ status: 'online', transport: 'websockets-transport_0' });
+    expect(openConnections('d1')).toEqual([ connectionIdOf(newer) ]);
+    expect(await sub().getAllDevices()).toEqual(new Set([ `d1|websockets-transport_0|${connectionIdOf(newer)}` ]));
 
     const delivered = nextFrame(newer);
 
-    await w.sendToDevice('d1', CREATED);
+    await w.sendToConnection('d1', connectionIdOf(newer), CREATED);
 
     expect((await delivered).event).toBe('model_created');
   });
 
-  it('leaves a device that has registered on another node since alone', async () => {
+  it('leaves the device\'s connections on other nodes alone', async () => {
     const w = await build();
-    const client = await registered(w);
 
-    // The device's registration on another node, which happened first.
-    Object.assign(storedDevice('d1'), { transport: 'websockets-transport_9', status: 'online' });
+    seedDevice('d1', {
+      connections: { elsewhere: { transport: 'websockets-transport_9', type: 'volatile', subscriptions: [], connectedAt: 'x' } },
+    });
+
+    const client = await registered(w);
 
     client.close();
 
     await waitFor(() => w.wsToNexxusClientMap.size === 0, 'the disconnect to be handled');
 
     expect(w.registeredClients.size).toBe(0);
-    expect(storedDevice('d1')).toMatchObject({ status: 'online', transport: 'websockets-transport_9' });
+    expect(openConnections('d1')).toEqual([ 'elsewhere' ]);
   });
 
   /**
    * Without waiting, the teardown finds no device registered on the connection,
-   * and the registration finishing after it records the device as online here,
-   * with no connection behind it.
+   * and the registration finishing after it opens the connection in Redis, with
+   * no socket behind it.
    */
-  it('tears down a device whose registration was still in flight when its connection closed', async () => {
+  it('tears down a connection whose registration was still in flight when it closed', async () => {
     const w = await build();
 
     seedDevice('d1');
@@ -805,7 +852,7 @@ describe('NexxusWebsocketsTransportWorker disconnect', () => {
     await waitFor(() => w.wsToNexxusClientMap.size === 0, 'the disconnect to be handled');
 
     expect(w.registeredClients.size).toBe(0);
-    expect(storedDevice('d1')).toMatchObject({ status: 'offline', transport: null });
+    expect(openConnections('d1')).toEqual([]);
   });
 });
 
@@ -829,7 +876,7 @@ describe('NexxusWebsocketsTransportWorker heartbeat', () => {
     const reply = nextFrame(client);
 
     client.send(register(tokenFor('d1')));
-    expect(await reply).toEqual({ event: 'register', data: { success: true } });
+    expect(await reply).toEqual(REGISTERED);
 
     const closed = closeOf(client);
     const connection = serverClient(w);
@@ -840,7 +887,7 @@ describe('NexxusWebsocketsTransportWorker heartbeat', () => {
     connection.heartbeat();
 
     expect((await closed).code).toBe(1006);
-    await waitFor(() => storedDevice('d1').status === 'offline', 'the device to go offline');
+    await waitFor(() => openConnections('d1').length === 0, 'the connection to be torn down');
     expect(w.registeredClients.size).toBe(0);
     expect(logger.has('info', /stopped answering pings/)).toBe(true);
   });
@@ -943,7 +990,7 @@ describe('NexxusWebsocketsTransportWorker.close', () => {
     const subscribed = await registered(w, 'd1');
     const unregistered = await connect();
 
-    expect(await (await NexxusDevice.get('d1', true)).addSubscription(sub())).toBe(true);
+    await NexxusDevice.addSubscription('d1', connectionIdOf(subscribed), sub());
     await waitFor(() => w.wsToNexxusClientMap.size === 2, 'both connections to be tracked');
 
     // What Redis holds at the moment it closes.
@@ -962,7 +1009,7 @@ describe('NexxusWebsocketsTransportWorker.close', () => {
       { code: 1012, reason: 'service_restart' },
       { code: 1012, reason: 'service_restart' },
     ]);
-    expect(atRedisClose?.device).toMatchObject({ status: 'offline', transport: null, subscriptions: [] });
+    expect(atRedisClose?.device.connections).toEqual({});
     expect(atRedisClose?.routes).toEqual(new Set());
   });
 
@@ -985,7 +1032,7 @@ describe('NexxusWebsocketsTransportWorker.close', () => {
     workers.length = 0;
 
     expect(logger.has('info', /Cutting off 1 connection\(s\) still open after 50 ms/)).toBe(true);
-    expect(storedDevice('d1')).toMatchObject({ status: 'offline', transport: null });
+    expect(openConnections('d1')).toEqual([]);
   });
 });
 
@@ -1006,7 +1053,7 @@ describe('NexxusWebsocketsTransportWorker losing the message queue', () => {
     h.mq.emit('disconnect');
 
     expect(await closed).toEqual({ code: 1012, reason: 'service_restart' });
-    await waitFor(() => storedDevice('d1').status === 'offline', 'the device to go offline');
+    await waitFor(() => openConnections('d1').length === 0, 'the connection to be torn down');
 
     const turnedAway = await connect();
 
@@ -1047,7 +1094,7 @@ describe('NexxusWebsocketsTransportWorker losing the message queue', () => {
       cls.DISCONNECT_ALL_GRACE_MS = grace;
     }
 
-    expect(storedDevice('d1')).toMatchObject({ status: 'offline' });
+    expect(openConnections('d1')).toEqual([]);
   });
 });
 
@@ -1102,7 +1149,7 @@ describe('NexxusWebsocketsTransportWorker access-token refresh', () => {
     // 30 minutes on: past the token it registered with, well inside the new one.
     const delivered = nextFrame(client);
 
-    await asIfLater(30, () => w.sendToDevice('d1', CREATED));
+    await asIfLater(30, () => w.sendToConnection('d1', connectionIdOf(client), CREATED));
 
     expect(await delivered).toMatchObject({ event: 'model_created' });
   });
@@ -1125,7 +1172,7 @@ describe('NexxusWebsocketsTransportWorker access-token refresh', () => {
     // Still registered, still receiving.
     const delivered = nextFrame(client);
 
-    await w.sendToDevice('d1', CREATED);
+    await w.sendToConnection('d1', connectionIdOf(client), CREATED);
 
     expect(await delivered).toMatchObject({ event: 'model_created' });
   });
@@ -1171,23 +1218,42 @@ describe('NexxusWebsocketsTransportWorker ending a connection', () => {
 
     client.on('message', () => { delivered = true; });
 
-    await asIfLater(30, () => w.sendToDevice('d1', CREATED));
+    await asIfLater(30, () => w.sendToConnection('d1', connectionIdOf(client), CREATED));
 
     expect(await closed).toEqual({ code: 4002, reason: 'token_expired' });
     expect(delivered).toBe(false);
     // Torn down like any other disconnect.
-    await waitFor(() => storedDevice('d1').status === 'offline', 'the device to go offline');
+    await waitFor(() => openConnections('d1').length === 0, 'the connection to be torn down');
   });
 
-  it('disconnects a device on device_logout', async () => {
+  /** Each connection rests on its own access token. */
+  it('disconnects only the connection whose token has expired', async () => {
     const w = await build();
-    const client = await registered(w);
-    const closed = closeOf(client);
+    const stale = await registered(w, 'd1', tokenMintedAgo('d1', 50));
+    const fresh = await registered(w);
+    const closed = closeOf(stale);
+
+    await asIfLater(30, () => w.sendToConnection('d1', connectionIdOf(stale), CREATED));
+
+    expect(await closed).toEqual({ code: 4002, reason: 'token_expired' });
+    await waitFor(() => openConnections('d1').length === 1, 'the stale connection to be torn down');
+    expect(openConnections('d1')).toEqual([ connectionIdOf(fresh) ]);
+    expect(fresh.readyState).toBe(WebSocket.OPEN);
+  });
+
+  it('disconnects every connection of a device on device_logout', async () => {
+    const w = await build();
+    const tab1 = await registered(w);
+    const tab2 = await registered(w);
+    const closed = Promise.all([ closeOf(tab1), closeOf(tab2) ]);
 
     await w.processMessage({ payload: { event: 'device_logout', deviceIds: [ 'd1' ] } });
 
-    expect(await closed).toEqual({ code: 4001, reason: 'logged_out' });
-    await waitFor(() => storedDevice('d1').status === 'offline', 'the device to go offline');
+    expect(await closed).toEqual([
+      { code: 4001, reason: 'logged_out' },
+      { code: 4001, reason: 'logged_out' },
+    ]);
+    await waitFor(() => openConnections('d1').length === 0, 'the connections to be torn down');
   });
 
   it('leaves everyone else alone on a device_logout for a device with no connection here', async () => {
@@ -1210,7 +1276,7 @@ describe('NexxusWebsocketsTransportWorker ending a connection', () => {
   it('tears a connection down exactly once when both ends close it', async () => {
     const w = await build();
     const client = await registered(w);
-    const unregister = vi.spyOn(w, 'unregisterDevice');
+    const unregister = vi.spyOn(w, 'unregisterConnection');
     const closed = closeOf(client);
 
     client.close();
@@ -1221,6 +1287,266 @@ describe('NexxusWebsocketsTransportWorker ending a connection', () => {
     await waitFor(() => w.wsToNexxusClientMap.size === 0, 'the connection to be torn down');
 
     expect(unregister).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('NexxusWebsocketsTransportWorker crash cleanup', () => {
+  const sub = () => new NexxusRedisSubscription({ appId: 'app1', model: 'runs' });
+
+  /** Device `id` as a crashed process left it: connections, by id, that are still routed on `runs`. */
+  const leftBehind = async (id: string, connections: Record<string, string>): Promise<void> => {
+    seedDevice(id, {
+      connections: Object.fromEntries(Object.entries(connections).map(([ connectionId, transport ]) =>
+        [ connectionId, { transport, type: 'volatile', subscriptions: [ sub().getKey() ], connectedAt: 'x' } ])),
+    });
+
+    for (const [ connectionId, transport ] of Object.entries(connections)) {
+      await sub().addConnection(id, transport, connectionId);
+    }
+  };
+
+  it('tears down the connection a client says it lost before the new one opens', async () => {
+    await build();
+    await leftBehind('d1', { lost: 'websockets-transport_9' });
+
+    const client = await connect();
+    const reply = nextFrame(client);
+
+    client.send(register(tokenFor('d1'), 'lost'));
+
+    const frame = await reply;
+
+    expect(frame).toEqual(REGISTERED);
+    expect(openConnections('d1')).toEqual([ frame.data.connectionId ]);
+    expect(await sub().getAllDevices()).toEqual(new Set());
+  });
+
+  it('refuses a previousConnectionId that is not a connection id, and stays retryable', async () => {
+    const w = await build();
+
+    seedDevice('d1');
+
+    const client = await connect();
+    const refused = nextFrame(client);
+
+    client.send(register(tokenFor('d1'), 'a|b'));
+
+    expect(await refused).toEqual({ event: 'error', data: { message: 'Invalid previousConnectionId.', code: 'INVALID_PARAMETERS' } });
+
+    const accepted = nextFrame(client);
+
+    client.send(register(tokenFor('d1')));
+
+    expect(await accepted).toEqual(REGISTERED);
+    expect(w.registeredClients.size).toBe(1);
+  });
+
+  it('leaves a lost connection this node still holds to its own teardown', async () => {
+    const w = await build();
+    const still = await registered(w);
+    const client = await connect();
+    const reply = nextFrame(client);
+
+    client.send(register(tokenFor('d1'), connectionIdOf(still)));
+
+    expect(await reply).toEqual(REGISTERED);
+    expect(openConnections('d1')).toContain(connectionIdOf(still));
+  });
+
+  /**
+   * The process on this slot crashed, and was restarted on the same slot. Its
+   * predecessor's connections are still routed here, so events for them
+   * arrive: each one is torn down the first time one does.
+   */
+  it('tears down a dead connection the first time an event names it', async () => {
+    const w = await build();
+
+    await leftBehind('d1', { ghost: 'websockets-transport_0' });
+
+    await w.processMessage({
+      payload: { event: 'device_message', recipients: [ { deviceId: 'd1', connectionId: 'ghost' } ], data: CREATED },
+    });
+
+    await waitFor(() => openConnections('d1').length === 0, 'the dead connection to be torn down');
+    expect(await sub().getAllDevices()).toEqual(new Set());
+  });
+
+  it('tears down, when a device registers, its connections left on this queue', async () => {
+    const w = await build();
+
+    await leftBehind('d1', { ghost: 'websockets-transport_0', elsewhere: 'websockets-transport_9' });
+
+    const client = await registered(w);
+
+    await waitFor(() => !openConnections('d1').includes('ghost'), 'the dead connection to be torn down');
+    expect(openConnections('d1').sort()).toEqual([ connectionIdOf(client), 'elsewhere' ].sort());
+  });
+
+  /**
+   * Two registrations of one device on this node, the second reading the
+   * device after the first has written its entry. The first is held from
+   * before it wrote it, so the second doesn't take it for dead.
+   */
+  it('doesn\'t take a connection still registering here for dead', async () => {
+    const w = await build();
+
+    seedDevice('d1');
+
+    let release: () => void = () => {};
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const open = NexxusDevice.openConnection.bind(NexxusDevice);
+
+    // Holds the first registration just after its entry is written.
+    vi.spyOn(NexxusDevice, 'openConnection').mockImplementationOnce(async (...args) => {
+      const opened = await open(...args);
+
+      await gate;
+
+      return opened;
+    });
+
+    const first = await connect();
+    const firstReply = nextFrame(first);
+
+    first.send(register(tokenFor('d1')));
+    await waitFor(() => openConnections('d1').length === 1, 'the first entry to be written');
+
+    await registered(w);
+    // Time for the second registration's sweep to act, rightly or not.
+    await new Promise(resolve => setTimeout(resolve, 20));
+
+    release();
+
+    expect(await firstReply).toEqual(REGISTERED);
+    expect(openConnections('d1')).toHaveLength(2);
+    expect(w.registeredClients.size).toBe(2);
+  });
+});
+
+describe('NexxusWebsocketsTransportWorker connection cap', () => {
+  /** Load the application again, letting each device hold `maxPerDevice` connections at once. */
+  const capAt = (maxPerDevice: number): void => {
+    app = new NexxusApplication({
+      id: 'app1', type: 'application', signingSecret: SIGNING_SECRET, name: 'A',
+      schema: { runs: { fields: { note: { type: 'string' } } } },
+      connections: { maxPerDevice },
+    } as never);
+    (NexxusBaseWorker as any).loadedApps.set('app1', app);
+  };
+
+  /** Long enough for two connections not to open in the same millisecond. */
+  const tick = () => new Promise(resolve => setTimeout(resolve, 5));
+
+  it('closes the oldest connection with 4003 when a registration takes the device over its cap', async () => {
+    const w = await build();
+
+    capAt(2);
+
+    const oldest = await registered(w);
+    const evicted = closeOf(oldest);
+
+    await tick();
+
+    const older = await registered(w);
+
+    await tick();
+
+    const newest = await registered(w);
+
+    expect(await evicted).toEqual({ code: 4003, reason: 'evicted' });
+    await waitFor(() => w.registeredClients.size === 2, 'the evicted connection to be forgotten');
+    expect(openConnections('d1').sort()).toEqual([ connectionIdOf(older), connectionIdOf(newest) ].sort());
+    expect(older.readyState).toBe(WebSocket.OPEN);
+    expect(newest.readyState).toBe(WebSocket.OPEN);
+  });
+
+  it('evicts a connection on another node through that node\'s queue', async () => {
+    const w = await build();
+
+    capAt(1);
+    seedDevice('d1', {
+      connections: {
+        far: { transport: 'websockets-transport_9', type: 'volatile', subscriptions: [], connectedAt: new Date(Date.now() - 1000).toISOString() },
+      },
+    });
+
+    const client = await registered(w);
+
+    await waitFor(() => mqState.published.length === 1, 'the eviction message');
+    expect(mqState.published[0]).toMatchObject({
+      queue: 'websockets-transport_9',
+      message: { event: 'connection_evicted', connections: [ { deviceId: 'd1', connectionId: 'far' } ] },
+    });
+    expect(openConnections('d1')).toEqual([ connectionIdOf(client) ]);
+  });
+
+  it('closes a connection another node evicted with 4003, and only that one', async () => {
+    const w = await build();
+    const evicted = await registered(w);
+    const kept = await registered(w);
+    const closed = closeOf(evicted);
+
+    await w.processMessage({
+      payload: { event: 'connection_evicted', connections: [ { deviceId: 'd1', connectionId: connectionIdOf(evicted) } ] },
+    });
+
+    expect(await closed).toEqual({ code: 4003, reason: 'evicted' });
+    await waitFor(() => w.registeredClients.size === 1, 'the evicted connection to be forgotten');
+    expect(kept.readyState).toBe(WebSocket.OPEN);
+  });
+
+  it('leaves everyone alone on a connection_evicted for a connection it doesn\'t hold', async () => {
+    const w = await build();
+    const bystander = await registered(w);
+    let closed = false;
+
+    bystander.on('close', () => { closed = true; });
+
+    await expect(w.processMessage({
+      payload: { event: 'connection_evicted', connections: [ { deviceId: 'd1', connectionId: 'ghost' } ] },
+    })).resolves.toBeUndefined();
+
+    expect(closed).toBe(false);
+    expect(logger.has('debug', /No connection "ghost" of device ID: "d1" to end \(evicted\)/)).toBe(true);
+  });
+
+  /**
+   * Another node can read a connection's entry, and evict it, before the
+   * registration that wrote it has finished.
+   */
+  it('closes a connection evicted while it is still registering', async () => {
+    const w = await build();
+
+    seedDevice('d1');
+
+    let release: () => void = () => {};
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const open = NexxusDevice.openConnection.bind(NexxusDevice);
+
+    // Holds the registration just after its entry is written.
+    vi.spyOn(NexxusDevice, 'openConnection').mockImplementationOnce(async (...args) => {
+      const opened = await open(...args);
+
+      await gate;
+
+      return opened;
+    });
+
+    const client = await connect();
+    const closed = closeOf(client);
+
+    client.send(register(tokenFor('d1')));
+    await waitFor(() => openConnections('d1').length === 1, 'its entry to be written');
+
+    await w.processMessage({
+      payload: { event: 'connection_evicted', connections: [ { deviceId: 'd1', connectionId: openConnections('d1')[0] } ] },
+    });
+
+    release();
+
+    expect(await closed).toEqual({ code: 4003, reason: 'evicted' });
+    await waitFor(() => w.wsToNexxusClientMap.size === 0, 'the connection to be torn down');
+    expect(openConnections('d1')).toEqual([]);
   });
 });
 
@@ -1250,9 +1576,8 @@ describe('NexxusWebsocketsTransportWorker registration after a session ends', ()
 
   /**
    * The session was alive when the token was checked, then a logout ended it
-   * before the device went online. The logout read the device after ending the
-   * session, so it can't know about this connection: the device has to stay
-   * offline.
+   * before the connection opened. The logout read the device after ending the
+   * session, so it can't know about this connection: it must not open.
    */
   it('refuses a device whose session a logout ends mid-registration', async () => {
     const w = await build();
@@ -1275,6 +1600,6 @@ describe('NexxusWebsocketsTransportWorker registration after a session ends', ()
       data: { message: 'The session this token belongs to has ended.', code: 'SESSION_ENDED' },
     });
     expect(w.registeredClients.size).toBe(0);
-    expect(storedDevice('d1').status).not.toBe('online');
+    expect(openConnections('d1')).toEqual([]);
   });
 });

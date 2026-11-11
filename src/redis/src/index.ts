@@ -9,6 +9,8 @@ export {
 export {
   NexxusDevice,
   type NexxusDeviceProps,
+  type NexxusDeviceConnection,
+  type NexxusDeviceConnectionType,
   type NexxusDeviceSession,
   type NexxusSessionRotation,
   type NexxusSessionRevocation

@@ -88,8 +88,8 @@ export class NexxusRedis extends NexxusBaseService<NexxusRedisConfig, RedisEvent
   public readonly scripts: NexxusRedisScriptLoader;
 
   protected static loggerLabel: Readonly<string> = 'NxxRedis';
-  protected static configRootKey: string = "redis";
-  protected static schemaPath: string = path.join(__dirname, "../../src/schemas/redis.schema.json");
+  protected static configRootKey: string = 'redis';
+  protected static schemaPath: string = path.join(__dirname, '../../src/schemas/redis.schema.json');
   protected static envVars: ConfigEnvVars = [];
   protected static cliArgs: ConfigCliArgs = [];
 

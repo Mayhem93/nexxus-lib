@@ -177,7 +177,7 @@ To add support for a new store, ship a package that:
 3. **Lowers FilterQuery and JsonPatch** to native queries/updates in `searchItems`/`buildQuery` and `updateItems` respectively.
 4. **Reports every requested id** as described in [Results and failures](#results-and-failures). A store that doesn't report misses — a SQL `WHERE id IN (…)` — gets them by comparing what came back with the ids it was given. A store that can't return a deleted row (no `DELETE … RETURNING`) reads `returnFields` first, and only when they're asked for.
 5. **Drives the lifecycle events** — resolve `connect()` on first successful connection and keep retrying rather than failing fast; emit `disconnect` when the connection drops and `connect` when it returns. The API/worker gate request availability on these, so getting them right matters more than the CRUD.
-6. **Preserves the `version` field** — it's a per-write counter the client uses for gap detection. Assign/return it on writes the way ES surfaces `_version`; a store without a native document version needs its own monotonic counter (see the write-concurrency notes in core).
+6. **Preserves the `version` field** — it's a per-write counter the client uses for gap detection. Assign it on every write, and return it with every app model read back, from `getItems` and `searchItems` alike, the way ES surfaces `_version`; a store without a native document version needs its own monotonic counter (see the write-concurrency notes in core).
 7. **Provides a `NexxusDatabaseBootstrapper` subclass** via `getBootstrapper()` for deployment/app provisioning.
 
 Package it with `@mayhem93/nexxus-core-lib` as a **peer dependency** so `instanceof` checks resolve against a single shared copy, then point `app.database` at your package name in config — the framework dynamic-imports it.
@@ -207,7 +207,7 @@ Anything a service requires but no provider supplies fails validation against th
 
 - **Index-per-type, per-app layout** — `nxx-application` and `nxx-setting` are deployment-scoped; app data lives in `nxx-app-<appId>-<modelType>` (and `nxx-app-<appId>-user` when auth is enabled). The document `type` is expressed by the index it lives in rather than a filtered field.
 - **Explicit, analyzer-free mappings** declared by the bootstrapper (see above), with dynamic templates enforcing the same policy for open subtrees.
-- **Scripted bulk updates** — a document's patches merge into one painless script so `_version` bumps once; conflicts use `retry_on_conflict`. That `_version` becomes the model's `version`.
+- **Scripted bulk updates** — a document's patches merge into one painless script so `_version` bumps once; conflicts use `retry_on_conflict`. That `_version` becomes the model's `version`, returned by `getItems` and by app-model searches, which ask Elasticsearch for each hit's version.
 - **Per-item results from bulk and mget** — a 404 (no such document, or no such index yet) is `null`; a 400 (a document or script Elasticsearch refused) is a terminal failure; anything else (overloaded, a read-only index, a lasting version conflict) is retryable. `deleteItems` with `returnFields` reads them with one `mget` before the bulk delete.
 - **Reactive liveness** — `connect()` retries until ES answers, then a background ping loop (relaxed while connected, aggressive while down) flips the `connect`/`disconnect` events the API listens on.
 - **Write visibility** — app-model writes don't force a refresh; built-in model writes wait for one, so control-plane reads are immediately consistent.

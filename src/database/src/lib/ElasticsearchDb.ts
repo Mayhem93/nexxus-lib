@@ -635,7 +635,7 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
           index += patchData.metadata.type;
         } else {
           if (!patchData.metadata.appId) {
-            throw new Error("App ID is required for updating user or app-specific models");
+            throw new Error('App ID is required for updating user or app-specific models');
           }
 
           index += `app-${patchData.metadata.appId}-${patchData.metadata.type}`;
@@ -947,7 +947,10 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
       query: this.buildFilterQuery(options.filter),
       sort: options.sort
         ? { [options.sort.field]: { order: options.sort.order } }
-        : { updatedAt: { order: 'desc' } }
+        : { updatedAt: { order: 'desc' } },
+      // A hit carries `_version` only when the search asks for it. App models
+      // return it as `version` (see `searchItems`); built-ins have none.
+      version: !isBuiltinModel(options.type)
     };
   }
 

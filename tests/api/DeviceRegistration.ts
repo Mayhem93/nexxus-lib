@@ -19,7 +19,6 @@ async function existingDevice(props: {
     appId: props.appId ?? 'app1',
     userId: props.userId,
     name: props.name ?? 'Old Phone',
-    subscriptions: [],
   });
 
   await device.save();

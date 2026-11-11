@@ -3,9 +3,10 @@ import {
   InvalidTokenException,
   NexxusHubNode,
   NexxusToken,
+  NexxusTransportRecipient,
   SessionEndedException
 } from '@mayhem93/nexxus-core-lib';
-import { NexxusDevice } from '@mayhem93/nexxus-redis';
+import { NexxusDevice, type NexxusDeviceConnection } from '@mayhem93/nexxus-redis';
 
 import {
   NexxusBaseTransportWorker,
@@ -24,7 +25,7 @@ export type NexxusVolatileTransportWorkerConfig = NexxusBaseTransportWorkerConfi
 export type NexxusVolatileTransportWorkerStats = NexxusBaseTransportWorkerStats & {};
 
 /** Why a transport ends a device's connection. It travels to the client with the close. */
-export type NexxusDeviceDisconnectReason = 'logged_out' | 'token_expired' | 'service_restart';
+export type NexxusDeviceDisconnectReason = 'logged_out' | 'token_expired' | 'service_restart' | 'evicted';
 
 /** What a verified device token proves about the connection presenting it. */
 export type NexxusVolatileDeviceIdentity = {
@@ -33,6 +34,17 @@ export type NexxusVolatileDeviceIdentity = {
   /** The token's `exp`, in UNIX seconds. The connection may not outlive it. */
   expiresAt: number;
 };
+
+/**
+ * What a registering connection's token proves, the connections its device had
+ * when it was read, and how many its application lets it hold open at once.
+ */
+export type NexxusVolatileDeviceRegistration = NexxusVolatileDeviceIdentity & {
+  connections: Readonly<Record<string, NexxusDeviceConnection>>;
+  /** The application's `connections.maxPerDevice`. */
+  maxConnections: number;
+};
+
 export abstract class NexxusVolatileTransportWorker<
   T extends NexxusVolatileTransportWorkerConfig,
   Ev extends NexxusBaseWorkerEvents = {},
@@ -47,6 +59,13 @@ export abstract class NexxusVolatileTransportWorker<
    * it again.
    */
   private slotQueueState: 'undeclared' | 'declared' | 'lost' = 'undeclared';
+
+  /**
+   * Dead connections being torn down (see `tearDownDeadConnection`), as
+   * `deviceId|connectionId`, so each is torn down once however many times it
+   * is met meanwhile.
+   */
+  private readonly deadConnectionTeardowns = new Set<string>();
 
   constructor(services: NexxusWorkerServices) {
     super(services);
@@ -63,7 +82,7 @@ export abstract class NexxusVolatileTransportWorker<
   /**
    * Volatile transports route per node: each worker instance consumes from its own
    * per-slot queue (e.g. `websockets-transport_3`) so the Transport Manager can
-   * target the exact node holding a given device's live connection.
+   * target the exact node holding a given live connection.
    *
    * Slot picking flow (runs before the base's queue-consume + Hub-register):
    *
@@ -132,9 +151,8 @@ export abstract class NexxusVolatileTransportWorker<
   /**
    * A volatile queue goes with the message-queue connection that declared it.
    * Until `beforeResume` declares it again, nothing reaches the devices
-   * connected here: every connection is ended, which marks its device offline
-   * so nothing is routed here, and new ones are turned away (see
-   * `isSlotQueueLost`).
+   * connected here: every connection is ended, which tears it down so nothing
+   * is routed here, and new ones are turned away (see `isSlotQueueLost`).
    */
   protected onServiceDown(name: NexxusWorkerServiceName): void {
     if (name !== 'mq' || this.slotQueueState !== 'declared') {
@@ -218,7 +236,7 @@ export abstract class NexxusVolatileTransportWorker<
   }
 
   /**
-   * Shut down without leaving a device routed to this node:
+   * Shut down without leaving a connection routed to this node:
    *
    * 1. Stop taking new connections.
    * 2. Stop consuming. Messages already being delivered still reach their
@@ -259,7 +277,7 @@ export abstract class NexxusVolatileTransportWorker<
    * This and the methods built on it live on the volatile base because a
    * volatile transport is the only place a client presents a credential —
    * persistent transports register out-of-band through the API, and their
-   * `unregisterDevice` is triggered by the push provider, so neither has a token
+   * `unregisterConnection` is triggered by the push provider, so neither has a token
    * to check. Every volatile transport (websockets today, MQTT or SSE tomorrow)
    * inherits one implementation rather than each re-deriving what a valid device
    * is.
@@ -301,10 +319,14 @@ export abstract class NexxusVolatileTransportWorker<
    * expires — refusing it here is what stops that device reconnecting and
    * registering again, on this node or any other.
    *
+   * The device's connections come back too, from the same read: registering
+   * looks for dead ones among them (see `tearDownDeadConnections`), and counts
+   * them against the application's cap (see `evictConnectionsOverCap`).
+   *
    * Throws as `verifyDeviceToken` does, plus `RedisKeyNotFoundException` when the
    * device's record is gone and `SessionEndedException` when its session is over.
    */
-  protected async authenticateDevice(token: string): Promise<NexxusVolatileDeviceIdentity> {
+  protected async authenticateDevice(token: string): Promise<NexxusVolatileDeviceRegistration> {
     const identity = this.verifyDeviceToken(token);
     const device = await NexxusDevice.get(identity.deviceId);
 
@@ -312,7 +334,12 @@ export abstract class NexxusVolatileTransportWorker<
       throw new SessionEndedException('The session this token belongs to has ended.');
     }
 
-    return identity;
+    return {
+      ...identity,
+      connections: device.getConnections(),
+      // Loaded: `verifyDeviceToken` refuses a token naming an application that isn't.
+      maxConnections: NexxusBaseWorker.loadedApps.get(identity.appId)!.getMaxConnectionsPerDevice()
+    };
   }
 
   /**
@@ -335,7 +362,7 @@ export abstract class NexxusVolatileTransportWorker<
   }
 
   /**
-   * End a device's live connection on this node, telling the client why.
+   * End every connection a device has on this node, telling each client why.
    *
    * Idempotent: a device with no connection here — already closed, or never on
    * this node — is left alone. Teardown (subscriptions, Redis state) must stay on
@@ -343,6 +370,14 @@ export abstract class NexxusVolatileTransportWorker<
    * the client closes itself are cleaned up exactly once, the same way.
    */
   protected abstract disconnectDevice(deviceId: string, reason: NexxusDeviceDisconnectReason): Promise<void>;
+
+  /**
+   * End one connection on this node, telling its client why: a registered
+   * one, or one still registering, which can be evicted once its entry is
+   * written. Teardown stays on the ordinary disconnect path, as with
+   * `disconnectDevice`. A connection this node doesn't hold is left alone.
+   */
+  protected abstract disconnectConnection(deviceId: string, connectionId: string, reason: NexxusDeviceDisconnectReason): Promise<void>;
 
   /**
    * Stop taking new connections; the open ones stay up. `close()` calls this
@@ -366,41 +401,268 @@ export abstract class NexxusVolatileTransportWorker<
   }
 
   /**
-   * Called by the subclass once a client's device id is established (see
-   * `authenticateDevice`). Records the volatile-flavor device state in Redis.
+   * Close the connections another node evicted (see `evictConnectionsOverCap`).
+   * That node tore them down already.
+   */
+  protected async handleConnectionEvicted(connections: Array<NexxusTransportRecipient>): Promise<void> {
+    for (const { deviceId, connectionId } of connections) {
+      await this.disconnectConnection(deviceId, connectionId, 'evicted');
+    }
+  }
+
+  /**
+   * Called by the subclass once a connection's device is established (see
+   * `authenticateDevice`). Opens the connection in Redis, on this node's queue,
+   * with no subscriptions.
    *
-   * Starts from the state a clean disconnect leaves. A connection that ended
-   * without one, because its node crashed for example, leaves routes behind
-   * that point at that node. Subscribing again would find those subscriptions
-   * already listed and add no route here, so they are removed first.
-   *
-   * The session is checked again as the device goes online: `authenticateDevice`
+   * The session is checked again as the connection opens: `authenticateDevice`
    * saw it alive, but a logout can end it in between. Throws
    * `SessionEndedException` when it has.
    */
-  protected async registerDevice(deviceId: string): Promise<void> {
-    await NexxusDevice.removeAllSubscriptions(deviceId);
-
-    if (!await NexxusDevice.attachTransport(deviceId, this.queueName)) {
+  protected async registerConnection(deviceId: string, connectionId: string): Promise<void> {
+    if (!await NexxusDevice.openConnection(deviceId, connectionId, { transport: this.queueName, type: 'volatile' })) {
       throw new SessionEndedException('The session this token belongs to has ended.');
     }
   }
 
   /**
-   * Called by the subclass when a client disconnects (whatever "disconnect" means in its protocol).
-   * Removes the device's routes through this node and marks it offline in Redis.
-   *
-   * A device that has registered on another node since is left alone: its
-   * state belongs to that connection now. So is one the API has detached
-   * already, on logout.
+   * Called by the subclass when a connection ends (whatever that means in its
+   * protocol). Tears it down in Redis: its routes, then its entry. The device's
+   * other connections are left as they are.
    */
-  protected async unregisterDevice(deviceId: string): Promise<void> {
-    if (!await NexxusDevice.detachTransport(deviceId, this.queueName)) {
+  protected async unregisterConnection(deviceId: string, connectionId: string): Promise<void> {
+    if (!await NexxusDevice.closeConnection(deviceId, connectionId)) {
       NexxusVolatileTransportWorker.logger.debug(
-        `Device "${deviceId}" is no longer on this transport (registered elsewhere since, or logged out); left its state alone`,
+        `Connection "${connectionId}" of device "${deviceId}" was already torn down, by a logout or an eviction most likely`,
+        { deviceId, connectionId },
+        NexxusVolatileTransportWorker.loggerLabel
+      );
+    }
+  }
+
+  /**
+   * Whether this node holds the connection: registered, or registering. A
+   * subclass counts a registering connection as held from before its entry is
+   * written to Redis, or a registration of the same device running alongside
+   * could find that entry, not held, and tear it down as dead.
+   */
+  protected abstract holdsConnection(connectionId: string): boolean;
+
+  /**
+   * Called by the subclass while a connection registers, with the id of the
+   * connection its client says it lost: one that closed without the client
+   * asking. Tears that connection down, wherever it is, before the new one
+   * opens. Only the device's own connections can be named; one that is gone
+   * already is left as it is, and so is one this node still holds, which its
+   * own teardown ends.
+   *
+   * A failure is logged, not thrown: the registration goes ahead, and the
+   * connection is still ended by logout, or as dead by its node.
+   */
+  protected async releaseLostConnection(deviceId: string, connectionId: string): Promise<void> {
+    if (this.holdsConnection(connectionId)) {
+      NexxusVolatileTransportWorker.logger.debug(
+        `Connection "${connectionId}" of device "${deviceId}", which its client lost, is still held here; left to its own teardown`,
+        { deviceId, connectionId },
+        NexxusVolatileTransportWorker.loggerLabel
+      );
+
+      return;
+    }
+
+    try {
+      if (await NexxusDevice.closeConnection(deviceId, connectionId)) {
+        NexxusVolatileTransportWorker.logger.info(
+          `Tore down connection "${connectionId}" of device "${deviceId}", which its client lost`,
+          { deviceId, connectionId },
+          NexxusVolatileTransportWorker.loggerLabel
+        );
+      }
+    } catch (err) {
+      NexxusVolatileTransportWorker.logger.warn(
+        `Could not tear down connection "${connectionId}" of device "${deviceId}", which its client lost: ${(err as Error).message}`,
+        { deviceId, connectionId },
+        NexxusVolatileTransportWorker.loggerLabel
+      );
+    }
+  }
+
+  /**
+   * Called by the subclass while a connection registers, with the connections
+   * its device had: tears down, as dead, those on this node's queue that this
+   * node doesn't hold (see `tearDownDeadConnection`).
+   */
+  protected tearDownDeadConnections(deviceId: string, connections: Readonly<Record<string, NexxusDeviceConnection>>): void {
+    for (const [ connectionId, { transport } ] of Object.entries(connections)) {
+      if (transport === this.queueName) {
+        this.tearDownDeadConnection(deviceId, connectionId);
+      }
+    }
+  }
+
+  /**
+   * A connection on this node's queue that this node doesn't hold is dead. One
+   * process consumes a slot queue at a time, and it holds every connection
+   * registered on it, so such a connection belonged to a process that held the
+   * slot before, or its own teardown failed.
+   *
+   * Torn down in the background, once however many times it is met meanwhile.
+   * One this node holds is left alone. A failure is logged: the connection is
+   * met again, and torn down then, the next time something names it.
+   */
+  protected tearDownDeadConnection(deviceId: string, connectionId: string): void {
+    const key = `${deviceId}|${connectionId}`;
+
+    if (this.holdsConnection(connectionId) || this.deadConnectionTeardowns.has(key)) {
+      return;
+    }
+
+    this.deadConnectionTeardowns.add(key);
+
+    void NexxusDevice.closeConnection(deviceId, connectionId)
+      .then(tornDown => {
+        if (tornDown) {
+          NexxusVolatileTransportWorker.logger.info(
+            `Tore down connection "${connectionId}" of device "${deviceId}": it is on this node's queue, but this node doesn't hold it`,
+            { deviceId, connectionId },
+            NexxusVolatileTransportWorker.loggerLabel
+          );
+        }
+      })
+      .catch((err: Error) => {
+        NexxusVolatileTransportWorker.logger.warn(
+          `Could not tear down dead connection "${connectionId}" of device "${deviceId}": ${err.message}`,
+          { deviceId, connectionId },
+          NexxusVolatileTransportWorker.loggerLabel
+        );
+      })
+      .finally(() => {
+        this.deadConnectionTeardowns.delete(key);
+      });
+  }
+
+  /**
+   * Called by the subclass once a connection has registered, with what its
+   * registration read, the new connection's id, and the connection its client
+   * said it lost, if any: keeps the device within its application's cap
+   * (`maxConnections`) by evicting its oldest connections, wherever they are.
+   * Each one is torn down in Redis, then closed with `evicted`: here directly,
+   * on another node through a `connection_evicted` message to the queue it is
+   * on. The new connection is never evicted.
+   *
+   * The new connection counts, and so do the device's other volatile
+   * connections as the registration read them, except those being torn down,
+   * dead ones (see `tearDownDeadConnection`), and the one the client lost,
+   * which `releaseLostConnection` tore down unless this node still holds it.
+   * Push connections neither count nor get evicted.
+   *
+   * A soft cap: two registrations of a device at the same moment each count
+   * without the other, so the device can be over its cap until its next
+   * registration.
+   *
+   * Runs in the background. A failure is logged, and leaves the connection
+   * open until its device registers again.
+   */
+  protected evictConnectionsOverCap(
+    registration: NexxusVolatileDeviceRegistration,
+    connectionId: string,
+    lostConnectionId?: string
+  ): void {
+    const { deviceId, connections, maxConnections } = registration;
+    const counted = Object.entries(connections).filter(([ id, connection ]) =>
+      id !== connectionId && this.countsTowardCap(id, connection, lostConnectionId)
+    );
+    // The new connection, besides those counted.
+    const excess = counted.length + 1 - maxConnections;
+
+    if (excess <= 0) {
+      return;
+    }
+
+    const evicted = counted.sort(NexxusVolatileTransportWorker.oldestFirst).slice(0, excess);
+
+    NexxusVolatileTransportWorker.logger.info(
+      `Device "${deviceId}" is over its cap of ${maxConnections} connection(s); evicting the ${excess} oldest`,
+      { deviceId, maxConnections, evicted: evicted.map(([ id ]) => id) },
+      NexxusVolatileTransportWorker.loggerLabel
+    );
+
+    void this.evictConnections(deviceId, evicted).catch((err: Error) => {
+      NexxusVolatileTransportWorker.logger.warn(
+        `Could not evict the connections of device "${deviceId}" over its cap: ${err.message}`,
         { deviceId },
         NexxusVolatileTransportWorker.loggerLabel
       );
+    });
+  }
+
+  /**
+   * Whether a connection a registration read counts toward its device's cap
+   * (see `evictConnectionsOverCap`).
+   */
+  private countsTowardCap(connectionId: string, connection: NexxusDeviceConnection, lostConnectionId?: string): boolean {
+    if (connection.type !== 'volatile' || connection.closing) {
+      return false;
+    }
+
+    if (this.holdsConnection(connectionId)) {
+      return true;
+    }
+
+    // Not held: dead if on this node's queue, released if the client lost it.
+    return connection.transport !== this.queueName && connectionId !== lostConnectionId;
+  }
+
+  /** Orders connections by when they opened, oldest first; by id between two opened at once. */
+  private static oldestFirst(
+    [ idA, a ]: [ string, NexxusDeviceConnection ],
+    [ idB, b ]: [ string, NexxusDeviceConnection ]
+  ): number {
+    if (a.connectedAt !== b.connectedAt) {
+      return a.connectedAt < b.connectedAt ? -1 : 1;
+    }
+
+    return idA < idB ? -1 : 1;
+  }
+
+  /**
+   * Tear each connection down, then close it: one on this node directly, the
+   * others with one `connection_evicted` message per queue they are on. Only
+   * the connections this tore down are closed. One torn down already was
+   * closed, or is being closed, by whatever tore it down.
+   */
+  private async evictConnections(deviceId: string, evicted: Array<[ string, NexxusDeviceConnection ]>): Promise<void> {
+    const elsewhere = new Map<string, Array<NexxusTransportRecipient>>();
+
+    await Promise.all(evicted.map(async ([ connectionId, { transport } ]) => {
+      try {
+        if (!await NexxusDevice.closeConnection(deviceId, connectionId)) {
+          return;
+        }
+      } catch (err) {
+        NexxusVolatileTransportWorker.logger.warn(
+          `Could not evict connection "${connectionId}" of device "${deviceId}": ${(err as Error).message}`,
+          { deviceId, connectionId },
+          NexxusVolatileTransportWorker.loggerLabel
+        );
+
+        return;
+      }
+
+      if (transport === this.queueName) {
+        await this.disconnectConnection(deviceId, connectionId, 'evicted');
+
+        return;
+      }
+
+      const queued = elsewhere.get(transport) ?? [];
+
+      queued.push({ deviceId, connectionId });
+      elsewhere.set(transport, queued);
+    }));
+
+    for (const [ transport, connections ] of elsewhere) {
+      await this.publish(transport, { event: 'connection_evicted', connections });
     }
   }
 }

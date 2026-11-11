@@ -69,16 +69,18 @@ tags:
     description: Accounts on applications that have authentication enabled.
   - name: Devices
     description: |
-      A device is one installation of a client. Subscriptions belong to a
-      device, and every token is bound to one.
+      A device is one installation of a client, and every token is bound to
+      one. A device can hold several connections to a transport at once, one
+      per socket.
   - name: Models
     description: |
       CRUD over application-defined models. Writes are accepted asynchronously
       (`202`) and applied shortly after.
   - name: Subscriptions
     description: |
-      Real-time channels. Subscribing returns the first page of data plus a
-      channel id; updates then arrive over the device's transport.
+      Real-time channels. Each subscription belongs to one connection of a
+      device. Subscribing returns the first page of data plus a channel id;
+      updates then arrive over that connection.
 
 paths:
   /:
@@ -305,9 +307,9 @@ paths:
       tags: [ Authentication ]
       summary: End a session
       description: |
-        Ends the session a refresh token belongs to, and closes the device's live
-        transport connection if it has one. Works the same for every application,
-        including those without authentication.
+        Ends the session a refresh token belongs to, and closes every connection
+        of its device. Works the same for every application, including those
+        without authentication.
 
         Answers `200` to any request that carries a refresh token, whether or not
         a session ended.
@@ -946,16 +948,19 @@ paths:
       tags: [ Subscriptions ]
       summary: Subscribe to a channel
       description: |
-        Records the subscription against the calling device and returns the
-        first page of matching data, so the client starts in sync. Later changes
-        arrive over the device's transport.
+        Records the subscription against one connection of the calling device,
+        the one `nxx-connection-id` names, and returns the first page of
+        matching data, so the client starts in sync. Later changes arrive over
+        that connection.
 
-        The device must already be connected to a transport.
+        The connection must be open: registered with a transport, and not
+        closed since.
 
         Where ACLs are enabled, both the first page and the live updates are
         limited to the rows the caller's role permits.
       parameters:
         - $ref: '#/components/parameters/AppId'
+        - $ref: '#/components/parameters/ConnectionId'
       requestBody:
         required: true
         content:
@@ -1022,7 +1027,7 @@ paths:
                       error:
                         enum: [ ModelNotFoundException, NotFoundException ]
         '409':
-          description: The device is not connected to any transport.
+          description: The connection `nxx-connection-id` names is not open.
           content:
             application/json:
               schema:
@@ -1036,10 +1041,12 @@ paths:
       tags: [ Subscriptions ]
       summary: Unsubscribe from a channel
       description: |
-        Removes a subscription. Takes the same descriptor that created it; a
-        descriptor matching no existing subscription is a `404`.
+        Removes a subscription from the connection `nxx-connection-id` names.
+        Takes the same descriptor that created it; a descriptor matching no
+        subscription of that connection is a `404`.
       parameters:
         - $ref: '#/components/parameters/AppId'
+        - $ref: '#/components/parameters/ConnectionId'
       requestBody:
         required: true
         content:
@@ -1078,13 +1085,13 @@ paths:
         '404':
           description: |
             The model type is not declared, the device no longer exists, or the
-            device holds no such subscription.
+            connection holds no such subscription.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
         '409':
-          description: The device is not connected to any transport.
+          description: The connection `nxx-connection-id` names does not exist.
           content:
             application/json:
               schema:
@@ -1116,6 +1123,17 @@ components:
         client code.
       schema:
         type: string
+    ConnectionId:
+      name: nxx-connection-id
+      in: header
+      required: true
+      description: |
+        The connection the request is for: the `connectionId` the transport
+        answered `register` with. Only connections of the token's own device
+        can be named.
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9_:-]{1,256}$'
     ModelId:
       name: id
       in: path
@@ -1167,20 +1185,12 @@ components:
           description: Absent on an application without authentication.
         name:
           type: string
-        type:
-          type: string
-          enum: [ volatile, persistent, unknown ]
-        status:
-          type: string
-          enum: [ online, offline ]
         lastSeen:
           type: string
           format: date-time
-        transport:
-          type: [ string, 'null' ]
           description: |
-            The transport this device is connected through. `null` when it is
-            not connected.
+            When a connection of the device last opened, or a sign-in last
+            reused the device. Absent until one of them happens.
 
     User:
       type: object

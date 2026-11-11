@@ -1,6 +1,7 @@
 import {
   NexxusBaseQueuePayload,
   NexxusTransportDeviceMessagePayload,
+  NexxusTransportRecipient,
   NexxusTransportWorkerPayload
 } from '@mayhem93/nexxus-core-lib';
 import { NexxusQueueMessage } from '@mayhem93/nexxus-message-queue-lib';
@@ -57,14 +58,19 @@ export abstract class NexxusBaseTransportWorker<
   protected abstract initTransport(): Promise<void>;
 
   /**
-   * Subclass delivers the event to the device via its specific transport mechanism.
-   * Called by processMessage for each deviceId in an incoming device_message payload.
-   * Subclass owns the "no live handle / no valid token" decision (typically log a warn).
+   * Subclass delivers the event to one connection of a device via its specific
+   * transport mechanism. Called by processMessage for each recipient in an
+   * incoming device_message payload. Subclass owns the "no live handle / no
+   * valid token" decision (typically log a warn).
    *
    * `data` is the canonical transport payload's data union; subclass discriminates
    * on `data.event` via a switch and TS narrows each case to the matching variant.
    */
-  protected abstract sendToDevice(deviceId: string, data: NexxusTransportDeviceMessagePayload['data']): Promise<void>;
+  protected abstract sendToConnection(
+    deviceId: string,
+    connectionId: string,
+    data: NexxusTransportDeviceMessagePayload['data']
+  ): Promise<void>;
 
   /**
    * End the live connections of devices whose sessions were ended by logout.
@@ -80,6 +86,21 @@ export abstract class NexxusBaseTransportWorker<
     );
   }
 
+  /**
+   * Close connections evicted to keep their devices within their cap. Only a
+   * volatile transport holds a connection to close, and only volatile
+   * connections are evicted, so reaching this default means a message went
+   * somewhere it has no meaning.
+   */
+  protected handleConnectionEvicted(connections: Array<NexxusTransportRecipient>): Promise<void> {
+    NexxusBaseTransportWorker.logger.warn(
+      `Received connection_evicted for ${connections.length} connection(s), but this transport holds no connections`,
+      (this.constructor as typeof NexxusBaseTransportWorker).loggerLabel
+    );
+
+    return Promise.resolve();
+  }
+
   protected async processMessage(msg: NexxusQueueMessage<NexxusTransportWorkerPayload>): Promise<void> {
     const payload = msg.payload;
     const label = (this.constructor as typeof NexxusBaseTransportWorker).loggerLabel;
@@ -90,15 +111,21 @@ export abstract class NexxusBaseTransportWorker<
       return;
     }
 
+    if (payload.event === 'connection_evicted') {
+      await this.handleConnectionEvicted(payload.connections);
+
+      return;
+    }
+
     if (payload.event !== 'device_message') {
       throw new NexxusWorkerUnsupportedEventException(
         `Transports don't handle "${(payload as NexxusBaseQueuePayload).event}" events`
       );
     }
 
-    if (payload.deviceIds.length === 0) {
+    if (payload.recipients.length === 0) {
       NexxusBaseTransportWorker.logger.warn(
-        'No device IDs provided in device_message payload',
+        'No recipients provided in device_message payload',
         label
       );
 
@@ -107,8 +134,8 @@ export abstract class NexxusBaseTransportWorker<
 
     const data = payload.data;
 
-    for (const deviceId of payload.deviceIds) {
-      await this.sendToDevice(deviceId, data);
+    for (const { deviceId, connectionId } of payload.recipients) {
+      await this.sendToConnection(deviceId, connectionId, data);
     }
   }
 }

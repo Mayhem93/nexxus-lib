@@ -13,14 +13,18 @@ import {
   NexxusTransportModelDeletedPayload,
   NexxusTransportModelUpdatedPayload
 } from '@mayhem93/nexxus-core-lib';
+import { NexxusDevice } from '@mayhem93/nexxus-redis';
 
 import { WebSocket, Data as WebSocketData } from 'ws';
 
 import { EventEmitter } from 'node:events';
 
 export type ClientEventMap = {
-  /** Carries the raw token; the worker verifies it and resolves the device. */
-  register: [ token: string ];
+  /**
+   * Carries the raw token, which the worker verifies and resolves the device
+   * from, and the id of the connection the client lost, if it named one.
+   */
+  register: [ token: string, lostConnectionId: string | undefined ];
   /** Carries a fresh access token for an already-registered connection. */
   refresh_access_token: [ token: string ];
 }
@@ -39,6 +43,11 @@ export type NexxusWsClientMessage = {
      * its own token was issued to.
      */
     token: string;
+    /**
+     * After a close the client didn't ask for, the id of the connection it
+     * lost. That connection is torn down before this one opens.
+     */
+    previousConnectionId?: string;
   };
   refresh_access_token: {
     /**
@@ -55,7 +64,8 @@ export type NexxusWsClientMessage = {
 export type NexxusWsServerMessage = {
   register: {
     success: boolean;
-    message?: string;
+    /** This connection's id: what `nxx-connection-id` carries on subscribe and unsubscribe. */
+    connectionId: string;
   };
   refresh_access_token: {
     success: boolean;
@@ -187,7 +197,7 @@ export class NexxusWsClient extends EventEmitter<ClientEventMap> {
   }
 
   /**
-   * Called by the transport worker once the device's Redis state is written and
+   * Called by the transport worker once the connection is open in Redis and
    * the client is actually routable. Registration is only true from here on:
    * see the note in `registerDevice`.
    */
@@ -348,10 +358,15 @@ export class NexxusWsClient extends EventEmitter<ClientEventMap> {
       return ;
     }
 
-    const token = msg.data.token;
+    const { token, previousConnectionId } = msg.data;
 
     if (!token || typeof token !== 'string' || token.trim() === '') {
       throw new NexxusWsInvalidParametersException('Invalid or missing token.');
+    }
+
+    if (previousConnectionId !== undefined
+      && (typeof previousConnectionId !== 'string' || !NexxusDevice.isValidConnectionId(previousConnectionId))) {
+      throw new NexxusWsInvalidParametersException('Invalid previousConnectionId.');
     }
 
     this.registering = true;
@@ -365,7 +380,7 @@ export class NexxusWsClient extends EventEmitter<ClientEventMap> {
     // registration would leave this client believing it is registered while the
     // worker has no route to it — and every retry would be refused as "already
     // registered", stranding the device until it reconnects on its own.
-    this.emit('register', token);
+    this.emit('register', token, previousConnectionId);
   }
 
   /**

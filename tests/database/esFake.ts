@@ -82,10 +82,23 @@ export class FakeEsClient {
     return state.bulkResult;
   }
 
+  /** As a real cluster does, a hit carries `_version` only when the search asks for it. */
   async search(req: any): Promise<any> {
     state.calls.search.push(req);
 
-    return state.searchResult;
+    if (req.version === true) {
+      return state.searchResult;
+    }
+
+    return {
+      ...state.searchResult,
+      hits: {
+        ...state.searchResult.hits,
+        hits: state.searchResult.hits.hits.map((hit: any) =>
+          Object.fromEntries(Object.entries(hit).filter(([ key ]) => key !== '_version'))
+        ),
+      },
+    };
   }
 
   async mget(req: any): Promise<any> {

@@ -13,15 +13,33 @@ export type NexxusRedisScripts = {
     args: [ expectedHash: string, sessionJson: string ];
     result: -1 | 0 | 1;
   };
-  'device-attach': {
+  'connection-open': {
     keys: [ device: string ];
-    args: [ transportJson: string, nowSeconds: string, lastSeenJson: string ];
+    args: [ connectionPath: string, connectionJson: string, nowSeconds: string, lastSeenJson: string ];
     result: -1 | 0 | 1;
   };
-  'device-detach': {
+  'connection-subscribe': {
     keys: [ device: string ];
-    args: [ transport: string, lastSeenJson: string ];
-    result: -1 | 0 | 1;
+    args: [ connectionPath: string, channelJson: string ];
+    /** The connection's transport, when the channel is listed. */
+    result: -2 | -1 | string;
+  };
+  'connection-unsubscribe': {
+    keys: [ device: string ];
+    args: [ connectionPath: string, channelJson: string ];
+    result: -2 | -1 | 0 | 1;
+  };
+  'connection-close': {
+    keys: [ device: string ];
+    args: [ connectionPath: string ];
+    /** The entry before the call, inside a JSON list. */
+    result: string | null;
+  };
+  'counter-release': {
+    keys: [ hash: string ];
+    args: [ counter: string, ...deletedAlongside: string[] ];
+    /** What is left on the counter. */
+    result: number;
   };
   'username-lock-release': {
     keys: [ lock: string ];
@@ -54,8 +72,11 @@ export class NexxusRedisScriptLoader {
   /** Where each script lives, under `src/lib/scripts`. */
   private static readonly LOCATIONS: Readonly<Record<NexxusRedisScriptName, string>> = {
     'device-session-cas': 'device-session-cas.lua',
-    'device-attach': 'device-attach.lua',
-    'device-detach': 'device-detach.lua',
+    'connection-open': 'connection-open.lua',
+    'connection-subscribe': 'connection-subscribe.lua',
+    'connection-unsubscribe': 'connection-unsubscribe.lua',
+    'connection-close': 'connection-close.lua',
+    'counter-release': 'counter-release.lua',
     'username-lock-release': 'username-lock-release.lua'
   };
 

@@ -6,7 +6,7 @@ class FakeTransport extends NexxusBaseTransportWorker<any> {
   protected queueName: any = 'websockets-transport';
   protected nodeRole = 'websockets-transport';
   public order: string[] = [];
-  public sent: Array<{ deviceId: string; data: any }> = [];
+  public sent: Array<{ deviceId: string; connectionId: string; data: any }> = [];
   /** What the worker could rely on at the moment `beforeConsume` ran. */
   public atBeforeConsume: { available: boolean; consuming: boolean } | null = null;
 
@@ -15,7 +15,9 @@ class FakeTransport extends NexxusBaseTransportWorker<any> {
     this.atBeforeConsume = { available: this.isAvailable, consuming: mqState.consumed.length > 0 };
   }
   protected async initTransport(): Promise<void> { this.order.push('initTransport'); }
-  protected async sendToDevice(deviceId: string, data: any): Promise<void> { this.sent.push({ deviceId, data }); }
+  protected async sendToConnection(deviceId: string, connectionId: string, data: any): Promise<void> {
+    this.sent.push({ deviceId, connectionId, data });
+  }
 
   public any(): any { return this; }
 }
@@ -41,8 +43,8 @@ const worker = (): FakeTransport => {
   return w;
 };
 
-const deviceMessage = (deviceIds: string[]) => ({
-  payload: { event: 'device_message', deviceIds, data: { event: 'update', some: 'thing' } },
+const deviceMessage = (recipients: Array<{ deviceId: string; connectionId: string }>) => ({
+  payload: { event: 'device_message', recipients, data: { event: 'update', some: 'thing' } },
 });
 
 describe('NexxusBaseTransportWorker.init', () => {
@@ -73,12 +75,16 @@ describe('NexxusBaseTransportWorker.init', () => {
 });
 
 describe('NexxusBaseTransportWorker.processMessage', () => {
-  it('fans a device_message out to every device id', async () => {
+  it('fans a device_message out to every recipient connection', async () => {
     const w = worker();
 
-    await w.any().processMessage(deviceMessage(['d1', 'd2']));
+    await w.any().processMessage(deviceMessage([
+      { deviceId: 'd1', connectionId: 'c1' },
+      { deviceId: 'd1', connectionId: 'c2' },
+      { deviceId: 'd2', connectionId: 'c3' },
+    ]));
 
-    expect(w.sent.map(s => s.deviceId)).toEqual(['d1', 'd2']);
+    expect(w.sent.map(s => [ s.deviceId, s.connectionId ])).toEqual([ [ 'd1', 'c1' ], [ 'd1', 'c2' ], [ 'd2', 'c3' ] ]);
     expect(w.sent[0].data).toEqual({ event: 'update', some: 'thing' });
   });
 
@@ -89,6 +95,15 @@ describe('NexxusBaseTransportWorker.processMessage', () => {
 
     expect(w.sent).toHaveLength(0);
     expect(logger.has('warning', /device_logout for 1 device\(s\), but this transport holds no connections/)).toBe(true);
+  });
+
+  it('warns on connection_evicted — only a volatile transport has connections to close', async () => {
+    const w = worker();
+
+    await w.any().processMessage({ payload: { event: 'connection_evicted', connections: [ { deviceId: 'd1', connectionId: 'c1' } ] } });
+
+    expect(w.sent).toHaveLength(0);
+    expect(logger.has('warning', /connection_evicted for 1 connection\(s\), but this transport holds no connections/)).toBe(true);
   });
 
   it('fails an unknown event type with a terminal error, so it is dead-lettered', async () => {
@@ -102,12 +117,12 @@ describe('NexxusBaseTransportWorker.processMessage', () => {
     expect(w.sent).toHaveLength(0);
   });
 
-  it('warns and drops a device_message with no device ids', async () => {
+  it('warns and drops a device_message with no recipients', async () => {
     const w = worker();
 
     await w.any().processMessage(deviceMessage([]));
 
     expect(w.sent).toHaveLength(0);
-    expect(logger.has('warning', /No device IDs provided/)).toBe(true);
+    expect(logger.has('warning', /No recipients provided/)).toBe(true);
   });
 });

@@ -479,6 +479,19 @@ describe('NexxusElasticsearchDb.buildQuery + filter DSL', () => {
     expect(req).toMatchObject({ index: 'nxx-application', from: 0, size: 100, query: { match_all: {} }, sort: { updatedAt: { order: 'desc' } } });
   });
 
+  /** Built-ins have no version, and a count has no hits to put one on. */
+  it('asks for each hit\'s version on app-model searches only', async () => {
+    await db().searchItems({ type: 'runs', appId: 'app1' });
+    await db().searchItems({ type: 'application' });
+    await db().searchItems({ type: 'user', appId: 'app1' });
+    await db().countItems({ type: 'runs', appId: 'app1' });
+
+    expect(state.calls.search[0].version).toBe(true);
+    expect(state.calls.search[1].version).toBe(false);
+    expect(state.calls.search[2].version).toBe(false);
+    expect(state.calls.count[0]).not.toHaveProperty('version');
+  });
+
   it('translates each operator to the right ES query clause', async () => {
     await db().countItems({ type: 'runs', appId: 'app1', filter: filter({ status: 'active' }) });
     expect(state.calls.count[0].query).toEqual({ bool: { must: [{ term: { status: 'active' } }] } });

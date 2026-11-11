@@ -70,14 +70,16 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
    * WebSocket close codes for each reason a device is disconnected. The client
    * branches on the code: `logged_out` means don't reconnect; `token_expired`
    * means refresh, then reconnect; `service_restart` means reconnect after a
-   * short random delay, so a node's clients don't all come back at once. The
-   * first two are in the 4000–4999 range reserved for applications;
-   * `service_restart` is the standard 1012. The reason string travels alongside
-   * for traceability.
+   * short random delay, so a node's clients don't all come back at once;
+   * `evicted` means don't reconnect on its own, since the device opened more
+   * connections than its application allows. All but `service_restart` are in
+   * the 4000–4999 range reserved for applications; `service_restart` is the
+   * standard 1012. The reason string travels alongside for traceability.
    */
   private static readonly CLOSE_CODES: Readonly<Record<NexxusDeviceDisconnectReason, number>> = {
     logged_out: 4001,
     token_expired: 4002,
+    evicted: 4003,
     service_restart: 1012
   };
 
@@ -111,7 +113,13 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
    */
   private teardownWaiters: Array<{ pending: Set<NexxusWsClient>; resolve: () => void }> = [];
   private unregisteredClients: Set<NexxusWsClient> = new Set();
-  private registeredClients : Map<string, NexxusWsClient> = new Map(); // Map of deviceId to WebSocket client
+  /** Registered connections, by connection id. A connection's id is its client's `id`. */
+  private registeredClients: Map<string, NexxusWsClient> = new Map();
+  /**
+   * Connections registering, by connection id: held from before their entry is
+   * written to Redis until they are in `registeredClients`, or have failed.
+   */
+  private openingConnections: Map<string, NexxusWsClient> = new Map();
   private wsToNexxusClientMap: Map<WebSocket, NexxusWsClient> = new Map();
 
   constructor(services: NexxusWorkerServices) {
@@ -169,54 +177,60 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
     this.server.on('connection', this.handleConnection.bind(this));
   }
 
-  protected async sendToDevice(deviceId: string, data: NexxusTransportDeviceMessagePayload['data']): Promise<void> {
-    const client = this.registeredClients.get(deviceId);
+  protected sendToConnection(
+    deviceId: string,
+    connectionId: string,
+    data: NexxusTransportDeviceMessagePayload['data']
+  ): Promise<void> {
+    const client = this.registeredClients.get(connectionId);
 
     if (!client) {
-      // this happens when a device disconnects from transport while
-      // the worker is still processing a message for it. In this case,
-      // we just log and ignore the message.
+      // Routed to this node's queue, but not held here: it closed while this
+      // message was on its way, or it is dead and still routed.
       NexxusWebsocketsTransportWorker.logger.info(
-        `No registered client found for device ID: "${deviceId}"`,
-        { deviceId },
+        `No registered connection "${connectionId}" for device ID: "${deviceId}"`,
+        { deviceId, connectionId },
         NexxusWebsocketsTransportWorker.loggerLabel
       );
 
-      return;
+      this.tearDownDeadConnection(deviceId, connectionId);
+
+      return Promise.resolve();
     }
 
     // Checked here, when there is something to deliver, rather than on a timer:
     // a well-behaved client refreshes its access token in place before expiry,
     // so this only ever catches one that didn't. It gets nothing past its
-    // token's lifetime, and is disconnected with the reason.
+    // token's lifetime, and is disconnected with the reason. Only this
+    // connection: each one rests on its own token.
     if (client.isTokenExpired()) {
-      await this.disconnectDevice(deviceId, 'token_expired');
+      this.disconnectClient(client, deviceId, 'token_expired');
 
-      return;
+      return Promise.resolve();
     }
 
     switch (data.event) {
       case 'model_created':
       case 'model_updated':
       case 'model_deleted':
-
         client.sendMessage(data.event, data);
-        break;
+
+        return Promise.resolve();
 
       default:
         // Unreachable by type, reachable at runtime: a newer Transport Manager
         // can send an event this transport predates. It's the same event for
-        // every device in the message, so the first device stops the whole one.
-        throw new NexxusWorkerUnsupportedEventException(
+        // every recipient in the message, so the first one stops the whole one.
+        return Promise.reject(new NexxusWorkerUnsupportedEventException(
           `The websockets transport doesn't deliver "${(data as { event: string }).event}" events`
-        );
+        ));
     }
   }
 
   protected disconnectDevice(deviceId: string, reason: NexxusDeviceDisconnectReason): Promise<void> {
-    const client = this.registeredClients.get(deviceId);
+    const clients = [ ...this.registeredClients.values() ].filter(client => client.getDeviceId() === deviceId);
 
-    if (!client) {
+    if (clients.length === 0) {
       // Already gone — the client may have closed it at the same moment.
       NexxusWebsocketsTransportWorker.logger.debug(
         `No live connection to end for device ID: "${deviceId}" (${reason})`,
@@ -227,18 +241,49 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
       return Promise.resolve();
     }
 
+    for (const client of clients) {
+      this.disconnectClient(client, deviceId, reason);
+    }
+
+    return Promise.resolve();
+  }
+
+  protected disconnectConnection(deviceId: string, connectionId: string, reason: NexxusDeviceDisconnectReason): Promise<void> {
+    const client = this.registeredClients.get(connectionId) ?? this.openingConnections.get(connectionId);
+
+    if (!client) {
+      // Already gone — the client may have closed it at the same moment.
+      NexxusWebsocketsTransportWorker.logger.debug(
+        `No connection "${connectionId}" of device ID: "${deviceId}" to end (${reason})`,
+        { deviceId, connectionId, reason },
+        NexxusWebsocketsTransportWorker.loggerLabel
+      );
+
+      return Promise.resolve();
+    }
+
+    this.disconnectClient(client, deviceId, reason);
+
+    return Promise.resolve();
+  }
+
+  /**
+   * Close one connection of `deviceId`, telling the client why. Only closes the
+   * socket: teardown happens in `handleDisconnect`, the same path as a
+   * client-initiated close, so it runs exactly once whoever closes first.
+   */
+  private disconnectClient(client: NexxusWsClient, deviceId: string, reason: NexxusDeviceDisconnectReason): void {
     NexxusWebsocketsTransportWorker.logger.info(
-      `Disconnecting device ID: "${deviceId}" (${reason})`,
-      { deviceId, reason, clientId: client.id },
+      `Disconnecting connection "${client.id}" of device ID: "${deviceId}" (${reason})`,
+      { deviceId, connectionId: client.id, reason },
       NexxusWebsocketsTransportWorker.loggerLabel
     );
 
-    // Only closes the socket. Teardown happens in `handleDisconnect`, the same
-    // path as a client-initiated close, so it runs exactly once whoever closes
-    // first.
     client.close(NexxusWebsocketsTransportWorker.CLOSE_CODES[reason], reason);
+  }
 
-    return Promise.resolve();
+  protected holdsConnection(connectionId: string): boolean {
+    return this.registeredClients.has(connectionId) || this.openingConnections.has(connectionId);
   }
 
   protected stopAcceptingConnections(): void {
@@ -344,16 +389,16 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
 
     // The registration in flight on this connection, if any. The connection's
     // teardown waits for it: one that closed mid-registration would otherwise
-    // find no device to tear down, and the registration would then record the
-    // device as online here, with no connection behind it.
+    // find nothing to tear down, and the registration would then open the
+    // connection in Redis, with no socket behind it.
     let registration: Promise<void> = Promise.resolve();
 
     // `on`, not `once`: the client is only considered registered once
-    // `handleRegister` has written the device's state, so a failed attempt has
+    // `handleRegister` has opened the connection in Redis, so a failed attempt has
     // to be retryable. The client's own in-flight guard is what stops a burst of
     // register frames.
-    client.on('register', token => {
-      registration = this.handleRegister(client, token);
+    client.on('register', (token, lostConnectionId) => {
+      registration = this.handleRegister(client, token, lostConnectionId);
     });
 
     // A registered connection moving onto a fresh access token without dropping:
@@ -407,32 +452,52 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
   }
 
   /**
-   * Verify the token a connection registers with, and record the device it
-   * names as online here. Never rejects, which the connection's teardown relies
-   * on: a failure is answered on the connection, which stays unregistered and
-   * free to try again.
+   * Verify the token a connection registers with, and open the connection, for
+   * the device the token names, in Redis. Never rejects, which the connection's
+   * teardown relies on: a failure is answered on the connection, which stays
+   * unregistered and free to try again.
+   *
+   * Before it opens, the connection the client says it lost, if any, is torn
+   * down, and so are the device's dead connections on this node's queue. Once
+   * it has, the device's oldest connections are evicted if it is over its cap.
    */
-  private async handleRegister(client: NexxusWsClient, token: string): Promise<void> {
+  private async handleRegister(client: NexxusWsClient, token: string, lostConnectionId?: string): Promise<void> {
     let deviceId: string | undefined;
 
     try {
       // The device is a claim inside the token, not a value the client chose,
       // so a client can only ever register the device its own token names.
-      const identity = await this.authenticateDevice(token);
+      const registration = await this.authenticateDevice(token);
 
-      deviceId = identity.deviceId;
+      deviceId = registration.deviceId;
 
-      await this.registerDevice(deviceId);
+      if (lostConnectionId) {
+        await this.releaseLostConnection(deviceId, lostConnectionId);
+      }
 
-      this.unregisteredClients.delete(client);
-      this.registeredClients.set(deviceId, client);
-      client.confirmRegistration(deviceId, identity.appId, identity.expiresAt);
-      client.sendMessage('register', { success: true });
+      this.tearDownDeadConnections(deviceId, registration.connections);
+
+      // Held from here on, before its entry is written (see `holdsConnection`).
+      this.openingConnections.set(client.id, client);
+
+      try {
+        await this.registerConnection(deviceId, client.id);
+
+        this.unregisteredClients.delete(client);
+        this.registeredClients.set(client.id, client);
+      } finally {
+        this.openingConnections.delete(client.id);
+      }
+
+      client.confirmRegistration(deviceId, registration.appId, registration.expiresAt);
+      client.sendMessage('register', { success: true, connectionId: client.id });
 
       NexxusWebsocketsTransportWorker.logger.info(`Client "${client.id}" registered with device ID: "${deviceId}"`,
         { deviceId, clientId: client.id },
         NexxusWebsocketsTransportWorker.loggerLabel
       );
+
+      this.evictConnectionsOverCap(registration, client.id, lostConnectionId);
     } catch (e : Error | unknown) {
       // Leaves the client unregistered and free to try again.
       client.failRegistration();
@@ -471,17 +536,13 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
     }
 
     const deviceId = nxxWsClient.getDeviceId();
-    // The device may have registered again on this node before this socket's
-    // close arrived. It belongs to the newer connection then, and so does its
-    // teardown.
-    const ownsDevice = deviceId !== undefined && this.registeredClients.get(deviceId) === nxxWsClient;
 
-    // Only the Redis update can fail. Doing it first, on its own, keeps a
+    // Only the Redis teardown can fail. Doing it first, on its own, keeps a
     // failure from skipping the local cleanup below — which would leak a client
     // reference per disconnect and drift `totalConnections` upward for good.
     try {
-      if (ownsDevice) {
-        await this.unregisterDevice(deviceId);
+      if (deviceId) {
+        await this.unregisterConnection(deviceId, nxxWsClient.id);
       }
     } catch (e) {
       if (e instanceof RedisDeviceInvalidParamsException) {
@@ -491,15 +552,9 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
       }
     }
 
-    // Whether or not the Redis update worked: the socket is gone either way.
-    if (ownsDevice) {
-      this.registeredClients.delete(deviceId);
-    } else if (deviceId) {
-      NexxusWebsocketsTransportWorker.logger.debug(
-        `Client "${nxxWsClient.id}" closed after a newer connection registered device ID "${deviceId}"; left the device to it`,
-        { deviceId, clientId: nxxWsClient.id },
-        NexxusWebsocketsTransportWorker.loggerLabel
-      );
+    // Whether or not the Redis teardown worked: the socket is gone either way.
+    if (deviceId) {
+      this.registeredClients.delete(nxxWsClient.id);
     } else {
       this.unregisteredClients.delete(nxxWsClient);
     }

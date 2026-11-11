@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { NexxusDevice, NexxusRedisSubscription } from '@mayhem93/nexxus-redis';
 import { NEXXUS_PREFIX_LC } from '@mayhem93/nexxus-core-lib';
-import { installFakeRedis, logger } from './helpers';
+import { installFakeRedis } from './helpers';
 import type { FakeRedis } from './fakeRedis';
 
 let redis: FakeRedis;
@@ -12,28 +12,24 @@ const makeSub = (modelId = 'r1') => new NexxusRedisSubscription({ appId: 'a', mo
 
 describe('NexxusDevice constructor', () => {
   it('applies defaults and preserves a caller id', () => {
-    const d = new NexxusDevice({ appId: 'a', id: 'd1', name: undefined as never, subscriptions: [] });
-    const data = d.getValue();
+    const d = new NexxusDevice({ appId: 'a', id: 'd1', name: undefined as never });
 
-    expect(data.id).toBe('d1');
-    expect(data.name).toBe('Unnamed Device');
-    expect(data.type).toBe('unknown');
-    expect(data.subscriptions).toEqual([]);
+    expect(d.getValue()).toEqual({ id: 'd1', appId: 'a', name: 'Unnamed Device', userId: undefined, lastSeen: undefined });
   });
 
   it('generates a uuid id when none is given', () => {
-    const d = new NexxusDevice({ appId: 'a', name: 'N', subscriptions: [] } as never);
+    const d = new NexxusDevice({ appId: 'a', name: 'N' } as never);
 
     expect(d.getValue().id).toMatch(/^[0-9a-f-]{36}$/);
   });
 
   it('requires an appId', () => {
-    expect(() => new NexxusDevice({ appId: undefined as never, id: 'd1', name: 'N', subscriptions: [] }))
+    expect(() => new NexxusDevice({ appId: undefined as never, id: 'd1', name: 'N' }))
       .toThrow(/appId is required/);
   });
 
   it('parses a lastSeen string into a Date', () => {
-    const d = new NexxusDevice({ appId: 'a', id: 'd1', name: 'N', subscriptions: [], lastSeen: '2020-01-01T00:00:00.000Z' });
+    const d = new NexxusDevice({ appId: 'a', id: 'd1', name: 'N', lastSeen: '2020-01-01T00:00:00.000Z' });
 
     expect(d.getValue().lastSeen).toBeInstanceOf(Date);
   });
@@ -42,45 +38,26 @@ describe('NexxusDevice constructor', () => {
 describe('NexxusDevice getKey / get / save', () => {
   it('builds the device key', () => {
     expect(NexxusDevice.getKey('d1')).toBe(`${NEXXUS_PREFIX_LC}:device:d1`);
-    expect(new NexxusDevice({ appId: 'a', id: 'd1', name: 'N', subscriptions: [] }).getKey()).toBe(`${NEXXUS_PREFIX_LC}:device:d1`);
+    expect(new NexxusDevice({ appId: 'a', id: 'd1', name: 'N' }).getKey()).toBe(`${NEXXUS_PREFIX_LC}:device:d1`);
   });
 
-  it('saves and reads a device back', async () => {
-    await new NexxusDevice({ appId: 'a', id: 'd1', name: 'Phone', type: 'volatile', transport: 'tq', subscriptions: [] }).save();
+  it('saves a device with no connections, and reads it back', async () => {
+    await new NexxusDevice({ appId: 'a', id: 'd1', name: 'Phone' }).save();
 
     const loaded = await NexxusDevice.get('d1');
 
-    expect(loaded.getValue()).toMatchObject({ id: 'd1', appId: 'a', name: 'Phone', type: 'volatile', transport: 'tq' });
+    expect(loaded.getValue()).toMatchObject({ id: 'd1', appId: 'a', name: 'Phone' });
+    expect(loaded.getConnections()).toEqual({});
   });
 
   it('throws when getting a non-existent device', async () => {
     await expect(NexxusDevice.get('ghost')).rejects.toThrow(/not found/);
   });
-
-  it('rejects saving a device that has subscriptions but no transport', async () => {
-    const d = new NexxusDevice({ appId: 'a', id: 'd1', name: 'N', subscriptions: [makeSub()] });
-
-    await expect(d.save()).rejects.toThrow(/must be connected to a transport/);
-  });
-
-  it('registers each subscription on save and can hydrate them back', async () => {
-    const d = new NexxusDevice({ appId: 'a', id: 'd1', name: 'N', transport: 'tq', subscriptions: [makeSub()] });
-
-    await d.save();
-
-    // The subscription now knows about the device.
-    expect(await makeSub().getAllDevices()).toEqual(new Set(['d1|tq']));
-
-    const withSubs = await NexxusDevice.get('d1', true);
-
-    expect(withSubs.getValue().subscriptions).toHaveLength(1);
-    expect(withSubs.getValue().subscriptions[0].getKey()).toBe(makeSub().getKey());
-  });
 });
 
 describe('NexxusDevice.exists', () => {
   it('tells which devices exist, with one single-key EXISTS per id', async () => {
-    await new NexxusDevice({ appId: 'a', id: 'd1', name: 'N', subscriptions: [] }).save();
+    await new NexxusDevice({ appId: 'a', id: 'd1', name: 'N' }).save();
 
     const exists = vi.spyOn(redis, 'exists');
 
@@ -92,13 +69,13 @@ describe('NexxusDevice.exists', () => {
 
 describe('NexxusDevice.update', () => {
   beforeEach(async () => {
-    await new NexxusDevice({ appId: 'a', id: 'd1', name: 'N', type: 'volatile', transport: 'tq', subscriptions: [] }).save();
+    await new NexxusDevice({ appId: 'a', id: 'd1', name: 'N' }).save();
   });
 
-  it('updates allowed string fields', async () => {
-    await NexxusDevice.update('d1', { name: 'Renamed', status: 'online' });
+  it('updates the name', async () => {
+    await NexxusDevice.update('d1', { name: 'Renamed' });
 
-    expect((await NexxusDevice.get('d1')).getValue()).toMatchObject({ name: 'Renamed', status: 'online' });
+    expect((await NexxusDevice.get('d1')).getValue()).toMatchObject({ name: 'Renamed' });
   });
 
   it('stores a lastSeen Date as an ISO string, rejecting non-Dates', async () => {
@@ -108,13 +85,12 @@ describe('NexxusDevice.update', () => {
     await expect(NexxusDevice.update('d1', { lastSeen: 'nope' as never })).rejects.toThrow(/expected Date/);
   });
 
-  it('rejects a non-string transport', async () => {
-    await expect(NexxusDevice.update('d1', { transport: 5 as never })).rejects.toThrow(/expected string/);
+  it('rejects a non-string name', async () => {
+    await expect(NexxusDevice.update('d1', { name: 5 as never })).rejects.toThrow(/expected string/);
   });
 
-  it('rejects updating userId — the update type permits it but the impl does not', async () => {
-    // Flagged inconsistency: NexxusDeviceUpdateProps allows userId, but update() has no case for it.
-    await expect(NexxusDevice.update('d1', { userId: 'u2' })).rejects.toThrow(/Unknown field "userId"/);
+  it('rejects a field it does not update', async () => {
+    await expect(NexxusDevice.update('d1', { userId: 'u2' } as never)).rejects.toThrow(/Unknown field "userId"/);
   });
 
   it('is a no-op when every update value is undefined', async () => {
@@ -128,183 +104,6 @@ describe('NexxusDevice.update', () => {
   });
 });
 
-describe('NexxusDevice subscriptions', () => {
-  const makeConnectedDevice = () => new NexxusDevice({ appId: 'a', id: 'd1', name: 'N', transport: 'tq', subscriptions: [] });
-
-  it('adds a subscription, deduping repeats', async () => {
-    const d = makeConnectedDevice();
-
-    await d.save();
-
-    expect(await d.addSubscription(makeSub())).toBe(true);
-    expect(await d.addSubscription(makeSub())).toBe(false); // already present
-    expect(d.getValue().subscriptions).toHaveLength(1);
-    expect(await makeSub().getAllDevices()).toEqual(new Set(['d1|tq']));
-  });
-
-  it('rejects adding a subscription while not connected to a transport', async () => {
-    const d = new NexxusDevice({ appId: 'a', id: 'd1', name: 'N', subscriptions: [] });
-
-    await expect(d.addSubscription(makeSub())).rejects.toThrow(/not connected to any transport/);
-  });
-
-  it('removes a subscription, reporting whether it was present', async () => {
-    const d = makeConnectedDevice();
-
-    await d.save();
-    await d.addSubscription(makeSub());
-
-    expect(await d.removeSubscription(makeSub())).toBe(true);
-    expect(await d.removeSubscription(makeSub())).toBe(false);
-    expect(d.getValue().subscriptions).toHaveLength(0);
-    expect(await makeSub().getAllDevices()).toEqual(new Set());
-  });
-
-  it('rejects removing a subscription while not connected to a transport', async () => {
-    const d = new NexxusDevice({ appId: 'a', id: 'd1', name: 'N', subscriptions: [] });
-
-    await expect(d.removeSubscription(makeSub())).rejects.toThrow(/not registered with any transport/);
-  });
-
-  it('hasSubscription throws when the device is not persisted', async () => {
-    const d = makeConnectedDevice(); // not saved
-
-    await expect(d.hasSubscription(makeSub())).rejects.toThrow(/not found/);
-  });
-
-  it('removeAllSubscriptions unsubscribes each and clears the list', async () => {
-    const d = makeConnectedDevice();
-
-    await d.save();
-    await d.addSubscription(makeSub('r1'));
-    await d.addSubscription(makeSub('r2'));
-
-    await NexxusDevice.removeAllSubscriptions('d1');
-
-    expect((await NexxusDevice.get('d1', true)).getValue().subscriptions).toHaveLength(0);
-    expect(await makeSub('r1').getAllDevices()).toEqual(new Set());
-  });
-
-  it('warns (and still clears) when removing subscriptions from a device with no transport', async () => {
-    // Persist a device that has subscription keys but no transport (bypass save()'s guard).
-    redis.store.set(NexxusDevice.getKey('d2'), {
-      type: 'json',
-      value: { id: 'd2', appId: 'a', name: 'N', type: 'unknown', transport: null, subscriptions: [makeSub().getKey()] },
-    } as never);
-
-    await NexxusDevice.removeAllSubscriptions('d2');
-
-    expect(logger.has('warning', /not connected to any transport/)).toBe(true);
-    expect((await NexxusDevice.get('d2', true)).getValue().subscriptions).toHaveLength(0);
-  });
-
-  it('removeAllSubscriptions writes nothing for a device with none listed', async () => {
-    await makeConnectedDevice().save();
-
-    const clear = vi.spyOn(redis.json, 'clear');
-
-    await NexxusDevice.removeAllSubscriptions('d1');
-
-    expect(clear).not.toHaveBeenCalled();
-  });
-});
-
-describe('NexxusDevice.detachTransport', () => {
-  const storedDevice = (): any => (redis.store.get(NexxusDevice.getKey('d1')) as { value: any }).value;
-
-  /** A device on `transport`, subscribed to r1 and r2. */
-  const connectedDevice = async (transport: string): Promise<void> => {
-    const d = new NexxusDevice({ appId: 'a', id: 'd1', name: 'N', transport, status: 'online', subscriptions: [] });
-
-    await d.save();
-    await d.addSubscription(makeSub('r1'));
-    await d.addSubscription(makeSub('r2'));
-  };
-
-  it('removes the routes through the transport and marks the device offline', async () => {
-    await connectedDevice('tq');
-
-    expect(await NexxusDevice.detachTransport('d1', 'tq')).toBe(true);
-
-    expect(storedDevice()).toMatchObject({ subscriptions: [], status: 'offline', transport: null });
-    expect(typeof storedDevice().lastSeen).toBe('string'); // ISO timestamp
-    expect(await makeSub('r1').getAllDevices()).toEqual(new Set());
-    expect(await makeSub('r2').getAllDevices()).toEqual(new Set());
-  });
-
-  /**
-   * A connection that closes after its device has registered on another
-   * transport must not touch what that registration set up.
-   */
-  it('leaves a device that has registered on another transport alone', async () => {
-    await connectedDevice('tq2');
-
-    expect(await NexxusDevice.detachTransport('d1', 'tq')).toBe(false);
-
-    expect(storedDevice()).toMatchObject({ status: 'online', transport: 'tq2' });
-    expect(storedDevice().subscriptions).toHaveLength(2);
-    expect(await makeSub('r1').getAllDevices()).toEqual(new Set([ 'd1|tq2' ]));
-  });
-
-  it('leaves the record alone when the other registration lands between the read and the write', async () => {
-    await connectedDevice('tq');
-
-    // The registration elsewhere: it clears what this connection listed and
-    // takes the device over.
-    redis.beforeEval = () => {
-      Object.assign(storedDevice(), { subscriptions: [], status: 'online', transport: 'tq2' });
-    };
-
-    expect(await NexxusDevice.detachTransport('d1', 'tq')).toBe(false);
-
-    expect(storedDevice()).toMatchObject({ status: 'online', transport: 'tq2' });
-    // Its routes through `tq` are gone all the same.
-    expect(await makeSub('r1').getAllDevices()).toEqual(new Set());
-  });
-
-  it('throws when the device does not exist', async () => {
-    await expect(NexxusDevice.detachTransport('ghost', 'tq')).rejects.toThrow(/not found/);
-  });
-});
-
-describe('NexxusDevice.attachTransport', () => {
-  const storedDevice = (): any => (redis.store.get(NexxusDevice.getKey('d1')) as { value: any }).value;
-
-  /** A device that has never connected, with a session ending at `expiresAt`, or none. */
-  const deviceWithSession = async (expiresAt?: number): Promise<void> => {
-    await new NexxusDevice({ appId: 'a', id: 'd1', name: 'N', subscriptions: [] }).save();
-
-    if (expiresAt !== undefined) {
-      await NexxusDevice.setSession('d1', 'secret', expiresAt);
-    }
-  };
-
-  it('marks a device with a live session online on the transport', async () => {
-    await deviceWithSession(nowSeconds() + DAY);
-
-    expect(await NexxusDevice.attachTransport('d1', 'tq')).toBe(true);
-
-    expect(storedDevice()).toMatchObject({ type: 'volatile', status: 'online', transport: 'tq' });
-    expect(typeof storedDevice().lastSeen).toBe('string'); // ISO timestamp
-  });
-
-  /** A logout landing mid-registration ends the session before the device goes online. */
-  it('leaves a device whose session has ended or expired as it is', async () => {
-    for (const expiresAt of [ undefined, nowSeconds() - 1 ]) {
-      redis.store.clear();
-      await deviceWithSession(expiresAt);
-
-      expect(await NexxusDevice.attachTransport('d1', 'tq')).toBe(false);
-      expect(storedDevice().status).toBeUndefined();
-      expect(storedDevice().transport).toBeUndefined();
-    }
-  });
-
-  it('throws when the device does not exist', async () => {
-    await expect(NexxusDevice.attachTransport('ghost', 'tq')).rejects.toThrow(/not found/);
-  });
-});
-
 const DAY = 24 * 60 * 60;
 const nowSeconds = (): number => Math.floor(Date.now() / 1000);
 const storedSession = (id = 'd1'): any => (redis.store.get(NexxusDevice.getKey(id)) as { value: any } | undefined)?.value.session;
@@ -315,7 +114,7 @@ describe('NexxusDevice.save only creates', () => {
    * session — so an overwrite would silently erase it. It has to refuse instead.
    */
   it('refuses to overwrite an existing device, so it can never erase a session', async () => {
-    const d = new NexxusDevice({ appId: 'a', id: 'd1', name: 'N', subscriptions: [] });
+    const d = new NexxusDevice({ appId: 'a', id: 'd1', name: 'N' });
 
     await d.save();
     await NexxusDevice.setSession('d1', 's1', nowSeconds() + DAY);
@@ -327,7 +126,7 @@ describe('NexxusDevice.save only creates', () => {
 
 describe('NexxusDevice sessions', () => {
   beforeEach(async () => {
-    await new NexxusDevice({ appId: 'a', id: 'd1', name: 'N', subscriptions: [] }).save();
+    await new NexxusDevice({ appId: 'a', id: 'd1', name: 'N' }).save();
   });
 
   it('stores a hash of the secret, never the secret itself', async () => {
@@ -480,5 +279,280 @@ describe('NexxusDevice sessions', () => {
     await NexxusDevice.clearSession('ghost');
 
     expect(storedSession()).toBeUndefined();
+  });
+});
+
+describe('NexxusDevice connections', () => {
+  const SCOPES_KEY = `${NEXXUS_PREFIX_LC}:subscription-scopes:a:runs`;
+
+  const stored = (): any => (redis.store.get(NexxusDevice.getKey('d1')) as { value: any }).value;
+  const entry = (connectionId = 'c1'): any => stored().connections?.[connectionId];
+
+  /** How many routes the scope counter of `makeSub(modelId)`'s channel holds; 0 once it is gone. */
+  const scopeCount = async (modelId = 'r1'): Promise<number> =>
+    Number((await redis.hGetAll(SCOPES_KEY))[`id:${modelId}`] ?? 0);
+
+  const open = (connectionId = 'c1', transport = 'tq'): Promise<boolean> =>
+    NexxusDevice.openConnection('d1', connectionId, { transport, type: 'volatile' });
+
+  const subscribe = (connectionId = 'c1', sub = makeSub()): Promise<void> =>
+    NexxusDevice.addSubscription('d1', connectionId, sub);
+
+  /** A device with a live session, as signing in leaves it. */
+  beforeEach(async () => {
+    await new NexxusDevice({ appId: 'a', id: 'd1', name: 'N' }).save();
+    await NexxusDevice.setSession('d1', 'secret', nowSeconds() + DAY);
+  });
+
+  it('takes the ids transports use as connection ids, and nothing that would break a route or a JSON path', () => {
+    for (const id of [ '0f8fad5b-d9cb-469f-a165-70867728950e', 'dXk3:APA91bH-x_y', 'a'.repeat(256) ]) {
+      expect(NexxusDevice.isValidConnectionId(id)).toBe(true);
+    }
+
+    for (const id of [ '', 'a|b', 'a\'b', 'a\\b', 'a b', 'a.b', 'a'.repeat(257) ]) {
+      expect(NexxusDevice.isValidConnectionId(id)).toBe(false);
+    }
+  });
+
+  describe('openConnection', () => {
+    it('adds an entry with no subscriptions, and records lastSeen', async () => {
+      expect(await open()).toBe(true);
+
+      expect(entry()).toEqual({ transport: 'tq', type: 'volatile', subscriptions: [], connectedAt: expect.any(String) });
+      expect(stored().lastSeen).toBe(entry().connectedAt);
+    });
+
+    it('keeps the device\'s other connections', async () => {
+      await open('c1');
+      await open('c2', 'tq2');
+
+      expect(Object.keys(stored().connections)).toEqual([ 'c1', 'c2' ]);
+      expect(entry('c2').transport).toBe('tq2');
+    });
+
+    it('leaves an entry already under the id as it is', async () => {
+      await open();
+      await subscribe();
+
+      expect(await open()).toBe(true);
+      expect(entry().subscriptions).toEqual([ makeSub().getKey() ]);
+    });
+
+    /** A logout landing mid-registration ends the session before the connection opens. */
+    it('opens nothing on a device whose session has ended or expired', async () => {
+      for (const end of [ () => NexxusDevice.clearSession('d1'), () => NexxusDevice.setSession('d1', 's', nowSeconds() - 1) ]) {
+        await end();
+
+        expect(await open()).toBe(false);
+        expect(stored().connections).toEqual({});
+        expect(stored().lastSeen).toBeUndefined();
+      }
+    });
+
+    it('throws when the device does not exist, or the id isn\'t valid', async () => {
+      await expect(NexxusDevice.openConnection('ghost', 'c1', { transport: 'tq', type: 'volatile' })).rejects.toThrow(/not found/);
+      await expect(open('a|b')).rejects.toThrow(/connection id/);
+    });
+
+    it('is handed back by get(), kept out of getValue()', async () => {
+      await open();
+
+      const device = await NexxusDevice.get('d1');
+
+      expect(device.getConnections()).toEqual({ c1: entry() });
+      expect(device.getValue()).not.toHaveProperty('connections');
+    });
+  });
+
+  describe('addSubscription', () => {
+    beforeEach(async () => { await open(); });
+
+    it('lists the channel on the connection and routes it to that connection', async () => {
+      await subscribe();
+
+      expect(entry().subscriptions).toEqual([ makeSub().getKey() ]);
+      expect(await makeSub().getAllDevices()).toEqual(new Set([ 'd1|tq|c1' ]));
+      expect(await scopeCount()).toBe(1);
+    });
+
+    it('is harmless to repeat', async () => {
+      await subscribe();
+      await subscribe();
+
+      expect(entry().subscriptions).toHaveLength(1);
+      expect(await scopeCount()).toBe(1);
+    });
+
+    it('routes each connection on its own, on the same transport too', async () => {
+      await open('c2');
+      await subscribe('c1');
+      await subscribe('c2');
+
+      expect(await makeSub().getAllDevices()).toEqual(new Set([ 'd1|tq|c1', 'd1|tq|c2' ]));
+      expect(await scopeCount()).toBe(2);
+    });
+
+    it('refuses a connection that is closing, or that does not exist', async () => {
+      entry().closing = true;
+
+      await expect(subscribe('c1')).rejects.toThrow(/not open/);
+      await expect(subscribe('c9')).rejects.toThrow(/not open/);
+
+      expect(await makeSub().getAllDevices()).toEqual(new Set());
+      expect(await scopeCount()).toBe(0);
+    });
+
+    it('throws when the device does not exist', async () => {
+      await expect(NexxusDevice.addSubscription('ghost', 'c1', makeSub())).rejects.toThrow(/not found/);
+    });
+  });
+
+  /**
+   * A subscribe sent just before a socket dies can land while its connection
+   * is torn down. Wherever the teardown lands, no route may be left behind,
+   * and the scope counter has to end where it started.
+   */
+  describe('a teardown racing a subscribe', () => {
+    beforeEach(async () => { await open(); });
+
+    /** A subscription whose route goes in with c1's teardown run just before or just after it. */
+    const tornDown = (when: 'before' | 'after') => {
+      const sub = makeSub();
+      const addConnection = sub.addConnection.bind(sub);
+
+      vi.spyOn(sub, 'addConnection').mockImplementationOnce(async (...args) => {
+        if (when === 'before') await NexxusDevice.closeConnection('d1', 'c1');
+
+        const added = await addConnection(...args);
+
+        if (when === 'after') await NexxusDevice.closeConnection('d1', 'c1');
+
+        return added;
+      });
+
+      return sub;
+    };
+
+    for (const when of [ 'before', 'after' ] as const) {
+      it(`leaves no route when the teardown lands ${when} the route goes in`, async () => {
+        await expect(subscribe('c1', tornDown(when))).rejects.toThrow(/closed while subscribing/);
+
+        expect(await makeSub().getAllDevices()).toEqual(new Set());
+        expect(await scopeCount()).toBe(0);
+        expect(entry()).toBeUndefined();
+      });
+    }
+  });
+
+  describe('removeSubscription', () => {
+    beforeEach(async () => { await open(); });
+
+    it('removes the route, then the listing, and reports whether it was subscribed', async () => {
+      await subscribe();
+
+      expect(await NexxusDevice.removeSubscription('d1', 'c1', makeSub())).toBe(true);
+      expect(entry().subscriptions).toEqual([]);
+      expect(await makeSub().getAllDevices()).toEqual(new Set());
+      expect(await scopeCount()).toBe(0);
+
+      expect(await NexxusDevice.removeSubscription('d1', 'c1', makeSub())).toBe(false);
+    });
+
+    it('leaves the channel on the device\'s other connections', async () => {
+      await open('c2');
+      await subscribe('c1');
+      await subscribe('c2');
+
+      await NexxusDevice.removeSubscription('d1', 'c1', makeSub());
+
+      expect(await makeSub().getAllDevices()).toEqual(new Set([ 'd1|tq|c2' ]));
+      expect(entry('c2').subscriptions).toEqual([ makeSub().getKey() ]);
+    });
+
+    it('throws for a connection or a device that does not exist', async () => {
+      await expect(NexxusDevice.removeSubscription('d1', 'c9', makeSub())).rejects.toThrow(/not open/);
+      await expect(NexxusDevice.removeSubscription('ghost', 'c1', makeSub())).rejects.toThrow(/not found/);
+    });
+  });
+
+  describe('closeConnection', () => {
+    beforeEach(async () => { await open(); });
+
+    it('removes the routes of every channel it lists, then its entry', async () => {
+      await subscribe('c1', makeSub('r1'));
+      await subscribe('c1', makeSub('r2'));
+
+      expect(await NexxusDevice.closeConnection('d1', 'c1')).toBe(true);
+
+      expect(entry()).toBeUndefined();
+      expect(await makeSub('r1').getAllDevices()).toEqual(new Set());
+      expect(await makeSub('r2').getAllDevices()).toEqual(new Set());
+      expect(await scopeCount('r1')).toBe(0);
+      expect(await scopeCount('r2')).toBe(0);
+    });
+
+    /**
+     * A tab that reloads opens its new connection on the same node while the
+     * old one closes. The old one's teardown must leave the new one's routes.
+     */
+    it('leaves the device\'s other connections alone, on the same transport too', async () => {
+      await open('c2');
+      await subscribe('c1');
+      await subscribe('c2');
+
+      await NexxusDevice.closeConnection('d1', 'c1');
+
+      expect(entry('c2')).toMatchObject({ transport: 'tq', subscriptions: [ makeSub().getKey() ] });
+      expect(await makeSub().getAllDevices()).toEqual(new Set([ 'd1|tq|c2' ]));
+      expect(await scopeCount()).toBe(1);
+    });
+
+    it('finishes a teardown that was cut short', async () => {
+      await subscribe();
+      // As a process that died between marking the entry and deleting it leaves it.
+      entry().closing = true;
+
+      expect(await NexxusDevice.closeConnection('d1', 'c1')).toBe(true);
+
+      expect(entry()).toBeUndefined();
+      expect(await makeSub().getAllDevices()).toEqual(new Set());
+      expect(await scopeCount()).toBe(0);
+    });
+
+    it('leaves what a failed teardown didn\'t get to for the next one', async () => {
+      await subscribe();
+
+      const removeConnection = vi.spyOn(NexxusRedisSubscription.prototype, 'removeConnection')
+        .mockRejectedValueOnce(new Error('connection lost'));
+
+      await expect(NexxusDevice.closeConnection('d1', 'c1')).rejects.toThrow('connection lost');
+      removeConnection.mockRestore();
+
+      expect(await NexxusDevice.closeConnection('d1', 'c1')).toBe(true);
+
+      expect(entry()).toBeUndefined();
+      expect(await makeSub().getAllDevices()).toEqual(new Set());
+      expect(await scopeCount()).toBe(0);
+    });
+
+    it('can run twice at once, and each counter is decremented once', async () => {
+      await subscribe();
+
+      const results = await Promise.all([
+        NexxusDevice.closeConnection('d1', 'c1'),
+        NexxusDevice.closeConnection('d1', 'c1')
+      ]);
+
+      expect(results).toContain(true);
+      expect(entry()).toBeUndefined();
+      expect(await makeSub().getAllDevices()).toEqual(new Set());
+      // Removed at zero, not left at zero or below.
+      expect(await redis.hGetAll(SCOPES_KEY)).toEqual({});
+    });
+
+    it('returns false when there is nothing to tear down', async () => {
+      expect(await NexxusDevice.closeConnection('d1', 'c9')).toBe(false);
+      expect(await NexxusDevice.closeConnection('ghost', 'c1')).toBe(false);
+    });
   });
 });
