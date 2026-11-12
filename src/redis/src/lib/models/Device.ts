@@ -10,60 +10,51 @@ import { NEXXUS_PREFIX_LC } from '@mayhem93/nexxus-core-lib';
 
 import crypto from 'crypto';
 
-type NexxusDeviceTransportType = 'volatile' | 'persistent' | 'unknown';
-
+/**
+ * A device: one installation of a client application. How it is reached lives
+ * in its connections (see `NexxusDeviceConnection`), which are kept off these
+ * props, like its session.
+ */
 export interface NexxusDeviceProps {
   id: string;
   appId: string;
   name: string;
   userId?: string;
-  /**
-   * "volatile" - devices are connected to transports that are connection-oriented, their subscriptions only exist while they
-   * are connected
-   *
-   * "persistent" - devices are connected to transports that are not connection-oriented (eg: Apple Push Notifications), their
-   * subscriptions persist until the 3rd party service confirms that the subscription is removed, or the device is manually
-   * removed from the system.
-   *
-   * "unknown" - device type is not known until it registers with a transport, at which point it will be classified as either
-   * "volatile" or "persistent" based on the transport type
-   */
-  type: NexxusDeviceTransportType;
-  /**
-   * Current reachability state. Undefined for devices that have never been registered with a transport
-   * (e.g. freshly created via the API) and for persistent devices where the concept doesn't apply.
-   * Once set, this field is never cleared — only overwritten on subsequent state transitions.
-   */
-  status?: 'online' | 'offline' | 'unknown';
-  /**
-   * The transport this device is associated with — for volatile transports this is the per-node queue
-   * the device's live connection is on; for persistent transports this is the shared queue used to
-   * reach the device via its 3rd-party push service. Once a device registers with a transport, this
-   * field is set permanently; subsequent registrations can overwrite it (e.g. reconnect to a different
-   * volatile worker node), but it is never cleared back to undefined.
-   */
-  transport?: string | null;
-  /**
-   * Volatile-only: timestamp of the last time the device was seen online. Undefined for devices that
-   * have never connected and for persistent devices (where it has no meaning). Once set, never cleared.
-   */
+  /** When a connection last opened, or a sign-in last reused the device. Undefined until one of them happens. */
   lastSeen?: Date;
-  subscriptions: NexxusRedisSubscription[];
 }
 
-type NexxusDeviceConstructorProps = Omit<NexxusDeviceProps, 'lastSeen' |'subscriptions' | 'type'> & {
-  type?: NexxusDeviceTransportType;
+type NexxusDeviceConstructorProps = Omit<NexxusDeviceProps, 'lastSeen'> & {
   lastSeen?: string;
-  subscriptions: NexxusRedisSubscription[] | [];
 }
 
-type NexxusDeviceUpdateProps = Omit<Partial<NexxusDeviceProps>, 'id' | 'appId' | 'subscriptions'>;
+type NexxusDeviceUpdateProps = Partial<Pick<NexxusDeviceProps, 'name' | 'lastSeen'>>;
 
-type NexxusDeviceRedisProps = Omit<NexxusDeviceProps, 'lastSeen' | 'subscriptions'> & {
+type NexxusDeviceRedisProps = Omit<NexxusDeviceProps, 'lastSeen'> & {
   lastSeen?: string;
-  subscriptions: string[];
   session?: NexxusDeviceSession;
+  connections?: Record<string, NexxusDeviceConnection>;
 }
+
+/** How a connection reaches its device: held open by a transport, or through a push service. */
+export type NexxusDeviceConnectionType = 'volatile' | 'persistent';
+
+/**
+ * One connection of a device, stored under `$.connections` on the device
+ * document, keyed by the connection's id. Each connection writes only its own
+ * entry.
+ */
+export type NexxusDeviceConnection = {
+  /** The queue the connection is reached through. */
+  transport: string;
+  type: NexxusDeviceConnectionType;
+  /** Keys of the channels the connection subscribes to. */
+  subscriptions: string[];
+  /** When the connection opened, as an ISO string. */
+  connectedAt: string;
+  /** Set when its teardown starts. From then on it takes no new subscriptions. */
+  closing?: true;
+};
 
 /**
  * A device's refresh session: one installation's right to keep obtaining access
@@ -95,29 +86,6 @@ export type NexxusSessionRevocation = 'revoked' | 'invalid';
 /** How a presented secret relates to the stored session. */
 type NexxusSessionMatch = 'none' | 'unknown' | 'current' | 'previous' | 'replayed' | 'expired';
 
-/**
- * Swap `$.session` only if its `hash` is still the one the caller read.
- *
- * The rotation DECISION is made in TypeScript, from state already read; this
- * script only makes the write conditional, so two refreshes racing on the same
- * secret can't both swap. Keeping it this small is what keeps the decision
- * unit-testable.
- *
- * Touches one key, passed as KEYS[1], so it is single-slot and runs unchanged on
- * a cluster.
- *
- * Returns 1 when swapped, 0 when the stored hash differs (including when there is
- * no session at all), -1 when the device does not exist.
- */
-export const NEXXUS_DEVICE_SESSION_CAS_SCRIPT = `
-local raw = redis.call('JSON.GET', KEYS[1], '$.session.hash')
-if not raw then return -1 end
-local found = cjson.decode(raw)
-if found[1] ~= ARGV[1] then return 0 end
-redis.call('JSON.SET', KEYS[1], '$.session', ARGV[2])
-return 1
-`;
-
 export class NexxusDevice {
   /**
    * How long after a rotation the previous secret still rotates, in seconds.
@@ -134,7 +102,19 @@ export class NexxusDevice {
    */
   private static readonly MAX_ROTATION_ATTEMPTS = 3;
 
+  /**
+   * What a connection id may contain. Ids end up in subscription members,
+   * whose parts are separated by `|`, and inside quotes in JSON paths.
+   */
+  private static readonly CONNECTION_ID_PATTERN = /^[A-Za-z0-9_:-]{1,256}$/;
+
   private data: NexxusDeviceProps;
+
+  /**
+   * The connections found when this device was loaded, by id. Kept off `data`
+   * like the session: `data` is what API responses are built from.
+   */
+  private connections: Record<string, NexxusDeviceConnection> = {};
 
   /**
    * `expiresAt` of the session found when this device was loaded — and only
@@ -149,11 +129,7 @@ export class NexxusDevice {
       appId: props.appId,
       name: props.name || 'Unnamed Device',
       userId: props.userId,
-      type: props.type || 'unknown',
-      status: props.status,
-      transport: props.transport,
-      lastSeen: props.lastSeen ? new Date(props.lastSeen) : undefined,
-      subscriptions: props.subscriptions || []
+      lastSeen: props.lastSeen ? new Date(props.lastSeen) : undefined
     };
 
     if (!props.appId) {
@@ -176,6 +152,14 @@ export class NexxusDevice {
     return this.sessionExpiresAt !== undefined && NexxusDevice.nowSeconds() < this.sessionExpiresAt;
   }
 
+  /**
+   * The device's connections when it was loaded, by id. A device constructed in
+   * memory rather than loaded has none.
+   */
+  public getConnections(): Readonly<Record<string, NexxusDeviceConnection>> {
+    return this.connections;
+  }
+
   public getKey(): string {
     return NexxusDevice.getKey(this.data.id);
   }
@@ -184,27 +168,20 @@ export class NexxusDevice {
     return `${NEXXUS_PREFIX_LC}:device:${id}`;
   }
 
-  public static async get(id : string, withSubscriptions: boolean = false): Promise<NexxusDevice> {
-    const res = await NexxusRedis.instance.getClient().json.get(`${NEXXUS_PREFIX_LC}:device:${id}`) as NexxusDeviceRedisProps | null;
+  public static async get(id : string): Promise<NexxusDevice> {
+    const res = await NexxusRedis.instance.getClient().json.get(NexxusDevice.getKey(id)) as NexxusDeviceRedisProps | null;
 
     if (!res) {
       throw new RedisKeyNotFoundException(`Device with id "${id}" not found`);
     }
 
-    const device = new NexxusDevice({
-      ...res,
-      subscriptions: withSubscriptions ? await Promise.all(res.subscriptions.map(subKey => {
-        const sub = NexxusRedisSubscription.fromKey(subKey);
+    const device = new NexxusDevice(res);
 
-        sub.setAppId(res.appId);
-
-        return sub;
-      })) : []
-    });
-
-    // The constructor copies known fields only, so `session` never reaches
-    // `data`. Its expiry is kept aside for `hasActiveSession()`.
+    // The constructor copies known fields only, so `session` and `connections`
+    // never reach `data`. They are kept aside for `hasActiveSession()` and
+    // `getConnections()`.
     device.sessionExpiresAt = res.session?.expiresAt;
+    device.connections = res.connections ?? {};
 
     return device;
   }
@@ -227,9 +204,7 @@ export class NexxusDevice {
     const jsonUpdates : Array<{ key: string, path: string, value: any }> = [];
 
     for (const [field, value] of Object.entries(updates)) {
-      // Devices cannot have their fields cleared after being set — once a device is classified by a
-      // transport, those fields stay set forever. Skip undefined values so callers can pass partial
-      // updates that include optional fields without effect.
+      // Skipped, so a caller can pass optional fields it has no value for.
       if (value === undefined) {
         continue;
       }
@@ -245,11 +220,8 @@ export class NexxusDevice {
           jsonUpdates.push({ key, path: `$.${field}`, value: (value as Date).toISOString() });
 
           break;
-        case 'transport':
         case 'name':
-        case 'type':
-        case 'status':
-          if (value !== null && typeof value !== 'string') {
+          if (typeof value !== 'string') {
             throw new RedisDeviceInvalidParamsException(`Invalid value for ${field}: expected string, got ${typeof value}`);
           }
 
@@ -414,9 +386,9 @@ export class NexxusDevice {
    * moved on since the caller read it.
    */
   private static async swapSession(id: string, expectedHash: string, next: NexxusDeviceSession): Promise<boolean> {
-    const result = await NexxusRedis.instance.getClient().eval(NEXXUS_DEVICE_SESSION_CAS_SCRIPT, {
+    const result = await NexxusRedis.instance.scripts.run('device-session-cas', {
       keys: [ NexxusDevice.getKey(id) ],
-      arguments: [ expectedHash, JSON.stringify(next) ]
+      args: [ expectedHash, JSON.stringify(next) ]
     });
 
     if (result === -1) {
@@ -483,150 +455,213 @@ export class NexxusDevice {
     return Math.floor(Date.now() / 1000);
   }
 
-  public static async removeAllSubscriptions(deviceId: string): Promise<void> {
-    const redis = NexxusRedis.instance.getClient();
-    const device = await NexxusDevice.get(deviceId, true);
-    const promises : Promise<boolean>[] = [];
-
-    for (const subInstance of device.data.subscriptions) {
-      if (device.data.transport) {
-        promises.push(subInstance.removeDevice(deviceId, device.data.transport));
-      } else {
-        NexxusRedis.logger.warn(`Device with id "${deviceId}" is not connected to any transport, cannot remove subscriptions`);
-      }
-    }
-
-    const result = await Promise.all(promises);
-    const removedCount = result.filter(r => r).length;
-
-    await redis.json.clear(`${NEXXUS_PREFIX_LC}:device:${deviceId}`, { path: '$.subscriptions' });
-
-    NexxusRedis.logger.debug(`Removed ${removedCount} subscriptions from device with id "${deviceId}"`);
+  /** Whether `id` can name a connection: 1 to 256 letters, digits, `_`, `:` or `-`. */
+  public static isValidConnectionId(id: string): boolean {
+    return NexxusDevice.CONNECTION_ID_PATTERN.test(id);
   }
 
-  public async addSubscription(subscription: NexxusRedisSubscription): Promise<boolean> {
-    if (!this.data.transport) {
-      throw new RedisDeviceNotConnectedException(`Device with id "${this.data.id}" is not connected to any transport`);
-    }
-
-    const redis = NexxusRedis.instance.getClient();
-
-    subscription.setAppId(this.data.appId);
-
-    const index = await this.hasSubscription(subscription);
-
-    if (index !== null) {
-      NexxusRedis.logger.debug(`Subscription "${subscription.getKey()}" already exists on device with id "${this.data.id}"`);
-
-      return false;
-    }
-
-    const res = await redis.json.arrAppend(
-      `${NEXXUS_PREFIX_LC}:device:${this.data.id}`,
-      '$.subscriptions',
-      subscription.getKey()
-    );
-
-    if (res === null) {
-      throw new RedisCommandErrorException(`Failed to add subscription to device with id "${this.data.id}"`);
-    }
-
-    this.data.subscriptions.push(subscription);
-    await subscription.addDevice(this.data.id, this.data.transport);
-
-    NexxusRedis.logger.debug(`Added subscription to device with id "${this.data.id}"`);
-
-    return true;
-  }
-
-  public async hasSubscription(subscription: NexxusRedisSubscription): Promise<number | null> {
-    subscription.setAppId(this.data.appId);
-
-    const localSearchIndex = this.data.subscriptions.findIndex(sub => {
-      return sub.getKey() === subscription.getKey();
+  /**
+   * Open a connection on a device, reached through `transport`: add its entry,
+   * with no subscriptions, and record `lastSeen`. Only while the device's
+   * session is active: one that a logout ended after the caller checked it
+   * leaves the device as it is. An entry already under this id is kept as it
+   * is.
+   *
+   * Returns whether the connection is open. Throws `RedisKeyNotFoundException`
+   * when the device does not exist.
+   */
+  public static async openConnection(
+    deviceId: string,
+    connectionId: string,
+    connection: Pick<NexxusDeviceConnection, 'transport' | 'type'>
+  ): Promise<boolean> {
+    const now = new Date().toISOString();
+    const entry: NexxusDeviceConnection = {
+      transport: connection.transport,
+      type: connection.type,
+      subscriptions: [],
+      connectedAt: now
+    };
+    const result = await NexxusRedis.instance.scripts.run('connection-open', {
+      keys: [ NexxusDevice.getKey(deviceId) ],
+      args: [
+        NexxusDevice.connectionPath(connectionId),
+        JSON.stringify(entry),
+        String(NexxusDevice.nowSeconds()),
+        JSON.stringify(now)
+      ]
     });
 
-    if (localSearchIndex !== -1) {
-      return localSearchIndex;
+    if (result === -1) {
+      throw new RedisKeyNotFoundException(`Device with id "${deviceId}" not found`);
     }
 
-    const subs = await NexxusRedis.instance.getClient().json.get(
-      `${NEXXUS_PREFIX_LC}:device:${this.data.id}`,
-      { path: '$.subscriptions' }
-    ) as string[] | null;
-
-    if (subs === null) {
-      throw new RedisKeyNotFoundException(`Device with id "${this.data.id}" not found`);
-    }
-
-    const index = subs.indexOf(subscription.getKey());
-
-    return index !== -1 ? index : null;
+    return result === 1;
   }
 
-  public async removeSubscription(subscription: NexxusRedisSubscription): Promise<boolean> {
-    if (!this.data.transport) {
-      throw new RedisDeviceNotConnectedException(`Device with id "${this.data.id}" is not registered with any transport`);
-    }
+  /**
+   * Tear a connection down: mark it closing, remove the routes of every channel
+   * it lists, then delete its entry. Only this connection's routes go; the
+   * device's other connections keep theirs, on the same transport or not.
+   *
+   * Safe to repeat, and to run from several places at once: a run finishes
+   * what an earlier one left, and each scope counter is decremented once.
+   * Returns whether there was a connection to tear down.
+   */
+  public static async closeConnection(deviceId: string, connectionId: string): Promise<boolean> {
+    const key = NexxusDevice.getKey(deviceId);
+    const path = NexxusDevice.connectionPath(connectionId);
+    const raw = await NexxusRedis.instance.scripts.run('connection-close', { keys: [ key ], args: [ path ] });
 
-    subscription.setAppId(this.data.appId);
-
-    const index = await this.hasSubscription(subscription);
-
-    if (index === null) {
-      NexxusRedis.logger.debug(`Subscription "${subscription.getKey()}" not found on device with id "${this.data.id}"`, { subscriptionKey: subscription.getKey(), deviceId: this.data.id });
-
+    if (raw === null) {
       return false;
     }
 
-    const res = await NexxusRedis.instance.getClient().json.arrPop(
-      `${NEXXUS_PREFIX_LC}:device:${this.data.id}`,
-      {
-        path: `$.subscriptions`,
-        index: index
-      }
-    );
+    const [ entry ] = JSON.parse(raw) as [ NexxusDeviceConnection ];
 
-    if (res === null) {
-      throw new RedisCommandErrorException(`Failed to remove subscription from device with id "${this.data.id}"`);
-    }
+    // Routes before the entry: a teardown cut short leaves an entry for the
+    // next one to finish, never a route that nothing lists.
+    await Promise.all(entry.subscriptions.map(channelKey =>
+      NexxusRedisSubscription.fromKey(channelKey).removeConnection(deviceId, entry.transport, connectionId)
+    ));
 
-    await subscription.removeDevice(this.data.id, this.data.transport);
-
-    this.data.subscriptions.splice(index, 1);
-
-    NexxusRedis.logger.debug(`Removed subscription from device with id "${this.data.id}"`);
+    await NexxusRedis.instance.getClient().json.del(key, { path });
 
     return true;
   }
 
   /**
-   * Create the device. ONLY create: this writes the whole document at `$` from
-   * `data`, and `data` never carries the session, so overwriting an existing
-   * device this way would silently erase its refresh session. `NX` makes that
-   * impossible rather than merely discouraged. Change an existing device through
-   * `update()` and the session methods, which write single paths.
+   * Subscribe one connection of a device to a channel: list the channel on the
+   * connection's entry, then add its route. Subscribing again is harmless.
+   *
+   * A connection that is closing, or gone, takes no subscription. A teardown
+   * that starts while this runs can remove the connection's routes before the
+   * one here is added, so the connection is checked again afterwards, and the
+   * route removed if the connection is closing by then.
+   *
+   * Throws `RedisDeviceNotConnectedException` when the connection is not open,
+   * and `RedisKeyNotFoundException` when the device does not exist.
    */
-  public async save(): Promise<void> {
-    if (this.data.subscriptions.length > 0 && !this.data.transport) {
-      throw new RedisDeviceNotConnectedException(`Device with id "${this.data.id}" must be connected to a transport to have subscriptions`);
+  public static async addSubscription(
+    deviceId: string,
+    connectionId: string,
+    subscription: NexxusRedisSubscription
+  ): Promise<void> {
+    const path = NexxusDevice.connectionPath(connectionId);
+    const transport = await NexxusRedis.instance.scripts.run('connection-subscribe', {
+      keys: [ NexxusDevice.getKey(deviceId) ],
+      args: [ path, JSON.stringify(subscription.getKey()) ]
+    });
+
+    if (transport === -1) {
+      throw new RedisKeyNotFoundException(`Device with id "${deviceId}" not found`);
     }
 
-    const subscriptionKeys : string[] = this.data.subscriptions.map(sub => sub.getKey());
+    if (transport === -2) {
+      throw new RedisDeviceNotConnectedException(`Connection "${connectionId}" of device "${deviceId}" is not open`);
+    }
+
+    await subscription.addConnection(deviceId, transport, connectionId);
+
+    if (!await NexxusDevice.isConnectionOpen(deviceId, path)) {
+      await subscription.removeConnection(deviceId, transport, connectionId);
+
+      throw new RedisDeviceNotConnectedException(
+        `Connection "${connectionId}" of device "${deviceId}" closed while subscribing`
+      );
+    }
+  }
+
+  /**
+   * Unsubscribe one connection of a device from a channel: remove the route,
+   * then take the channel off the connection's entry.
+   *
+   * Returns whether the connection was subscribed. Throws
+   * `RedisDeviceNotConnectedException` when the connection doesn't exist, and
+   * `RedisKeyNotFoundException` when the device does not exist.
+   */
+  public static async removeSubscription(
+    deviceId: string,
+    connectionId: string,
+    subscription: NexxusRedisSubscription
+  ): Promise<boolean> {
+    const path = NexxusDevice.connectionPath(connectionId);
+    const connection = await NexxusDevice.readConnection(deviceId, path);
+
+    if (!connection) {
+      throw new RedisDeviceNotConnectedException(`Connection "${connectionId}" of device "${deviceId}" is not open`);
+    }
+
+    // Route before listing: a failure in between leaves a channel listed with
+    // no route, which is harmless and goes with the connection, rather than a
+    // route that nothing lists.
+    const routed = await subscription.removeConnection(deviceId, connection.transport, connectionId);
+    const listed = await NexxusRedis.instance.scripts.run('connection-unsubscribe', {
+      keys: [ NexxusDevice.getKey(deviceId) ],
+      args: [ path, JSON.stringify(subscription.getKey()) ]
+    });
+
+    return routed || listed === 1;
+  }
+
+  /**
+   * The JSON path of a connection's entry. Throws on an id that isn't valid,
+   * so no other id reaches a path or a route.
+   */
+  private static connectionPath(connectionId: string): string {
+    if (!NexxusDevice.isValidConnectionId(connectionId)) {
+      throw new RedisDeviceInvalidParamsException('A connection id is 1 to 256 letters, digits, "_", ":" or "-"');
+    }
+
+    return `$.connections['${connectionId}']`;
+  }
+
+  /**
+   * The entry at `path`, or `null` when the device has no such connection.
+   * Throws when the device itself does not exist.
+   */
+  private static async readConnection(deviceId: string, path: string): Promise<NexxusDeviceConnection | null> {
+    const res = await NexxusRedis.instance.getClient().json.get(
+      NexxusDevice.getKey(deviceId),
+      { path }
+    ) as NexxusDeviceConnection[] | null;
+
+    if (res === null) {
+      throw new RedisKeyNotFoundException(`Device with id "${deviceId}" not found`);
+    }
+
+    return res[0] ?? null;
+  }
+
+  /** Whether the entry at `path` exists and isn't closing. A device that doesn't exist has none. */
+  private static async isConnectionOpen(deviceId: string, path: string): Promise<boolean> {
+    const res = await NexxusRedis.instance.getClient().json.get(
+      NexxusDevice.getKey(deviceId),
+      { path }
+    ) as NexxusDeviceConnection[] | null;
+
+    return res?.[0] !== undefined && !res[0].closing;
+  }
+
+  /**
+   * Create the device, with no connections. ONLY create: this writes the whole
+   * document at `$` from `data`, and `data` never carries the session or the
+   * connections, so overwriting an existing device this way would silently
+   * erase them. `NX` makes that impossible rather than merely discouraged.
+   * Change an existing device through `update()`, the session methods and the
+   * connection methods, which write single paths.
+   */
+  public async save(): Promise<void> {
     const res = await NexxusRedis.instance.getClient().json.set(this.getKey(), '$', {
       ...this.data,
       ...(this.data.lastSeen ? { lastSeen: this.data.lastSeen.toISOString() } : {}),
-      subscriptions: subscriptionKeys
+      connections: {}
     }, { condition: 'NX' });
 
     if (!res) {
       throw new RedisCommandErrorException(
         `Device with id "${this.data.id}" already exists — save() only creates; use update() to change it`
       );
-    }
-
-    for (const subInstance of this.data.subscriptions) {
-      await subInstance.addDevice(this.data.id, this.data.transport!);
     }
 
     NexxusRedis.logger.debug(`Saved device with id "${this.data.id}"`);

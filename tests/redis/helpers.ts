@@ -1,4 +1,4 @@
-import { NexxusRedis } from '@mayhem93/nexxus-redis';
+import { NexxusRedis, NexxusRedisScriptLoader } from '@mayhem93/nexxus-redis';
 import { NexxusBaseLogger } from '@mayhem93/nexxus-core-lib';
 import { FakeRedis } from './fakeRedis';
 
@@ -17,7 +17,10 @@ export function installFakeRedis(): FakeRedis {
   const fake = new FakeRedis();
 
   logger.entries = [];
-  (NexxusRedis as unknown as { instance: unknown }).instance = { getClient: () => fake };
+  (NexxusRedis as unknown as { instance: unknown }).instance = {
+    getClient: () => fake,
+    scripts: new NexxusRedisScriptLoader(() => fake as never),
+  };
   (NexxusRedis as unknown as { logger: unknown }).logger = logger;
 
   return fake;

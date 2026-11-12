@@ -42,6 +42,11 @@ The multi-tenant app definition. Its `schema` field is where an app declares its
     "refreshTokenExpiresIn": 2592000    // refresh token: 86400–31536000, default 30 days; absolute
   },
 
+  // OPTIONAL. How many connections (open sockets) a device can hold at once.
+  "connections": {
+    "maxPerDevice": 20                  // 1–100, default 20; registering one more evicts the oldest
+  },
+
   // Developer-defined models for THIS app. Each entry is a set of field
   // definitions plus two per-model flags (see "Application models" below).
   "schema": {

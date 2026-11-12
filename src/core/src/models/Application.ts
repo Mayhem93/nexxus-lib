@@ -116,6 +116,18 @@ export interface NexxusApplicationSessionConfig {
   refreshTokenExpiresIn?: number;
 }
 
+/**
+ * Per-application connection policy. The constructor resolves the default.
+ */
+export interface NexxusApplicationConnectionsConfig {
+  /**
+   * How many connections a device can hold open at once on volatile
+   * transports, such as websockets: one per socket. 1–100; defaults to 20.
+   * Registering one more evicts the oldest.
+   */
+  maxPerDevice?: number;
+}
+
 export type INexxusApplication =
   & INexxusBaseModel<'application'>
   & InferModel<typeof NEXXUS_BUILTIN_MODEL_SCHEMAS.application>
@@ -123,6 +135,7 @@ export type INexxusApplication =
     schema: NexxusApplicationSchema;
     auth?: NexxusApplicationAuthConfig;
     session?: NexxusApplicationSessionConfig;
+    connections?: NexxusApplicationConnectionsConfig;
     //defaults to 10 inside the class constructor
     defaultLimit?: number
     //defaults to 100 inside the class constructor. TODO: make this configurable in the Consumer config
@@ -135,6 +148,9 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
 
   /** Refresh-token lifetime when the application declares none: 30 days. */
   private static readonly DEFAULT_REFRESH_TOKEN_EXPIRES_IN = 30 * 24 * 60 * 60;
+
+  /** How many connections a device can hold open at once when the application declares no cap. */
+  private static readonly DEFAULT_MAX_CONNECTIONS_PER_DEVICE = 20;
 
   /**
    * ACL role managers for this app, keyed by role name. Populated at boot by
@@ -242,12 +258,22 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
 
     // Ten minutes to two hours: the access token can't be revoked, so its
     // lifetime is the longest a leaked one stays usable.
-    NexxusApplication.assertSeconds('session.jwtExpiresIn', jwtExpiresIn, 600, 7200);
+    NexxusApplication.assertWholeNumber('session.jwtExpiresIn', jwtExpiresIn, 600, 7200, 'seconds');
     // At least a day, so a refresh token always outlives the access token it
     // renews; at most a year, as a sanity cap.
-    NexxusApplication.assertSeconds('session.refreshTokenExpiresIn', refreshTokenExpiresIn, 86400, 31536000);
+    NexxusApplication.assertWholeNumber('session.refreshTokenExpiresIn', refreshTokenExpiresIn, 86400, 31536000, 'seconds');
 
     this.data.session = { jwtExpiresIn, refreshTokenExpiresIn };
+
+    if (data.connections !== undefined && (typeof data.connections !== 'object' || data.connections === null)) {
+      throw new Error('Application "connections" must be an object if provided');
+    }
+
+    const maxPerDevice = data.connections?.maxPerDevice ?? NexxusApplication.DEFAULT_MAX_CONNECTIONS_PER_DEVICE;
+
+    NexxusApplication.assertWholeNumber('connections.maxPerDevice', maxPerDevice, 1, 100);
+
+    this.data.connections = { maxPerDevice };
 
     if (data.auth) {
       // Per-app auth block. Per-strategy config shapes are NOT validated here —
@@ -339,9 +365,18 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
     return this.data.session!.refreshTokenExpiresIn!;
   }
 
-  private static assertSeconds(field: string, value: unknown, min: number, max: number): void {
+  /**
+   * How many connections a device can hold open at once on volatile
+   * transports. Always set: the constructor resolves the default.
+   */
+  public getMaxConnectionsPerDevice(): number {
+    return this.data.connections!.maxPerDevice!;
+  }
+
+  /** Throws unless `value` is a whole number from `min` to `max`; `unit`, if given, names what it counts. */
+  private static assertWholeNumber(field: string, value: unknown, min: number, max: number, unit?: string): void {
     if (typeof value !== 'number' || !Number.isInteger(value) || value < min || value > max) {
-      throw new Error(`Application "${field}" must be a whole number of seconds between ${min} and ${max}`);
+      throw new Error(`Application "${field}" must be a whole number${unit ? ` of ${unit}` : ''} between ${min} and ${max}`);
     }
   }
 

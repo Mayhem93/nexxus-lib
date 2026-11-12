@@ -92,6 +92,17 @@ export const NEXXUS_DEPLOYMENT_MODEL_SCHEMAS = {
       },
     },
     /**
+     * Connection policy: how many connections a device can hold open at once.
+     * Bounds and the default are enforced by the `NexxusApplication`
+     * constructor.
+     */
+    connections: {
+      type: 'object', required: false,
+      properties: {
+        maxPerDevice: { type: 'int', required: false }
+      },
+    },
+    /**
      * Per-application auth block. When `authEnabled` is true this must be
      * present and contain a non-empty `strategies` map; when false it should
      * be absent or have an empty `strategies`. The conditional rule isn't

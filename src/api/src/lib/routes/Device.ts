@@ -19,7 +19,7 @@ import { NexxusDevice, NexxusDeviceProps, RedisKeyNotFoundException } from '@may
 
 import type { Router, RequestHandler } from 'express';
 
-type RegisterDeviceRequestBody = Omit<NexxusDeviceProps, 'id' | 'appId' | 'status' | 'lastSeen' | 'subscriptions' | 'transport' | 'type'>;
+type RegisterDeviceRequestBody = Pick<NexxusDeviceProps, 'name'>;
 type UpdateDeviceRequestBody = Pick<NexxusDeviceProps, 'name'>;
 
 interface RegisterDeviceRequest extends NexxusApiRequest {

@@ -1,7 +1,8 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { NexxusRedis } from '@mayhem93/nexxus-redis';
 import { NexxusBaseLogger, type INexxusBaseServices } from '@mayhem93/nexxus-core-lib';
 import { rstate, fakeClient, resetRedisModule } from './redisModuleMock';
+import { FakeRedis } from './fakeRedis';
 
 class SilentLogger extends NexxusBaseLogger<Record<string, unknown>> {
   public log(): void {}
@@ -62,6 +63,29 @@ describe('NexxusRedis construction + init', () => {
 
     expect(connects).toBe(1);
     expect(disconnects).toBe(2);
+  });
+});
+
+describe('NexxusRedis scripts', () => {
+  it('sends each script again after the connection drops', async () => {
+    const redis = makeRedis();
+    const server = new FakeRedis();
+
+    await redis.init();
+    redis.getClient = () => server as never;
+
+    const load = vi.spyOn(server, 'scriptLoad');
+    const release = () => redis.scripts.run('username-lock-release', { keys: [ 'lock' ], args: [ 'tok' ] });
+
+    await release();
+    await release();
+
+    expect(load).toHaveBeenCalledTimes(1);
+
+    rstate.handlers.error(new Error('socket died'));
+    await release();
+
+    expect(load).toHaveBeenCalledTimes(2);
   });
 });
 

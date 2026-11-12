@@ -1,8 +1,16 @@
 export * from './lib/Redis';
 export * from './lib/Exceptions';
 export {
+  NexxusRedisScriptLoader,
+  type NexxusRedisScripts,
+  type NexxusRedisScriptName,
+  type NexxusRedisScriptInput
+} from './lib/ScriptLoader';
+export {
   NexxusDevice,
   type NexxusDeviceProps,
+  type NexxusDeviceConnection,
+  type NexxusDeviceConnectionType,
   type NexxusDeviceSession,
   type NexxusSessionRotation,
   type NexxusSessionRevocation

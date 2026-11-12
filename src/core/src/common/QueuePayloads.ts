@@ -86,21 +86,27 @@ export type NexxusTransportModelUpdatedPayload = {
   metadata: NexxusTransportMetadata;
 };
 
+/** One connection of a device, as a transport message addresses it. */
+export type NexxusTransportRecipient = {
+  deviceId: string;
+  connectionId: string;
+};
+
 /**
- * Deliver a model event to devices. The shape is identical across transports; each
- * transport translates the inner `data` into its own wire format inside its
- * `sendToDevice` implementation.
+ * Deliver a model event to connections. The shape is identical across transports;
+ * each transport translates the inner `data` into its own wire format inside its
+ * `sendToConnection` implementation.
  */
 export type NexxusTransportDeviceMessagePayload = {
   event: 'device_message';
-  deviceIds: Array<string>;
+  recipients: Array<NexxusTransportRecipient>;
   data: NexxusTransportModelCreatedPayload | NexxusTransportModelUpdatedPayload | NexxusTransportModelDeletedPayload;
 };
 
 /**
- * These devices' sessions were ended by logout: drop their live connections. Sent
- * by the API straight to the queue named in each device's `transport`, and only
- * for volatile devices — a persistent transport holds no connection to drop.
+ * These devices' sessions were ended by logout: drop every connection they have
+ * on this transport. Sent by the API to each volatile transport a device has a
+ * connection on — a persistent transport holds no connection to drop.
  */
 export type NexxusTransportDeviceLogoutPayload = {
   event: 'device_logout';
@@ -108,10 +114,24 @@ export type NexxusTransportDeviceLogoutPayload = {
 };
 
 /**
+ * These connections were evicted, to keep their devices within their
+ * application's cap on connections, and are torn down already: close them.
+ * Sent by the volatile transport whose registration took a device over its
+ * cap, to the queue of each transport an evicted connection is on.
+ */
+export type NexxusTransportConnectionEvictedPayload = {
+  event: 'connection_evicted';
+  connections: Array<NexxusTransportRecipient>;
+};
+
+/**
  * Canonical payload consumed by ALL transport workers (volatile and persistent
  * alike), discriminated on `event`.
  */
-export type NexxusTransportWorkerPayload = NexxusTransportDeviceMessagePayload | NexxusTransportDeviceLogoutPayload;
+export type NexxusTransportWorkerPayload =
+  | NexxusTransportDeviceMessagePayload
+  | NexxusTransportDeviceLogoutPayload
+  | NexxusTransportConnectionEvictedPayload;
 
 // Map of built-in queue names to their payloads
 export interface NexxusBuiltInQueuePayloadMap {

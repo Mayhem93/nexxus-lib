@@ -132,13 +132,14 @@ With `NODE_ENV=dev`, error responses include the stack trace.
 
 ### Per-application settings
 
-These live on each application's document (see [`nexxus-core-lib`](../core/README.md#application)). The API reads them at startup.
+These live on each application's document (see [`nexxus-core-lib`](../core/README.md#application)). They are read at startup.
 
 | Field | Meaning |
 | --- | --- |
 | `signingSecret` | Signs the application's tokens. |
 | `session.jwtExpiresIn` | Access-token lifetime in seconds, 600–7200. Default `3600`. |
 | `session.refreshTokenExpiresIn` | Session lifetime in seconds, 86400–31536000. Default 30 days. |
+| `connections.maxPerDevice` | How many connections a device can hold at once, 1–100. Default `20`. Registering one more closes the device's oldest — see [`nexxus-worker-lib`](../worker/README.md#websockets-transport). |
 | `auth.strategies.<name>` | Enables a strategy for this application, with its config — see [Authentication](#authentication). |
 | `auth.userTypes.<type>.roles` | ACL roles granted to a user type — see [Access control](#access-control). |
 | `auth.userDetailSchema.<type>` | Fields a user of that type keeps in `details`. Registration and `PUT /user` are validated against it. |
@@ -168,8 +169,8 @@ These live on each application's document (see [`nexxus-core-lib`](../core/READM
 | `GET` | `/model/{id}` | Reads one instance. |
 | `PUT` | `/model/{id}` | Patches one instance. |
 | `DELETE` | `/model/{id}` | Deletes one instance. |
-| `POST` | `/subscription` | Subscribes the calling device to a channel. Returns the first page of data and the channel id. |
-| `DELETE` | `/subscription` | Unsubscribes the calling device from a channel. |
+| `POST` | `/subscription` | Subscribes one connection of the calling device, named in `nxx-connection-id`, to a channel. Returns the first page of data and the channel id. |
+| `DELETE` | `/subscription` | Unsubscribes one connection of the calling device, named in `nxx-connection-id`, from a channel. |
 
 `POST /auth/{strategy}` exists for every strategy in `app.auth.availableStrategies`, and the callback for those that use one (`google`). An application that doesn't enable the strategy gets `404`.
 
@@ -178,6 +179,7 @@ These live on each application's document (see [`nexxus-core-lib`](../core/READM
 ## Requests and errors
 
 - Every route except `GET /` and `GET /auth/{strategy}/callback` requires the `nxx-app-id` header. It is not a secret.
+- `/subscription` also requires `nxx-connection-id`: the `connectionId` the transport answered `register` with. It must name an open connection of the token's device, or the request gets `409 DeviceNotConnectedException`.
 - Tokens go in `Authorization: Bearer <token>`. On an application with authentication, every route needs one except `GET /`, `/user/register` and the `/auth/*` routes. On an application without authentication, only `/device` and `/subscription` need one — the token from `/device/register`.
 - Dates are UNIX timestamps in seconds.
 
@@ -205,7 +207,7 @@ Each request is logged at `info` when it completes, with its method, URL, status
 - **`refreshToken`** goes to `POST /auth/refresh`, which returns a new `token` and `refreshToken`. The session ends `session.refreshTokenExpiresIn` after it started (default 30 days), however often it is refreshed. After that, `/auth/refresh` answers `401 InvalidRefreshTokenException`, and the user signs in again.
 - **`accountCreated`** is `true` when the request created the account — a new registration, or a first sign-in through an OAuth provider — and `false` for any other sign-in. `/device/register` doesn't send it.
 - A refresh token works once. The one it replaced is still accepted for 10 seconds, so a retried refresh succeeds; presented any later, it ends the session.
-- `POST /auth/logout` ends the session and closes the device's live transport connection. It answers `200` whether or not the refresh token was valid.
+- `POST /auth/logout` ends the session, tears down every connection of the device with its subscriptions, and closes the live ones. It answers `200` whether or not the refresh token was valid.
 - Applications without authentication refresh and log out the same way.
 
 Which device a session is bound to:

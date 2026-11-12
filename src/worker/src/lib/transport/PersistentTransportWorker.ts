@@ -1,3 +1,4 @@
+import { SessionEndedException } from '@mayhem93/nexxus-core-lib';
 import { NexxusDevice } from '@mayhem93/nexxus-redis';
 
 import {
@@ -30,9 +31,9 @@ export type NexxusPersistentTransportWorkerStats = NexxusBaseTransportWorkerStat
  * service to clean up dead subscriptions.
  *
  * Concrete subclasses must implement initTransport() (open HTTP/2 connection to
- * APNs, initialize an FCM client, etc.) and sendToDevice() (translate the
+ * APNs, initialize an FCM client, etc.) and sendToConnection() (translate the
  * canonical NexxusTransportDeviceMessagePayload data to the 3rd-party's wire format
- * and POST it).
+ * and POST it to the push token the connection id is).
  */
 export abstract class NexxusPersistentTransportWorker<
   T extends NexxusPersistentTransportWorkerConfig,
@@ -47,34 +48,28 @@ export abstract class NexxusPersistentTransportWorker<
   }
 
   /**
-   * Records a device as a persistent-flavor device in Redis. Available for subclasses
-   * whose transport surfaces a registration signal (e.g. an MQTT broker notifying about
-   * a new persistent session). For most persistent transports — APNs, FCM, web push —
-   * registration is handled by the API at the time the device supplies its push token,
-   * and this method is unused by the worker itself.
+   * Opens a persistent connection of a device in Redis, on this transport's
+   * queue; its id is the device's push token. Available for subclasses whose
+   * transport surfaces a registration signal (e.g. an MQTT broker notifying
+   * about a new persistent session). For most persistent transports — APNs,
+   * FCM, web push — registration is handled by the API at the time the device
+   * supplies its push token, and this method is unused by the worker itself.
+   *
+   * Throws `SessionEndedException` when the device's session has ended.
    */
-  protected async registerDevice(deviceId: string): Promise<void> {
-    await NexxusDevice.update(deviceId, {
-      type: 'persistent',
-      transport: this.queueName,
-      status: 'online',
-    });
+  protected async registerConnection(deviceId: string, connectionId: string): Promise<void> {
+    if (!await NexxusDevice.openConnection(deviceId, connectionId, { transport: this.queueName, type: 'persistent' })) {
+      throw new SessionEndedException('The session of this device has ended.');
+    }
   }
 
   /**
-   * Called when the 3rd-party service signals that a device's token is permanently
+   * Called when the 3rd-party service signals that a push token is permanently
    * invalid (e.g. APNs `Unregistered`, FCM `registration-token-not-registered`).
-   * Tears down all subscriptions for the device and marks it offline in Redis.
-   * Subclasses call this from their feedback-channel handling.
-   *
-   * Neither `lastSeen` nor `transport` is updated here. `lastSeen` is volatile-only.
-   * `transport` is preserved so the device's flavor association stays visible even
-   * after the token dies — consistent with the volatile counterpart.
+   * Tears that connection down in Redis: its routes, then its entry. Subclasses
+   * call this from their feedback-channel handling.
    */
-  protected async unregisterDevice(deviceId: string): Promise<void> {
-    await NexxusDevice.removeAllSubscriptions(deviceId);
-    await NexxusDevice.update(deviceId, {
-      status: 'offline',
-    });
+  protected async unregisterConnection(deviceId: string, connectionId: string): Promise<void> {
+    await NexxusDevice.closeConnection(deviceId, connectionId);
   }
 }

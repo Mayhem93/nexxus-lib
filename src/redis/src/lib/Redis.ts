@@ -7,6 +7,8 @@ import {
   NexxusBaseLogger
 } from '@mayhem93/nexxus-core-lib';
 
+import { NexxusRedisScriptLoader } from './ScriptLoader';
+
 import * as Redis from 'redis';
 
 import * as path from 'node:path';
@@ -82,9 +84,12 @@ function parseFloatOrUndefined(s: string | undefined): number | undefined {
 export class NexxusRedis extends NexxusBaseService<NexxusRedisConfig, RedisEvents, NexxusRedisStats> {
   private client: Redis.RedisClientType | Redis.RedisClusterType | null = null;
 
+  /** The Lua scripts Nexxus runs, on this connection. */
+  public readonly scripts: NexxusRedisScriptLoader;
+
   protected static loggerLabel: Readonly<string> = 'NxxRedis';
-  protected static configRootKey: string = "redis";
-  protected static schemaPath: string = path.join(__dirname, "../../src/schemas/redis.schema.json");
+  protected static configRootKey: string = 'redis';
+  protected static schemaPath: string = path.join(__dirname, '../../src/schemas/redis.schema.json');
   protected static envVars: ConfigEnvVars = [];
   protected static cliArgs: ConfigCliArgs = [];
 
@@ -97,6 +102,11 @@ export class NexxusRedis extends NexxusBaseService<NexxusRedisConfig, RedisEvent
     if (!(services.logger instanceof NexxusBaseLogger)) {
       throw new Error('Logger service is not an instance of NexxusBaseLogger');
     }
+
+    this.scripts = new NexxusRedisScriptLoader(() => this.getClient());
+
+    // A restarted Redis holds no scripts, so each is sent again before its next run.
+    this.on('disconnect', () => this.scripts.reset());
 
     NexxusRedis.logger = services.logger;
     NexxusRedis.instance = this;

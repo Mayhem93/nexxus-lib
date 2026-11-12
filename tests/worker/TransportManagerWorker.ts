@@ -61,21 +61,27 @@ const filterOn = (query: Record<string, unknown>, opts: { auth?: boolean } = {})
   } as never);
 
 /**
- * Subscribe a device through the REAL subscription model, so the partition set,
- * partition index, scope registry and filter registry are all written exactly
- * as the API writes them. Returns the channel key the TM should report back.
+ * Subscribe a connection of a device through the REAL subscription model, so
+ * the partition set, partition index, scope registry and filter registry are
+ * all written exactly as the API writes them. The connection is
+ * `<deviceId>-c1` unless named. Returns the channel key the TM should report
+ * back.
  */
 const subscribe = async (
   channel: NexxusSubscriptionChannel,
   deviceId: string,
-  transport: string = T1
+  transport: string = T1,
+  connectionId: string = `${deviceId}-c1`
 ): Promise<string> => {
   const sub = new NexxusRedisSubscription(channel);
 
-  await sub.addDevice(deviceId, transport);
+  await sub.addConnection(deviceId, transport, connectionId);
 
   return sub.getKey();
 };
+
+/** The device each recipient of a `device_message` belongs to. */
+const recipientDevice = (recipient: { deviceId: string }): string => recipient.deviceId;
 
 /** The scope-registry HASH the TM reads to decide which patterns are worth a lookup. */
 const scopeRegistryKey = (model = 'runs') => `${NEXXUS_PREFIX_LC}:subscription-scopes:app1:${model}`;
@@ -157,7 +163,7 @@ describe('NexxusTransportManagerWorker model_created', () => {
     expect(mqState.published[0].queue).toBe(T1);
     expect(mqState.published[0].message).toEqual({
       event: 'device_message',
-      deviceIds: [ 'd1' ],
+      recipients: [ { deviceId: 'd1', connectionId: 'd1-c1' } ],
       data: {
         event: 'model_created',
         model: created().payload.data,
@@ -177,7 +183,7 @@ describe('NexxusTransportManagerWorker model_created', () => {
     await tm().processMessage(created());
 
     expect(mqState.published).toHaveLength(1);
-    expect(mqState.published[0].message.deviceIds.sort()).toEqual([ 'd1', 'd2', 'd3' ]);
+    expect(mqState.published[0].message.recipients.map(recipientDevice).sort()).toEqual([ 'd1', 'd2', 'd3' ]);
     expect(mqState.published[0].message.data.metadata.channels).toEqual([ channelKey ]);
   });
 
@@ -192,7 +198,7 @@ describe('NexxusTransportManagerWorker model_created', () => {
     const messages = onQueue(T1);
 
     expect(messages).toHaveLength(2);
-    expect(messages.map(m => [ m.message.deviceIds, m.message.data.metadata.channels ])
+    expect(messages.map(m => [ m.message.recipients.map(recipientDevice), m.message.data.metadata.channels ])
       .sort((a, b) => String(a[0]).localeCompare(String(b[0])))).toEqual([
       [ [ 'd1' ], [ appChannel ] ],
       [ [ 'd2' ], [ idChannel ] ],
@@ -208,9 +214,25 @@ describe('NexxusTransportManagerWorker model_created', () => {
     await tm().processMessage(created());
 
     expect(mqState.published).toHaveLength(1);
-    expect(mqState.published[0].message.deviceIds).toEqual([ 'd1' ]);
+    expect(mqState.published[0].message.recipients.map(recipientDevice)).toEqual([ 'd1' ]);
     expect(mqState.published[0].message.data.metadata.channels.sort())
       .toEqual([ appChannel, idChannel ].sort());
+  });
+
+  it('addresses each connection of a device on its own, in one message per transport', async () => {
+    loadApp();
+
+    await subscribe({ appId: 'app1', model: 'runs' }, 'd1', T1, 'tab1');
+    await subscribe({ appId: 'app1', model: 'runs' }, 'd1', T1, 'tab2');
+    await subscribe({ appId: 'app1', model: 'runs' }, 'd1', T2, 'tab3');
+
+    await tm().processMessage(created());
+
+    expect(onQueue(T1).map(m => m.message.recipients)).toEqual([ [
+      { deviceId: 'd1', connectionId: 'tab1' },
+      { deviceId: 'd1', connectionId: 'tab2' },
+    ] ]);
+    expect(onQueue(T2).map(m => m.message.recipients)).toEqual([ [ { deviceId: 'd1', connectionId: 'tab3' } ] ]);
   });
 
   it('publishes to each transport queue the matched devices live on', async () => {
@@ -221,8 +243,8 @@ describe('NexxusTransportManagerWorker model_created', () => {
 
     await tm().processMessage(created());
 
-    expect(onQueue(T1).map(m => m.message.deviceIds)).toEqual([ [ 'd1' ] ]);
-    expect(onQueue(T2).map(m => m.message.deviceIds)).toEqual([ [ 'd2' ] ]);
+    expect(onQueue(T1).map(m => m.message.recipients.map(recipientDevice))).toEqual([ [ 'd1' ] ]);
+    expect(onQueue(T2).map(m => m.message.recipients.map(recipientDevice))).toEqual([ [ 'd2' ] ]);
   });
 
   it('notifies a filtered subscriber when the new model matches its filter', async () => {
@@ -262,7 +284,7 @@ describe('NexxusTransportManagerWorker model_created', () => {
     await tm().processMessage(created());
 
     expect(mqState.published).toHaveLength(1);
-    expect(mqState.published[0].message.deviceIds).toEqual([ 'd1' ]);
+    expect(mqState.published[0].message.recipients.map(recipientDevice)).toEqual([ 'd1' ]);
     expect(mqState.published[0].message.data.metadata.channels).toEqual([ appChannel ]);
   });
 
@@ -294,7 +316,7 @@ describe('NexxusTransportManagerWorker model_created', () => {
     await tm().processMessage(created());
 
     expect(mqState.published).toHaveLength(1);
-    expect(mqState.published[0].message.deviceIds).toEqual([ 'd2' ]);
+    expect(mqState.published[0].message.recipients.map(recipientDevice)).toEqual([ 'd2' ]);
     expect(mqState.published[0].message.data.metadata.channels).toEqual([ appChannel ]);
     expect(logger.has('warning', /Skipping stored filter ".+" on channel/)).toBe(true);
   });
@@ -325,7 +347,7 @@ describe('NexxusTransportManagerWorker model_updated', () => {
     expect(mqState.published[0].queue).toBe(T1);
     expect(mqState.published[0].message).toEqual({
       event: 'device_message',
-      deviceIds: [ 'd1' ],
+      recipients: [ { deviceId: 'd1', connectionId: 'd1-c1' } ],
       data: {
         event: 'model_updated',
         model: { id: 'r1', type: 'runs', appId: 'app1', userId: undefined, version: 7 },
@@ -433,7 +455,7 @@ describe('NexxusTransportManagerWorker model_deleted', () => {
     expect(mqState.published).toHaveLength(1);
     expect(mqState.published[0].message).toEqual({
       event: 'device_message',
-      deviceIds: [ 'd1' ],
+      recipients: [ { deviceId: 'd1', connectionId: 'd1-c1' } ],
       data: {
         event: 'model_deleted',
         model: { id: 'r1', appId: 'app1', type: 'runs' },

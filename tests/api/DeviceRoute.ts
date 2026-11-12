@@ -47,7 +47,6 @@ async function seedDevice(props: { id: string; appId?: string; userId?: string; 
     appId: props.appId ?? 'app1',
     userId: props.userId,
     name: props.name ?? 'Old Phone',
-    subscriptions: [],
   }).save();
 }
 
@@ -391,8 +390,8 @@ describe('GET /device/list', () => {
     dbState.getItemsResult = [ storedUser([ 'd1', 'd2' ], minutesAgo(2)) ];
 
     const get = NexxusDevice.get.bind(NexxusDevice);
-    const spy = vi.spyOn(NexxusDevice, 'get').mockImplementation((id, withSubscriptions) =>
-      id === 'd2' ? Promise.reject(new Error('redis hiccup')) : get(id, withSubscriptions));
+    const spy = vi.spyOn(NexxusDevice, 'get').mockImplementation(id =>
+      id === 'd2' ? Promise.reject(new Error('redis hiccup')) : get(id));
 
     try {
       const res = await server.request('/device/list', { headers: as('d1', USER) });

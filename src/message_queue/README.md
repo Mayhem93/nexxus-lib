@@ -78,7 +78,7 @@ abstract class NexxusMessageQueueAdapter<
 | `doConsume(queue, deliver)` | Start a broker consumer that hands each message to `deliver` as a `NexxusMessageDelivery`; track whatever handle is needed to cancel it. |
 | `doCancelAll()` | Cancel all active consumers (for pause); swallow per-consumer errors. |
 | `doPublish(queue, content, metadata?)` | Send the encoded bytes. Resolve once the broker confirms the message; reject when it refuses it or the connection goes first, and at once when there's no connection. |
-| `queueExists` / `createVolatileQueue` / `deleteQueue` | Support the per-slot volatile queues transport workers claim. |
+| `queueExists` / `createVolatileQueue` / `deleteQueue` | Support the per-slot volatile queues transport workers claim. A volatile queue goes with the connection that declared it. |
 | `getBootstrapper(options)` | Return this adapter's `NexxusMessageQueueBootstrapper`. |
 | `reconnectDelayMs` | The retry interval the base's loop uses. |
 
@@ -160,7 +160,7 @@ Payloads live in core (`@mayhem93/nexxus-core-lib`) and are keyed to queues by t
 ```typescript
 {
   event: 'device_message',
-  deviceIds: string[],                 // who to deliver to
+  recipients: Array<{ deviceId, connectionId }>,  // who to deliver to
   data: {                              // model_created | model_updated | model_deleted
     event: 'model_updated',
     model: { id, type, appId, userId, version },  // version drives client gap-detection
@@ -168,6 +168,13 @@ Payloads live in core (`@mayhem93/nexxus-core-lib`) and are keyed to queues by t
     metadata: { channels: string[] }              // matched subscription channels
   }
 }
+```
+
+Two more events close connections. The API sends `device_logout` to each transport a logged-out device has a connection on; a transport sends `connection_evicted` to the transport holding a connection it evicted, already torn down, to keep a device within its connection cap:
+
+```typescript
+{ event: 'device_logout', deviceIds: string[] }                                         // close every connection of these devices
+{ event: 'connection_evicted', connections: Array<{ deviceId, connectionId }> }       // close these connections
 ```
 
 ---

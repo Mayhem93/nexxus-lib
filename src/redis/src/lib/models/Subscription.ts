@@ -7,7 +7,8 @@ import {
 
 import crypto from 'crypto';
 
-export type NexxusDeviceTransportString = `${string}|${string}`; // deviceId|transport
+/** A route: one connection of a device, as `deviceId|transport|connectionId`. */
+export type NexxusDeviceTransportString = `${string}|${string}|${string}`;
 
 export interface NexxusSubscriptionChannel {
   appId: string;
@@ -21,6 +22,14 @@ export type NexxusBaseSubscriptionChannel = Omit<NexxusSubscriptionChannel, 'fil
 
 export class NexxusRedisSubscription {
   private static readonly PARTITION_COUNT = 16;
+
+  /**
+   * Prefix of the filter registry fields that count a filter's members, next
+   * to the field holding its definition. Filter ids are hex, so no definition
+   * field starts with it.
+   */
+  private static readonly FILTER_COUNT_PREFIX = 'count:';
+
   private channel: NexxusSubscriptionChannel;
   private filterId?: string;
 
@@ -94,79 +103,129 @@ export class NexxusRedisSubscription {
   }
 
 
-  public async addDevice(deviceId: string, transport: string): Promise<void> {
-    const partition = this.getDevicePartition(deviceId);
-    const partitionKey = this.buildPartitionKey(partition);
-    const partitionIndexKey = this.buildPartitionIndexKey();
-
-    const redis = NexxusRedis.instance.getClient();
-
-    // SADD returns the number of NEW members added. If it returns 0 the
-    // device was already subscribed to this exact channel — bail so we
-    // don't double-count the scope HINCRBY below.
-    const added = await redis.sAdd(partitionKey, `${deviceId}|${transport}`);
-
-    if (added === 0) {
-      return;
-    }
-
-    // Track that this partition exists.
-    await redis.sAdd(partitionIndexKey, partition);
-
-    // Bump the scope counter. TM reads this to know which (modelId/userId)
-    // combinations have ANY subscriber at all — patterns nobody subscribed
-    // to are skipped entirely, avoiding the per-pattern Redis lookups that
-    // were producing forever-stale tracking-table entries.
-    const scopeRegistryKey = NexxusRedisSubscription.buildScopeRegistryKey(this.channel.appId, this.channel.model);
-    const scopeDescriptor = NexxusRedisSubscription.buildScopeDescriptor(this.channel);
-
-    await redis.hIncrBy(scopeRegistryKey, scopeDescriptor, 1);
-
-    // If filtered subscription, store filter definition.
-    if (this.filterId && this.channel.filter) {
-      const filterKey = this.buildFilterRegistryKey();
-
-      await redis.hSet(filterKey, this.filterId, JSON.stringify(this.channel.filter.getNormalizedQuery()));
-    }
+  /**
+   * Route this channel to one connection of a device, as the member
+   * `deviceId|transport|connectionId`. Returns whether the route is new.
+   */
+  public addConnection(deviceId: string, transport: string, connectionId: string): Promise<boolean> {
+    return this.addMember(deviceId, `${deviceId}|${transport}|${connectionId}`);
   }
 
-  public async removeDevice(deviceId: string, transport: string): Promise<boolean> {
-    const redis = NexxusRedis.instance.getClient();
-    const partition = this.getDevicePartition(deviceId);
-    const partitionKey = this.buildPartitionKey(partition);
-    const removed = await redis.sRem(partitionKey, `${deviceId}|${transport}`);
+  /**
+   * Remove this channel's route to one connection of a device. Returns whether
+   * there was one: of several callers removing the same route, only one gets
+   * `true`, and only that one releases its counts.
+   */
+  public removeConnection(deviceId: string, transport: string, connectionId: string): Promise<boolean> {
+    return this.removeMember(deviceId, `${deviceId}|${transport}|${connectionId}`);
+  }
 
-    if (removed === 0) {
+  /**
+   * Add a member to the device's partition. Returns whether it is new.
+   *
+   * The member is counted before it is added, and released only after it is
+   * removed (see `removeMember`). So a member that exists is always counted
+   * everywhere the Transport Manager looks before reading members, whatever
+   * other members are added or removed at the same moment.
+   */
+  private async addMember(deviceId: string, member: string): Promise<boolean> {
+    const partition = this.getDevicePartition(deviceId);
+
+    await this.retain(partition);
+
+    if (await NexxusRedis.instance.getClient().sAdd(this.buildPartitionKey(partition), member) === 0) {
+      // Already a member, and already counted.
+      await this.release(partition);
+
       return false;
     }
 
-    // Partition cleanup is conditional: 16 partitions hash-bucket devices, so
-    // multiple devices share a partition. Only drop the partition from the
-    // index when THIS partition is now empty; only drop per-subscription
-    // registries (filter HASH) when the subscription is fully empty.
-    if (await redis.sCard(partitionKey) === 0) {
-      const partitionIndexKey = this.buildPartitionIndexKey();
+    return true;
+  }
 
-      await redis.sRem(partitionIndexKey, partition);
+  /** Remove a member from the device's partition. Returns whether it was there. */
+  private async removeMember(deviceId: string, member: string): Promise<boolean> {
+    const partition = this.getDevicePartition(deviceId);
 
-      if (await redis.sCard(partitionIndexKey) === 0 && this.filterId) {
-        await redis.hDel(this.buildFilterRegistryKey(), this.filterId);
-      }
+    // Of several callers removing the same member, only the one that removes it
+    // releases its counts.
+    if (await NexxusRedis.instance.getClient().sRem(this.buildPartitionKey(partition), member) === 0) {
+      return false;
     }
 
-    // Scope counter tracks "how many devices subscribe at this scope
-    // across all partitions and filters", so it always decrements when
-    // a device successfully unsubscribes. HINCRBY returns the new value;
-    // HDEL the field when it hits zero so HKEYS doesn't return stale scopes.
-    const scopeRegistryKey = NexxusRedisSubscription.buildScopeRegistryKey(this.channel.appId, this.channel.model);
-    const scopeDescriptor = NexxusRedisSubscription.buildScopeDescriptor(this.channel);
-    const newCount = await redis.hIncrBy(scopeRegistryKey, scopeDescriptor, -1);
-
-    if (newCount <= 0) {
-      await redis.hDel(scopeRegistryKey, scopeDescriptor);
-    }
+    await this.release(partition);
 
     return true;
+  }
+
+  /**
+   * Count one more member on the three things the Transport Manager reads
+   * before members: the scope, the member's partition, and the filter of a
+   * filtered subscription, whose definition is stored too.
+   */
+  private async retain(partition: string): Promise<void> {
+    const redis = NexxusRedis.instance.getClient();
+    const counts: Promise<unknown>[] = [
+      redis.hIncrBy(
+        NexxusRedisSubscription.buildScopeRegistryKey(this.channel.appId, this.channel.model),
+        NexxusRedisSubscription.buildScopeDescriptor(this.channel),
+        1
+      ),
+      redis.hIncrBy(this.buildPartitionIndexKey(), partition, 1)
+    ];
+
+    if (this.filterId) {
+      counts.push(this.retainFilter(this.filterId));
+    }
+
+    await Promise.all(counts);
+  }
+
+  /**
+   * The count before the definition: a release landing in between then can't
+   * take the count to zero and delete the definition stored here.
+   */
+  private async retainFilter(filterId: string): Promise<void> {
+    const redis = NexxusRedis.instance.getClient();
+    const key = this.buildFilterRegistryKey();
+
+    await redis.hIncrBy(key, NexxusRedisSubscription.filterCountField(filterId), 1);
+
+    // A subscription rebuilt from its key has no query to store.
+    if (this.channel.filter) {
+      await redis.hSet(key, filterId, JSON.stringify(this.channel.filter.getNormalizedQuery()));
+    }
+  }
+
+  /**
+   * Count one member fewer on everything `retain` counted it on, deleting each
+   * count once it reaches zero, and the filter's definition with its count.
+   * Each release is one step, so a member counted at the same moment never
+   * loses its count to it.
+   */
+  private async release(partition: string): Promise<void> {
+    const scripts = NexxusRedis.instance.scripts;
+    const releases: Promise<number>[] = [
+      scripts.run('counter-release', {
+        keys: [ NexxusRedisSubscription.buildScopeRegistryKey(this.channel.appId, this.channel.model) ],
+        args: [ NexxusRedisSubscription.buildScopeDescriptor(this.channel) ]
+      }),
+      scripts.run('counter-release', { keys: [ this.buildPartitionIndexKey() ], args: [ partition ] })
+    ];
+
+    if (this.filterId) {
+      releases.push(scripts.run('counter-release', {
+        keys: [ this.buildFilterRegistryKey() ],
+        args: [ NexxusRedisSubscription.filterCountField(this.filterId), this.filterId ]
+      }));
+    }
+
+    await Promise.all(releases);
+  }
+
+  /** The filter registry field counting the members a filter has. */
+  private static filterCountField(filterId: string): string {
+    return `${NexxusRedisSubscription.FILTER_COUNT_PREFIX}${filterId}`;
   }
 
   public async getAllDevices(): Promise<Set<NexxusDeviceTransportString>> {
@@ -175,7 +234,7 @@ export class NexxusRedisSubscription {
     const partitionIndexKey = this.buildPartitionIndexKey();
 
     // Get list of partitions that have devices
-    const activePartitions = await redis.sMembers(partitionIndexKey);
+    const activePartitions = await redis.hKeys(partitionIndexKey);
 
     if (activePartitions.length === 0) {
       return devices; // No devices subscribed
@@ -243,10 +302,9 @@ export class NexxusRedisSubscription {
     const filters = await redis.hGetAll(filterRegistryKey);
 
     return Object.fromEntries(
-      Object.entries(filters).map(([filterId, filterJson]) => [
-        filterId,
-        JSON.parse(filterJson) as NexxusFilterQueryType
-      ])
+      Object.entries(filters)
+        .filter(([ field ]) => !field.startsWith(NexxusRedisSubscription.FILTER_COUNT_PREFIX))
+        .map(([ filterId, filterJson ]) => [ filterId, JSON.parse(filterJson) as NexxusFilterQueryType ])
     );
   }
 
@@ -317,8 +375,12 @@ export class NexxusRedisSubscription {
     return key;
   }
 
+  /**
+   * How many members each partition holds, as a HASH: partition → count. A
+   * partition with none has no field.
+   */
   private buildPartitionIndexKey(): string {
-    let key = `${NEXXUS_PREFIX_LC}:subscription-partitions:${this.channel.appId}:${this.channel.model}`;
+    let key = `${NEXXUS_PREFIX_LC}:subscription-partition-index:${this.channel.appId}:${this.channel.model}`;
 
     if (this.channel.modelId) {
       key += `:${this.channel.modelId}`;

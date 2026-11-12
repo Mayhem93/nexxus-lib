@@ -1,6 +1,6 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { NexxusToken, NexxusUser, type INexxusUser, type NexxusApplication } from '@mayhem93/nexxus-core-lib';
-import { NexxusDevice } from '@mayhem93/nexxus-redis';
+import { NexxusDevice, NexxusRedisSubscription } from '@mayhem93/nexxus-redis';
 
 import { NexxusApiSession } from '../../src/api/src/lib/Session';
 import { InvalidRefreshTokenException } from '../../src/api/src/lib/Exceptions';
@@ -29,7 +29,7 @@ describe('NexxusApiSession.issue', () => {
     installApiStatics();
     redis = installFakeRedis();
     app = seedApp(makeAuthApp());
-    device = new NexxusDevice({ id: 'd1', appId: 'app1', name: 'Phone', subscriptions: [] });
+    device = new NexxusDevice({ id: 'd1', appId: 'app1', name: 'Phone' });
 
     await device.save();
   });
@@ -111,7 +111,7 @@ describe('NexxusApiSession.issue', () => {
 
   it('hands out nothing when the session cannot be stored', async () => {
     // Never saved, so there is no document to put a session on.
-    const ghost = new NexxusDevice({ id: 'ghost', appId: 'app1', name: 'N', subscriptions: [] });
+    const ghost = new NexxusDevice({ id: 'ghost', appId: 'app1', name: 'N' });
 
     await expect(NexxusApiSession.issue(app, ghost, USER)).rejects.toThrow(/Failed to start a session/);
   });
@@ -133,7 +133,7 @@ describe('NexxusApiSession.refresh', () => {
     app = seedApp(makeAuthApp());
     dbState.getItemsResult = [ storedUser() ];
 
-    await new NexxusDevice({ id: 'd1', appId: 'app1', userId: 'u1', name: 'Phone', subscriptions: [] }).save();
+    await new NexxusDevice({ id: 'd1', appId: 'app1', userId: 'u1', name: 'Phone' }).save();
   });
 
   /** Issue a session on `d1` and return its refresh token — what sign-in hands a client. */
@@ -185,7 +185,7 @@ describe('NexxusApiSession.refresh', () => {
   it('issues a device-only token for a device with no owner, without touching the database', async () => {
     const zeroAuth = seedApp(makeApp());
 
-    await new NexxusDevice({ id: 'kiosk', appId: 'app1', name: 'Kiosk', subscriptions: [] }).save();
+    await new NexxusDevice({ id: 'kiosk', appId: 'app1', name: 'Kiosk' }).save();
 
     const { refreshToken } = await NexxusApiSession.issue(zeroAuth, await NexxusDevice.get('kiosk'));
     const readsBefore = dbState.getItemsCalls.length;
@@ -239,12 +239,20 @@ describe('NexxusApiSession.revoke', () => {
     redis = installFakeRedis();
     app = seedApp(makeAuthApp());
 
-    await new NexxusDevice({ id: 'd1', appId: 'app1', userId: 'u1', name: 'Phone', subscriptions: [] }).save();
+    await new NexxusDevice({ id: 'd1', appId: 'app1', userId: 'u1', name: 'Phone' }).save();
   });
 
   const signIn = async (): Promise<string> =>
     (await NexxusApiSession.issue(app, await NexxusDevice.get('d1'), USER)).refreshToken;
-  const storedSession = (): any => (redis.store.get(NexxusDevice.getKey('d1')) as { value: any }).value.session;
+  const storedDevice = (): any => (redis.store.get(NexxusDevice.getKey('d1')) as { value: any }).value;
+  const storedSession = (): any => storedDevice().session;
+
+  /** Open a connection of `d1`, as a transport does when it registers; needs a live session. */
+  const open = (connectionId: string, transport = 'websockets-transport_0', type: 'volatile' | 'persistent' = 'volatile') =>
+    NexxusDevice.openConnection('d1', connectionId, { transport, type });
+
+  const logout = (transport: string) =>
+    ({ queue: transport, message: { event: 'device_logout', deviceIds: [ 'd1' ] }, metadata: undefined });
 
   it('ends the session a matching token belongs to', async () => {
     const refreshToken = await signIn();
@@ -276,49 +284,120 @@ describe('NexxusApiSession.revoke', () => {
   });
 
   /**
-   * The device's access token stays valid until it expires, so without this an
-   * open socket would go on receiving until then. The message goes straight to
-   * the queue of the node holding the socket.
+   * The device's access tokens stay valid until they expire, so without this an
+   * open socket would go on receiving until then. Each transport the device has
+   * a connection on is told once, whatever the number of connections there.
    */
-  it('tells the transport holding the device\'s live connection to drop it', async () => {
-    await NexxusDevice.update('d1', { type: 'volatile', transport: 'websockets-transport_0', status: 'online' });
+  it('tells each transport the device has a connection on to drop them', async () => {
+    const refreshToken = await signIn();
 
-    await NexxusApiSession.revoke(app, await signIn());
+    await open('c1');
+    await open('c2');
+    await open('c3', 'websockets-transport_3');
 
-    expect(mqState.published).toEqual([
-      { queue: 'websockets-transport_0', message: { event: 'device_logout', deviceIds: [ 'd1' ] }, metadata: undefined },
-    ]);
+    await NexxusApiSession.revoke(app, refreshToken);
+
+    expect(mqState.published).toEqual([ logout('websockets-transport_0'), logout('websockets-transport_3') ]);
   });
 
-  it('publishes nothing for a device that holds no live connection', async () => {
-    // Never connected to a transport.
-    await NexxusApiSession.revoke(app, await signIn());
+  /**
+   * A transport may never get the message: its node crashed, or lost its slot
+   * queue. No connection mustn't stay routed there.
+   */
+  it('tears every connection down itself, in case its transport is gone', async () => {
+    const sub = new NexxusRedisSubscription({ appId: 'app1', model: 'runs' });
+    const refreshToken = await signIn();
 
-    // Persistent: it has a transport, but no connection to drop.
-    await NexxusDevice.update('d1', { type: 'persistent', transport: 'apns-transport' });
+    await open('c1');
+    await open('c2', 'websockets-transport_3');
+    await NexxusDevice.addSubscription('d1', 'c1', sub);
+    await NexxusDevice.addSubscription('d1', 'c2', sub);
+
+    await NexxusApiSession.revoke(app, refreshToken);
+
+    expect(storedDevice().connections).toEqual({});
+    expect(await sub.getAllDevices()).toEqual(new Set());
+  });
+
+  /**
+   * A registration past its session check can still open its connection after
+   * logout started. Logout reads the device once the session has ended, which
+   * finds it: no connection can open after that.
+   */
+  it('drops a connection that opened while the device was logging out', async () => {
+    const refreshToken = await signIn();
+    const revokeSession = NexxusDevice.revokeSession.bind(NexxusDevice);
+    const revoke = vi.spyOn(NexxusDevice, 'revokeSession').mockImplementationOnce(async (id, secret) => {
+      // The registration opening its connection, just before the session ends.
+      await open('late', 'websockets-transport_3');
+
+      return revokeSession(id, secret);
+    });
+
+    try {
+      await NexxusApiSession.revoke(app, refreshToken);
+    } finally {
+      revoke.mockRestore();
+    }
+
+    expect(storedDevice().connections).toEqual({});
+    expect(mqState.published).toEqual([ logout('websockets-transport_3') ]);
+  });
+
+  it('still tells the transports to drop the connections when one can\'t be torn down', async () => {
+    const refreshToken = await signIn();
+
+    await open('c1');
+
+    const close = vi.spyOn(NexxusDevice, 'closeConnection').mockRejectedValueOnce(new Error('redis down'));
+
+    try {
+      await expect(NexxusApiSession.revoke(app, refreshToken)).resolves.toBeUndefined();
+    } finally {
+      close.mockRestore();
+    }
+
+    expect(storedSession()).toBeUndefined();
+    expect(logger.has('warning', /could not tear down its connection "c1": redis down/)).toBe(true);
+    expect(mqState.published).toEqual([ logout('websockets-transport_0') ]);
+  });
+
+  it('tears down a persistent connection, and tells no transport: it holds no socket', async () => {
+    const refreshToken = await signIn();
+
+    await open('push-token', 'apns-transport', 'persistent');
+
+    await NexxusApiSession.revoke(app, refreshToken);
+
+    expect(storedDevice().connections).toEqual({});
+    expect(mqState.published).toEqual([]);
+  });
+
+  it('publishes nothing for a device with no connection', async () => {
     await NexxusApiSession.revoke(app, await signIn());
 
     expect(mqState.published).toEqual([]);
   });
 
-  it('publishes nothing when the token ends nothing', async () => {
-    await NexxusDevice.update('d1', { type: 'volatile', transport: 'websockets-transport_0' });
+  it('publishes nothing, and tears nothing down, when the token ends nothing', async () => {
     await signIn();
+    await open('c1');
 
     await NexxusApiSession.revoke(app, 'd1.not-the-secret');
 
     expect(mqState.published).toEqual([]);
+    expect(Object.keys(storedDevice().connections)).toEqual([ 'c1' ]);
   });
 
   it('still ends the session when the transport cannot be told', async () => {
-    await NexxusDevice.update('d1', { type: 'volatile', transport: 'websockets-transport_0' });
-
     const refreshToken = await signIn();
+
+    await open('c1');
 
     mqState.publishImpl = () => { throw new Error('broker unreachable'); };
 
     await expect(NexxusApiSession.revoke(app, refreshToken)).resolves.toBeUndefined();
     expect(storedSession()).toBeUndefined();
-    expect(logger.has('warning', /could not tell its transport to drop the connection/)).toBe(true);
+    expect(logger.has('warning', /could not tell transport "websockets-transport_0" to drop its connections/)).toBe(true);
   });
 });

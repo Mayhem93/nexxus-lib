@@ -4,18 +4,6 @@ import { NEXXUS_PREFIX_LC } from '@mayhem93/nexxus-core-lib';
 import { randomUUID } from 'node:crypto';
 
 /**
- * Delete the lock only while it still holds the caller's token, so a holder
- * whose lock already expired can't release the next holder's. Touches one key,
- * passed as KEYS[1], so it is single-slot and runs unchanged on a cluster.
- */
-export const NEXXUS_USERNAME_LOCK_RELEASE_SCRIPT = `
-if redis.call('GET', KEYS[1]) == ARGV[1] then
-  return redis.call('DEL', KEYS[1])
-end
-return 0
-`;
-
-/**
  * A short lock on one username of one application, at
  * `nxx:username_lock:{appId}:{username}`.
  *
@@ -73,9 +61,9 @@ export class NexxusUsernameLock {
 
   /** Release the lock, unless it has expired and someone else holds it now. */
   public async release(): Promise<void> {
-    await NexxusRedis.instance.getClient().eval(NEXXUS_USERNAME_LOCK_RELEASE_SCRIPT, {
+    await NexxusRedis.instance.scripts.run('username-lock-release', {
       keys: [ this.key ],
-      arguments: [ this.token ]
+      args: [ this.token ]
     });
   }
 }

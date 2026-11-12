@@ -517,6 +517,10 @@ export abstract class NexxusMessageQueueAdapter<
    *     connection fails, giving us broker-level collision protection).
    *   - Kafka / NATS / others (future): whatever "ephemeral topic" primitive fits,
    *     with explicit deletion required in `deleteQueue`.
+   *
+   * Whatever the broker, the queue must go with the connection that declared
+   * it: after a reconnect, the worker declares its queue again, and takes one
+   * that still exists for another worker's.
    */
   abstract createVolatileQueue(name: string): Promise<void>;
 

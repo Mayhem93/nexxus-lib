@@ -14,10 +14,12 @@ How a change travels:
 
 1. The API publishes each model write to the `writer` queue. Transient models skip the Writer and go to `transport-manager` directly.
 2. The **Writer** applies the write to the database and publishes the change to `transport-manager`.
-3. The **Transport Manager** finds every device subscribed to the change, and publishes a `device_message` to each device's transport queue.
-4. The **transport** delivers it — the websockets transport over the device's open connection.
+3. The **Transport Manager** finds every connection subscribed to the change, and publishes a `device_message` to each connection's transport queue.
+4. The **transport** delivers it — the websockets transport over the connection's open socket.
 
-On logout, the API publishes `device_logout` to the device's transport queue, and the transport closes the device's connection.
+A device can hold several connections at once, one per socket: two browser tabs are two connections of one device. Each subscribes on its own. How many it can hold is its application's `connections.maxPerDevice`, 20 by default.
+
+On logout, the API tears down every connection of the device, then publishes `device_logout` to each transport queue it had a connection on, and each transport closes those connections.
 
 ---
 
@@ -83,6 +85,8 @@ process.once('SIGINT',  () => worker.close());
 
 While the database, the message queue or Redis is disconnected, the worker stops consuming. It resumes once all three are connected again.
 
+A worker that can't go on emits `error` with a `FatalErrorException` and stops consuming for good; without an `error` listener, the process exits. A websockets transport does when it can't get its slot back after the message queue reconnects.
+
 A message whose processing fails is retried or dead-lettered:
 
 - **Invalid data, an application or model type the worker doesn't know, or an event it doesn't handle** — dead-lettered at once.
@@ -96,7 +100,15 @@ When the broker doesn't confirm a message a worker publishes on to the next stag
 
 Messages dead-lettered from `writer` and `transport-manager` land in `writer.dlq` and `transport-manager.dlq`, created by the deployment bootstrap. Each keeps the newest `message_queue.deadLetterMaxLength` messages (100 by default), for `message_queue.deadLetterRetention` seconds (3 days by default); a transport's are dropped. Each one is logged with its queue, event and error. See [`nexxus-message-queue-lib`](../message_queue/README.md#failed-messages).
 
-`close()` deregisters from the Hub, stops the management server, stops consuming and gives the messages being processed up to 10 seconds to finish, then disconnects from the database, message queue and Redis. A message still running after that goes back to its queue. A websockets transport also deletes its slot queue and closes its WebSocket server.
+`close()` deregisters from the Hub, stops the management server, stops consuming and gives the messages being processed up to 10 seconds to finish, then disconnects from the database, message queue and Redis. A message still running after that goes back to its queue.
+
+A websockets transport's `close()`, in order:
+
+1. Stops accepting connections.
+2. Stops consuming, giving the messages being processed up to 10 seconds to finish.
+3. Closes every connection with code `1012`. Each one is torn down, its subscriptions removed. A connection still open after 3 seconds is cut off.
+4. Deletes its slot queue.
+5. Deregisters from the Hub, stops the management server, and disconnects from the database, message queue and Redis.
 
 ---
 
@@ -129,6 +141,7 @@ Every worker reads the `app` section of the config file. The `database`, `messag
 | `management.port`, `management.token` | yes | Port and bearer token of the management server. |
 | `hub.endpoint`, `hub.token` | no | Hub to register with. Without it the worker runs standalone. |
 | `port` | websockets transport only | Port of the WebSocket server. |
+| `heartbeatInterval` | no | Websockets transport: seconds between pings to each connection, 5 to 300, default 30. Keep it below the idle timeout of a load balancer in front of the transport. |
 
 No worker reads environment variables of its own.
 
@@ -153,18 +166,21 @@ No worker reads environment variables of its own.
 
 For each change, it collects:
 
-- every device with a subscription to a channel the change falls under, and
-- every device with a filtered subscription whose filter matches the changed record: the new record for a create, its filterable fields after an update, its filterable fields as they were before a delete.
+- every connection with a subscription to a channel the change falls under, and
+- every connection with a filtered subscription whose filter matches the changed record: the new record for a create, its filterable fields after an update, its filterable fields as they were before a delete.
 
-Devices are grouped by transport queue and by the channels they matched, and each group gets one `device_message`.
+Connections are grouped by transport queue and by the channels they matched, and each group gets one `device_message`, which lists each connection as `{ deviceId, connectionId }`.
 
 A stored filter that no longer compiles against the model's schema — after a field it names was removed, for example — is skipped with a warning; everyone else is still notified.
 
 ### Websockets transport
 
 - Each instance consumes its own queue, `websockets-transport_<slot>`. The slot is the lowest number the Hub doesn't list as taken. Without a Hub the slot is 0, and a second instance fails to start.
-- A connected device is recorded in Redis as online on that queue, which is where the Transport Manager sends its events. On disconnect it is marked offline.
-- Messages of 2 KB or more are compressed for clients that support `permessage-deflate`. The server answers pings and sends none.
+- A registered connection is recorded in Redis on that queue, which is where the Transport Manager sends its events. It starts with no subscriptions, so a client subscribes again after every reconnect. On disconnect it is torn down, its subscriptions removed; the device's other connections keep theirs.
+- A connection recorded on the instance's queue that the instance doesn't hold is dead: an instance that held the slot before crashed with it open. It is torn down the first time the instance meets it — when an event for it arrives, or when its device registers on this instance.
+- A registration that takes a device over its application's `connections.maxPerDevice` evicts the device's oldest connections, wherever they are. Each one is torn down, then closed with code `4003`: by this instance when it holds it, otherwise by the instance that does, which gets a `connection_evicted` message on its queue. Push connections, dead ones and those being torn down don't count. Two registrations of a device at the same moment can leave it over the cap until its next registration.
+- Messages of 2 KB or more are compressed for clients that support `permessage-deflate`. The server answers pings, and pings every connection every `heartbeatInterval` seconds; a connection that hasn't answered by the next ping is closed.
+- When its message-queue connection drops, the instance loses its slot queue with it. It closes every connection with code `1012`, and new ones with `1013`. Once the message queue is back, it declares the slot queue again and takes connections again. If the queue exists by then, another instance has taken the slot, and the worker emits `error`.
 
 ---
 
@@ -176,10 +192,11 @@ Every frame is JSON: `{ "event": "<name>", "data": { … } }`.
 
 | `event` | `data` | Reply |
 | --- | --- | --- |
-| `register` | `{ "token": "<access token>" }` | `register` with `{ "success": true }`, or `error` |
+| `register` | `{ "token": "<access token>", "previousConnectionId": "<id>" }` | `register` with `{ "success": true, "connectionId": "<id>" }`, or `error` |
 | `refresh_access_token` | `{ "token": "<new access token>" }` | `refresh_access_token` with `{ "success": true }`, or `error` |
 
-- **`register`** binds the connection to the device the access token names; the token comes from the API. If it fails, the connection stays open and `register` can be sent again. A second `register` on a registered connection is ignored.
+- **`register`** binds the connection to the device the access token names; the token comes from the API. The reply's `connectionId` names this connection: it goes in the `nxx-connection-id` header of `POST` and `DELETE /subscription`. If it fails, the connection stays open and `register` can be sent again. A second `register` on a registered connection is ignored.
+- **`previousConnectionId`** is optional: the `connectionId` of a connection that closed without the client asking, sent with the next `register`. That connection is torn down, with its subscriptions, before the new one opens. Only the device's own connections can be named, and naming one that is gone already does nothing. Naming one whose socket is still open can tear it down without closing the socket: it then gets no events, and the API answers `409` for it.
 - **`refresh_access_token`** moves a registered connection onto a new access token from `POST /auth/refresh`, without reconnecting. Send it before the current token expires. The new token must name the same device and application.
 - Any other `event` is ignored, without a reply.
 
@@ -209,14 +226,17 @@ Every frame is JSON: `{ "event": "<name>", "data": { … } }`.
 
 ### Connection lifecycle
 
-- Subscribe over HTTP with `POST /subscription` once the connection is registered; the API answers `409` for a device that isn't connected.
-- When the connection closes, the device's subscriptions are removed. After reconnecting, register and subscribe again.
-- Nothing is delivered past the access token's expiry: the next event closes the connection with code `4002`.
+- Subscribe over HTTP with `POST /subscription` once the connection is registered, with its `connectionId` in the `nxx-connection-id` header; the API answers `409` for a connection that isn't open.
+- When the connection closes, its subscriptions are removed. After reconnecting, register and subscribe again: the new connection has a new `connectionId`. After a close the client didn't ask for, send the old `connectionId` as `previousConnectionId`.
+- Nothing is delivered past the access token's expiry: the next event for the connection closes it with code `4002`. Each connection rests on its own access token.
 
 | Close code | Reason | Client |
 | --- | --- | --- |
-| `4001` | `logged_out` | The session was ended with `POST /auth/logout`. Don't reconnect with it. |
+| `4001` | `logged_out` | The session was ended with `POST /auth/logout`, which closes every connection of the device. Don't reconnect with it. |
 | `4002` | `token_expired` | Refresh the token, reconnect, and register again. |
+| `4003` | `evicted` | The device opened more connections than its application allows, and this was its oldest. Don't reconnect automatically: reconnecting evicts the device's next-oldest connection. |
+| `1012` | `service_restart` | The transport instance is shutting down, or has lost its message queue. Reconnect after a short random delay. |
+| `1013` | `try_again_later` | The transport instance can't take connections right now. Reconnect later, waiting longer after each attempt. |
 
 ---
 
@@ -224,11 +244,17 @@ Every frame is JSON: `{ "event": "<name>", "data": { … } }`.
 
 The built-in workers are subclasses of the exported base classes.
 
-- **`NexxusBaseWorker`** — set `queueName` and `nodeRole`, a static `schemaPath` for the worker's `app` config, and implement `processMessage(msg)`. `publish(queue, payload)` sends to another queue; `getOwnStats()` adds fields to `/stats`. Nothing built in publishes to a custom queue.
-- **`NexxusVolatileTransportWorker`** — for transports that hold a connection per device. Implement `initTransport()`, `sendToDevice(deviceId, data)` and `disconnectDevice(deviceId, reason)`. `authenticateDevice(token)`, `authenticateRefreshedToken(token, deviceId, appId)`, `registerDevice(deviceId)` and `unregisterDevice(deviceId)` cover token checks and the device's Redis state. Slot queues come with it.
-- **`NexxusPersistentTransportWorker`** — for push services (APNs, FCM, …). All instances share one queue. Implement `initTransport()` and `sendToDevice(deviceId, data)`. No push transport ships yet.
+- **`NexxusBaseWorker`** — set `queueName` and `nodeRole`, a static `schemaPath` for the worker's `app` config, and implement `processMessage(msg)`. `publish(queue, payload)` sends to another queue; `getOwnStats()` adds fields to `/stats`. Nothing built in publishes to a custom queue. `onServiceDown(name)` runs when the database (`db`), message queue (`mq`) or Redis (`redis`) disconnects; `beforeResume()` runs before consuming resumes, once all three are back, and rejecting from it is fatal.
+- **`NexxusVolatileTransportWorker`** — for transports that hold open connections. Implement `initTransport()`, `sendToConnection(deviceId, connectionId, data)`, `disconnectDevice(deviceId, reason)` (every connection of the device on this instance), `disconnectConnection(deviceId, connectionId, reason)` (one connection, registered or still registering), `stopAcceptingConnections()`, `disconnectAllDevices(reason)` and `holdsConnection(connectionId)`. `disconnectAllDevices` resolves once every connection has been torn down. `holdsConnection` counts a registering connection as held from before `registerConnection` is called.
+  - `authenticateDevice(token)` and `authenticateRefreshedToken(token, deviceId, appId)` check tokens; `authenticateDevice` returns the device's connections and its application's cap too.
+  - `registerConnection(deviceId, connectionId)` and `unregisterConnection(deviceId, connectionId)` open and tear down a connection in Redis.
+  - `releaseLostConnection(deviceId, connectionId)` tears down the connection a client says it lost.
+  - `tearDownDeadConnections(deviceId, connections)` at register, and `tearDownDeadConnection(deviceId, connectionId)` for an event to a connection the instance doesn't hold, tear down dead connections in the background.
+  - `evictConnectionsOverCap(registration, connectionId, lostConnectionId)`, once a connection has registered, evicts the device's oldest connections over the cap, in the background. A `connection_evicted` message is handled for you, through `disconnectConnection`.
+  - Slot queues come with it.
+- **`NexxusPersistentTransportWorker`** — for push services (APNs, FCM, …). All instances share one queue. Implement `initTransport()` and `sendToConnection(deviceId, connectionId, data)`; a push connection's id is its push token. `registerConnection(deviceId, connectionId)` and `unregisterConnection(deviceId, connectionId)` open and tear down one. No push transport ships yet.
 
-`processMessage` or `sendToDevice` handed an event it doesn't handle throws `NexxusWorkerUnsupportedEventException`, so the message is dead-lettered at once.
+`processMessage` or `sendToConnection` handed an event it doesn't handle rejects with `NexxusWorkerUnsupportedEventException`, so the message is dead-lettered at once.
 
 ---
 

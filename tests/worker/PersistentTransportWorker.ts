@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { NexxusPersistentTransportWorker, NexxusBaseWorker } from '@mayhem93/nexxus-worker-lib';
-import { NexxusDevice } from '@mayhem93/nexxus-redis';
+import { NexxusDevice, NexxusRedisSubscription } from '@mayhem93/nexxus-redis';
+import { SessionEndedException } from '@mayhem93/nexxus-core-lib';
 import { makeHarness, mqState, resetWorkerStatics, type WorkerHarness } from './harness';
 
 /**
@@ -13,7 +14,7 @@ class FakePersistent extends NexxusPersistentTransportWorker<any> {
   protected nodeRole = 'apns-transport';
 
   protected async initTransport(): Promise<void> {}
-  protected async sendToDevice(): Promise<void> {}
+  protected async sendToConnection(): Promise<void> {}
 
   public any(): any { return this; }
 }
@@ -39,12 +40,19 @@ const worker = (): FakePersistent => {
   return w;
 };
 
+/** A device with a live session unless told otherwise, as signing in leaves it. */
 const seedDevice = (id: string, over: Record<string, unknown> = {}) => {
   h.redisClient.store.set(NexxusDevice.getKey(id), {
     type: 'json',
-    value: { id, appId: 'app1', name: 'D', type: 'unknown', transport: 'tq', subscriptions: [], ...over },
+    value: {
+      id, appId: 'app1', name: 'D', connections: {},
+      session: { hash: 'h', expiresAt: Math.floor(Date.now() / 1000) + 3600 },
+      ...over,
+    },
   } as never);
 };
+
+const storedDevice = (id: string): any => (h.redisClient.store.get(NexxusDevice.getKey(id)) as { value: any }).value;
 
 describe('NexxusPersistentTransportWorker', () => {
   it('consumes from the shared (un-suffixed) queue — no slot picking', async () => {
@@ -57,30 +65,38 @@ describe('NexxusPersistentTransportWorker', () => {
     expect(mqState.createdQueues).toEqual([]); // no per-slot queue declared
   });
 
-  it('records a registered device as persistent and online', async () => {
+  it('opens a persistent connection on the shared queue, its id being the push token', async () => {
     const w = worker();
 
     seedDevice('d1');
 
-    await w.any().registerDevice('d1');
+    await w.any().registerConnection('d1', 'push-token-1');
 
-    const stored = (h.redisClient.store.get(NexxusDevice.getKey('d1')) as { value: any }).value;
-
-    expect(stored.type).toBe('persistent');
-    expect(stored.status).toBe('online');
-    expect(stored.transport).toBe('apns-transport');
+    expect(storedDevice('d1').connections['push-token-1']).toMatchObject({
+      transport: 'apns-transport', type: 'persistent', subscriptions: [],
+    });
   });
 
-  it('marks a device offline on unregister, preserving its transport association', async () => {
+  it('refuses a connection for a device whose session has ended', async () => {
     const w = worker();
 
-    seedDevice('d1', { transport: 'apns-transport' });
+    seedDevice('d1', { session: undefined });
 
-    await w.any().unregisterDevice('d1');
+    await expect(w.any().registerConnection('d1', 'push-token-1')).rejects.toThrow(SessionEndedException);
+    expect(storedDevice('d1').connections).toEqual({});
+  });
 
-    const stored = (h.redisClient.store.get(NexxusDevice.getKey('d1')) as { value: any }).value;
+  it('tears the connection of a token the push service gave up on down', async () => {
+    const w = worker();
+    const sub = new NexxusRedisSubscription({ appId: 'app1', model: 'runs' });
 
-    expect(stored.status).toBe('offline');
-    expect(stored.transport).toBe('apns-transport'); // deliberately NOT cleared
+    seedDevice('d1');
+    await w.any().registerConnection('d1', 'push-token-1');
+    await NexxusDevice.addSubscription('d1', 'push-token-1', sub);
+
+    await w.any().unregisterConnection('d1', 'push-token-1');
+
+    expect(storedDevice('d1').connections).toEqual({});
+    expect(await sub.getAllDevices()).toEqual(new Set());
   });
 });

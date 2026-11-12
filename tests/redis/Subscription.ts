@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { NexxusRedisSubscription, type NexxusSubscriptionChannel } from '@mayhem93/nexxus-redis';
 import { NexxusFilterQuery, NEXXUS_PREFIX_LC } from '@mayhem93/nexxus-core-lib';
 import { installFakeRedis } from './helpers';
@@ -112,31 +112,31 @@ describe('NexxusRedisSubscription device membership (stateful)', () => {
   it('adds devices and lists them, deduping identical members', async () => {
     const s = sub({ appId: 'a', model: 'runs' });
 
-    await s.addDevice('dev1', 'tq');
-    await s.addDevice('dev1', 'tq'); // duplicate — must not double-count the scope
-    await s.addDevice('dev2', 'tq');
+    await s.addConnection('dev1', 'tq', 'c1');
+    await s.addConnection('dev1', 'tq', 'c1'); // duplicate — must not double-count the scope
+    await s.addConnection('dev2', 'tq', 'c1');
 
-    expect(await s.getAllDevices()).toEqual(new Set(['dev1|tq', 'dev2|tq']));
+    expect(await s.getAllDevices()).toEqual(new Set(['dev1|tq|c1', 'dev2|tq|c1']));
     expect(await NexxusRedisSubscription.getActiveScopes('a', 'runs')).toEqual(new Set(['*']));
   });
 
   it('removes a device and reports whether it existed', async () => {
     const s = sub({ appId: 'a', model: 'runs' });
 
-    await s.addDevice('dev1', 'tq');
+    await s.addConnection('dev1', 'tq', 'c1');
 
-    expect(await s.removeDevice('dev1', 'tq')).toBe(true);
-    expect(await s.removeDevice('dev1', 'tq')).toBe(false); // already gone
+    expect(await s.removeConnection('dev1', 'tq', 'c1')).toBe(true);
+    expect(await s.removeConnection('dev1', 'tq', 'c1')).toBe(false); // already gone
     expect(await s.getAllDevices()).toEqual(new Set());
   });
 
   it('clears the scope registry once the last subscriber leaves (dedup keeps the count at 1)', async () => {
     const s = sub({ appId: 'a', model: 'runs' });
 
-    await s.addDevice('dev1', 'tq');
-    await s.addDevice('dev1', 'tq'); // dup: scope stays at 1, not 2
+    await s.addConnection('dev1', 'tq', 'c1');
+    await s.addConnection('dev1', 'tq', 'c1'); // dup: scope stays at 1, not 2
 
-    await s.removeDevice('dev1', 'tq');
+    await s.removeConnection('dev1', 'tq', 'c1');
 
     // If the dup had double-counted, the scope would still be at 1 here.
     expect(await NexxusRedisSubscription.getActiveScopes('a', 'runs')).toEqual(new Set());
@@ -150,9 +150,9 @@ describe('NexxusRedisSubscription device membership (stateful)', () => {
     const channel: NexxusSubscriptionChannel = { appId: 'a', model: 'runs', modelId: 'r1', filter: makeFilter() };
     const s = sub(channel);
 
-    await s.addDevice('dev1', 'tq');
+    await s.addConnection('dev1', 'tq', 'c1');
 
-    expect(await s.getAllDevices()).toEqual(new Set(['dev1|tq']));
+    expect(await s.getAllDevices()).toEqual(new Set(['dev1|tq|c1']));
     expect(Object.keys(await NexxusRedisSubscription.getAllFilters(channel))).toHaveLength(1);
   });
 
@@ -160,9 +160,9 @@ describe('NexxusRedisSubscription device membership (stateful)', () => {
     const channel: NexxusSubscriptionChannel = { appId: 'a', model: 'runs', userId: 'u1', filter: makeFilter() };
     const s = sub(channel);
 
-    await s.addDevice('dev2', 'tq');
+    await s.addConnection('dev2', 'tq', 'c1');
 
-    expect(await s.getAllDevices()).toEqual(new Set(['dev2|tq']));
+    expect(await s.getAllDevices()).toEqual(new Set(['dev2|tq|c1']));
     expect(Object.keys(await NexxusRedisSubscription.getAllFilters(channel))).toHaveLength(1);
   });
 
@@ -170,15 +170,159 @@ describe('NexxusRedisSubscription device membership (stateful)', () => {
     const channel: NexxusSubscriptionChannel = { appId: 'a', model: 'runs', filter: makeFilter() };
     const s = sub(channel);
 
-    await s.addDevice('dev1', 'tq');
+    await s.addConnection('dev1', 'tq', 'c1');
 
     const filters = await NexxusRedisSubscription.getAllFilters(channel);
 
     expect(Object.keys(filters)).toHaveLength(1);
     expect(Object.values(filters)[0]).toEqual({ status: 'active' });
 
-    await s.removeDevice('dev1', 'tq'); // last subscriber → filter registry entry dropped
+    await s.removeConnection('dev1', 'tq', 'c1'); // last subscriber → filter registry entry dropped
 
     expect(await NexxusRedisSubscription.getAllFilters(channel)).toEqual({});
+  });
+});
+
+/**
+ * What the Transport Manager reads before it reads routes: the scope counter,
+ * the partition index and, for a filtered subscription, the filter's
+ * definition. A route that exists has to be counted in each of them, or the
+ * Transport Manager never finds it.
+ */
+describe('NexxusRedisSubscription counts', () => {
+  let redis: FakeRedis;
+
+  beforeEach(() => { redis = installFakeRedis(); });
+
+  const filtered = (): NexxusRedisSubscription => sub({ appId: 'a', model: 'runs', modelId: 'r1', filter: makeFilter() });
+
+  const partitionOf = (s: NexxusRedisSubscription, deviceId: string): string =>
+    (s as unknown as { getDevicePartition(id: string): string }).getDevicePartition(deviceId);
+
+  /** A device id whose routes share `deviceId`'s partition. */
+  const partitionMate = (s: NexxusRedisSubscription, deviceId: string): string => {
+    for (let i = 0; ; i++) {
+      if (`mate${i}` !== deviceId && partitionOf(s, `mate${i}`) === partitionOf(s, deviceId)) {
+        return `mate${i}`;
+      }
+    }
+  };
+
+  /** Each count `deviceId`'s routes on `s` are kept under, as stored now; 0 when it is gone. */
+  const counts = async (s: NexxusRedisSubscription, deviceId: string) => {
+    const filterId = s.getKey().split(':filter:')[1]!;
+    const filters = await redis.hGetAll(`${NEXXUS_PREFIX_LC}:subscription-filters:a:runs:r1`);
+    const partitions = await redis.hGetAll(`${NEXXUS_PREFIX_LC}:subscription-partition-index:a:runs:r1:filter:${filterId}`);
+    const scopes = await redis.hGetAll(`${NEXXUS_PREFIX_LC}:subscription-scopes:a:runs`);
+
+    return {
+      scope: Number(scopes['id:r1'] ?? 0),
+      partition: Number(partitions[partitionOf(s, deviceId)] ?? 0),
+      filter: Number(filters[`count:${filterId}`] ?? 0),
+      defined: filters[filterId] !== undefined,
+    };
+  };
+
+  it('counts a route before adding it, and releases it only after removing it', async () => {
+    const s = filtered();
+    const sAdd = redis.sAdd.bind(redis);
+    const sRem = redis.sRem.bind(redis);
+    let atAdd: unknown;
+    let atRemove: unknown;
+
+    vi.spyOn(redis, 'sAdd').mockImplementation(async (key, member) => {
+      atAdd = await counts(s, 'dev1');
+
+      return sAdd(key, member);
+    });
+    vi.spyOn(redis, 'sRem').mockImplementation(async (key, member) => {
+      const removed = await sRem(key, member);
+
+      atRemove = await counts(s, 'dev1');
+
+      return removed;
+    });
+
+    await s.addConnection('dev1', 'tq', 'c1');
+    expect(atAdd).toEqual({ scope: 1, partition: 1, filter: 1, defined: true });
+
+    await s.removeConnection('dev1', 'tq', 'c1');
+    expect(atRemove).toEqual({ scope: 1, partition: 1, filter: 1, defined: true });
+    expect(await counts(s, 'dev1')).toEqual({ scope: 0, partition: 0, filter: 0, defined: false });
+  });
+
+  it('keeps a route counted when the last other route in its partition leaves as it is added', async () => {
+    const s = filtered();
+    const mate = partitionMate(s, 'dev1');
+    const sAdd = redis.sAdd.bind(redis);
+
+    await s.addConnection(mate, 'tq', 'c1');
+
+    // The other route leaves after this one is counted, before it is added.
+    vi.spyOn(redis, 'sAdd').mockImplementationOnce(async (key, member) => {
+      await s.removeConnection(mate, 'tq', 'c1');
+
+      return sAdd(key, member);
+    });
+
+    await s.addConnection('dev1', 'tq', 'c1');
+
+    expect(await s.getAllDevices()).toEqual(new Set([ 'dev1|tq|c1' ]));
+    expect(await counts(s, 'dev1')).toEqual({ scope: 1, partition: 1, filter: 1, defined: true });
+  });
+
+  it('keeps a filter definition when the last other route using it leaves as it is stored', async () => {
+    const s = filtered();
+    const hSet = redis.hSet.bind(redis);
+
+    await s.addConnection('dev2', 'tq', 'c1');
+
+    // The other route leaves just after this one stores the definition.
+    vi.spyOn(redis, 'hSet').mockImplementationOnce(async (...args: Parameters<FakeRedis['hSet']>) => {
+      const stored = await hSet(...args);
+
+      await s.removeConnection('dev2', 'tq', 'c1');
+
+      return stored;
+    });
+
+    await s.addConnection('dev1', 'tq', 'c1');
+
+    expect(await counts(s, 'dev1')).toEqual({ scope: 1, partition: 1, filter: 1, defined: true });
+  });
+
+  it('takes the counts back when the route already existed', async () => {
+    const s = filtered();
+
+    expect(await s.addConnection('dev1', 'tq', 'c1')).toBe(true);
+    expect(await s.addConnection('dev1', 'tq', 'c1')).toBe(false);
+    expect(await counts(s, 'dev1')).toEqual({ scope: 1, partition: 1, filter: 1, defined: true });
+  });
+
+  it('releases a route once when two callers remove it at the same moment', async () => {
+    const s = filtered();
+
+    await s.addConnection('dev1', 'tq', 'c1');
+    await s.addConnection(partitionMate(s, 'dev1'), 'tq', 'c1');
+
+    const removed = await Promise.all([ s.removeConnection('dev1', 'tq', 'c1'), s.removeConnection('dev1', 'tq', 'c1') ]);
+
+    expect(removed.sort()).toEqual([ false, true ]);
+    expect(await counts(s, 'dev1')).toEqual({ scope: 1, partition: 1, filter: 1, defined: true });
+  });
+
+  it('keeps a filter definition while a route uses it, and lists only definitions', async () => {
+    const s = filtered();
+
+    await s.addConnection('dev1', 'tq', 'c1');
+    await s.addConnection('dev2', 'tq', 'c1');
+    await s.removeConnection('dev1', 'tq', 'c1');
+
+    expect(await NexxusRedisSubscription.getAllFilters({ appId: 'a', model: 'runs', modelId: 'r1' }))
+      .toEqual({ [s.getKey().split(':filter:')[1]!]: { status: 'active' } });
+
+    await s.removeConnection('dev2', 'tq', 'c1');
+
+    expect(await redis.hGetAll(`${NEXXUS_PREFIX_LC}:subscription-filters:a:runs:r1`)).toEqual({});
   });
 });

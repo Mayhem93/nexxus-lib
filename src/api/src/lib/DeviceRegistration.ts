@@ -60,8 +60,7 @@ export class NexxusApiDeviceRegistration {
       id: randomUUID(),
       appId,
       userId,
-      name: name || NexxusApiDeviceRegistration.DEFAULT_DEVICE_NAME,
-      subscriptions: []
+      name: name || NexxusApiDeviceRegistration.DEFAULT_DEVICE_NAME
     });
   }
 

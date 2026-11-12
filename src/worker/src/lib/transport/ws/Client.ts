@@ -13,14 +13,18 @@ import {
   NexxusTransportModelDeletedPayload,
   NexxusTransportModelUpdatedPayload
 } from '@mayhem93/nexxus-core-lib';
+import { NexxusDevice } from '@mayhem93/nexxus-redis';
 
 import { WebSocket, Data as WebSocketData } from 'ws';
 
 import { EventEmitter } from 'node:events';
 
 export type ClientEventMap = {
-  /** Carries the raw token; the worker verifies it and resolves the device. */
-  register: [ token: string ];
+  /**
+   * Carries the raw token, which the worker verifies and resolves the device
+   * from, and the id of the connection the client lost, if it named one.
+   */
+  register: [ token: string, lostConnectionId: string | undefined ];
   /** Carries a fresh access token for an already-registered connection. */
   refresh_access_token: [ token: string ];
 }
@@ -39,6 +43,11 @@ export type NexxusWsClientMessage = {
      * its own token was issued to.
      */
     token: string;
+    /**
+     * After a close the client didn't ask for, the id of the connection it
+     * lost. That connection is torn down before this one opens.
+     */
+    previousConnectionId?: string;
   };
   refresh_access_token: {
     /**
@@ -55,7 +64,8 @@ export type NexxusWsClientMessage = {
 export type NexxusWsServerMessage = {
   register: {
     success: boolean;
-    message?: string;
+    /** This connection's id: what `nxx-connection-id` carries on subscribe and unsubscribe. */
+    connectionId: string;
   };
   refresh_access_token: {
     success: boolean;
@@ -94,13 +104,31 @@ export class NexxusWsClient extends EventEmitter<ClientEventMap> {
   private tokenExpiresAt?: number;
   /** True between emitting `register` and the worker confirming or failing it. */
   private registering: boolean = false;
+  /**
+   * Whether the client answered the last ping. Each ping clears it and the
+   * pong sets it again; browsers send that pong on their own.
+   */
+  private answeredPing: boolean = true;
+  /** Calls `heartbeat` every heartbeat interval, until the connection closes. */
+  private readonly heartbeatTimer: NodeJS.Timeout;
   public readonly id: string;
 
-  constructor(clientId: string, ws: WebSocket) {
+  constructor(clientId: string, ws: WebSocket, heartbeatIntervalMs: number) {
     super();
 
     this.socket = ws;
     this.id = clientId;
+
+    this.socket.on('pong', () => {
+      this.answeredPing = true;
+    });
+
+    this.heartbeatTimer = setInterval(() => this.heartbeat(), heartbeatIntervalMs);
+
+    // 'close' follows however the connection ends, so the timer never outlives it.
+    this.socket.on('close', () => {
+      clearInterval(this.heartbeatTimer);
+    });
 
     // Nothing in here may throw or reject: an unhandled rejection from a socket
     // listener takes the whole worker process down, and with it every other
@@ -169,7 +197,7 @@ export class NexxusWsClient extends EventEmitter<ClientEventMap> {
   }
 
   /**
-   * Called by the transport worker once the device's Redis state is written and
+   * Called by the transport worker once the connection is open in Redis and
    * the client is actually routable. Registration is only true from here on:
    * see the note in `registerDevice`.
    */
@@ -196,6 +224,16 @@ export class NexxusWsClient extends EventEmitter<ClientEventMap> {
     }
 
     this.socket.close(code, reason);
+  }
+
+  /** Whether the connection has finished closing. */
+  public isClosed(): boolean {
+    return this.socket.readyState === WebSocket.CLOSED;
+  }
+
+  /** End the connection at once, without waiting for the client to answer a close. */
+  public terminate(): void {
+    this.socket.terminate();
   }
 
   /**
@@ -257,6 +295,34 @@ export class NexxusWsClient extends EventEmitter<ClientEventMap> {
   }
 
   /**
+   * Ping the client, or end the connection when it never answered the previous
+   * ping. A device that disappears without closing, on a dropped network or a
+   * laptop gone to sleep, leaves a socket that looks open until a write to it
+   * fails. Terminating it emits 'close', so the worker tears the connection
+   * down the usual way.
+   */
+  private heartbeat(): void {
+    if (this.socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    if (!this.answeredPing) {
+      NexxusBaseWorker.logger.info(
+        `Client "${this.id}" stopped answering pings; ending its connection`,
+        { clientId: this.id, deviceId: this.deviceId },
+        'NexxusWsClient'
+      );
+
+      this.socket.terminate();
+
+      return;
+    }
+
+    this.answeredPing = false;
+    this.socket.ping();
+  }
+
+  /**
    * `ws.send()` on a socket that is no longer OPEN doesn't throw — it emits
    * 'error' on the socket, which is fatal to the process if nothing is
    * listening. Losing a race with a disconnect is normal and not worth that, so
@@ -276,7 +342,7 @@ export class NexxusWsClient extends EventEmitter<ClientEventMap> {
     this.socket.send(JSON.stringify(payload));
   }
 
-  private async registerDevice(msg: NexxusWsClientEvent<'register'>) {
+  private registerDevice(msg: NexxusWsClientEvent<'register'>) {
     if (this.isRegistered()) {
       NexxusBaseWorker.logger.warn(`Client ${this.id} is already registered with device ID: "${this.deviceId}"`, 'NexxusWsClient');
 
@@ -292,10 +358,15 @@ export class NexxusWsClient extends EventEmitter<ClientEventMap> {
       return ;
     }
 
-    const token = msg.data.token;
+    const { token, previousConnectionId } = msg.data;
 
     if (!token || typeof token !== 'string' || token.trim() === '') {
       throw new NexxusWsInvalidParametersException('Invalid or missing token.');
+    }
+
+    if (previousConnectionId !== undefined
+      && (typeof previousConnectionId !== 'string' || !NexxusDevice.isValidConnectionId(previousConnectionId))) {
+      throw new NexxusWsInvalidParametersException('Invalid previousConnectionId.');
     }
 
     this.registering = true;
@@ -309,7 +380,7 @@ export class NexxusWsClient extends EventEmitter<ClientEventMap> {
     // registration would leave this client believing it is registered while the
     // worker has no route to it — and every retry would be refused as "already
     // registered", stranding the device until it reconnects on its own.
-    this.emit('register', token);
+    this.emit('register', token, previousConnectionId);
   }
 
   /**

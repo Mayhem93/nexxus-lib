@@ -4,6 +4,12 @@
     "port": {
       "type": "number"
     },
+    "heartbeatInterval": {
+      "type": "integer",
+      "minimum": 5,
+      "maximum": 300,
+      "default": 30
+    },
     "logger": {
       "type": "string"
     },

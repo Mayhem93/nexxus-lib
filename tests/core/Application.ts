@@ -75,10 +75,19 @@ describe('NexxusApplication constructor', () => {
       .toThrow(/"transient" must be a boolean/);
   });
 
-  it('rejects a reserved field name in a model', () => {
+  it('rejects every reserved field name in a model, version included', () => {
+    for (const name of [ 'id', 'createdAt', 'updatedAt', 'appId', 'userId', 'type', 'version' ]) {
+      expect(() => new NexxusApplication(makeData({
+        schema: { runs: { fields: { [name]: { type: 'string' } } } },
+      }))).toThrow(new RegExp(`declares a field "${name}", which is a Nexxus-reserved name`));
+    }
+  });
+
+  /** System fields only live at the root of a model, so the names are free below it. */
+  it('allows a reserved name on a field nested in an object', () => {
     expect(() => new NexxusApplication(makeData({
-      schema: { runs: { fields: { userId: { type: 'string' } } } },
-    }))).toThrow(/Nexxus-reserved name/);
+      schema: { runs: { fields: { meta: { type: 'object', properties: { version: { type: 'int' } } } } } },
+    }))).not.toThrow();
   });
 
   it('requires a name', () => {
@@ -205,6 +214,34 @@ describe('NexxusApplication auth + acl', () => {
     expect(new NexxusApplication(withAuth()).hasAuthEnabled()).toBe(true);
     expect(new NexxusApplication(makeData()).hasAuthEnabled()).toBe(false);
     expect(new NexxusApplication(makeData()).getUserTypes()).toBeNull();
+  });
+});
+
+describe('NexxusApplication connections', () => {
+  it('lets a device hold 20 connections at once by default, auth or not', () => {
+    for (const data of [ makeData(), withAuth() ]) {
+      expect(new NexxusApplication(data).getMaxConnectionsPerDevice()).toBe(20);
+    }
+  });
+
+  it('keeps the cap an application declares', () => {
+    expect(new NexxusApplication(makeData({ connections: { maxPerDevice: 3 } })).getMaxConnectionsPerDevice()).toBe(3);
+  });
+
+  it('bounds connections.maxPerDevice to 1–100 whole connections, inclusive', () => {
+    for (const bad of [ 0, 101, 2.5, '20' ]) {
+      expect(() => new NexxusApplication(makeData({ connections: { maxPerDevice: bad } })))
+        .toThrow(/"connections.maxPerDevice" must be a whole number between 1 and 100/);
+    }
+
+    expect(new NexxusApplication(makeData({ connections: { maxPerDevice: 1 } })).getMaxConnectionsPerDevice()).toBe(1);
+    expect(new NexxusApplication(makeData({ connections: { maxPerDevice: 100 } })).getMaxConnectionsPerDevice()).toBe(100);
+  });
+
+  it('rejects a connections block that is not an object', () => {
+    for (const bad of [ 'nope', null ]) {
+      expect(() => new NexxusApplication(makeData({ connections: bad }))).toThrow(/"connections" must be an object/);
+    }
   });
 });
 
