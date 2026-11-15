@@ -2,6 +2,7 @@ import { NexxusException } from "@mayhem93/nexxus-core-lib";
 
 enum ApiExceptions {
   INVALID_PARAMETERS = "InvalidParametersException",
+  PAYLOAD_TOO_LARGE = "PayloadTooLargeException",
   NOT_FOUND = "NotFoundException",
   SERVER_ERROR = "ServerErrorException",
   SERVICE_UNAVAILABLE = "ServiceUnavailableException",
@@ -30,6 +31,15 @@ export class InvalidParametersException extends NexxusApiException {
 
   constructor(message: string) {
     super(ApiExceptions.INVALID_PARAMETERS, message);
+  }
+}
+
+/** A request body over the API's `maxBodySize`. */
+export class PayloadTooLargeException extends NexxusApiException {
+  public readonly statusCode = 413;
+
+  constructor(message: string) {
+    super(ApiExceptions.PAYLOAD_TOO_LARGE, message);
   }
 }
 

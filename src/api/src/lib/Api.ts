@@ -183,6 +183,8 @@ export type NexxusApiConfig = {
     sslKeyPath: string;
     sslCertPath: string;
   };
+  /** Largest request body, in bytes, the API reads; a larger one is answered `413`. */
+  maxBodySize?: number;
   /**
    * Auth at the deployment level is now just the list of strategy types this
    * API supports. Per-strategy config (clientID, clientSecret, etc.) and the
@@ -303,6 +305,8 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig, {}, NexxusApiS
   private appAuthStrategies: Map<string, NexxusAuthStrategy> = new Map();
   private static readonly loadedApps: Map<string, NexxusApplication> = new Map();
   private static loggerLabel: Readonly<string> = 'NxxApi';
+  /** `maxBodySize` when the config doesn't set it. */
+  private static readonly DEFAULT_MAX_BODY_SIZE = 65_536;
 
   /**
    * Per-service connection state. Kept up-to-date by the `'connect'`/
@@ -467,8 +471,10 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig, {}, NexxusApiS
         preload: true
       } : false
     }));
-    this.express.use(Express.json());
-    this.express.use(Express.urlencoded({ extended: true }));
+    const maxBodySize = this.config.maxBodySize ?? NexxusApi.DEFAULT_MAX_BODY_SIZE;
+
+    this.express.use(Express.json({ limit: maxBodySize }));
+    this.express.use(Express.urlencoded({ extended: true, limit: maxBodySize }));
 
     // Availability gate — runs AFTER helmet + body parsers so every 503
     // response still carries the standard security headers and any code

@@ -10,6 +10,7 @@ import {
   INexxusAppModel,
   UnknownApplicationException
 } from '@mayhem93/nexxus-core-lib';
+import { NexxusDatabaseItemsFailedException } from '@mayhem93/nexxus-database-lib';
 import { NexxusQueueMessage } from '@mayhem93/nexxus-message-queue-lib';
 import { NexxusModelFieldCache } from '@mayhem93/nexxus-redis';
 import {
@@ -75,15 +76,44 @@ export class NexxusWriterWorker extends NexxusBaseWorker<
           throw new UnknownApplicationException(`App not found for model_created: appId=${payload.data.appId}`);
         }
 
-        const appModel = new NexxusAppModel(payload.data, app.getSchema());
-
-        await NexxusWriterWorker.database.createItems([ appModel ]);
-
-        NexxusWriterWorker.logger.info(`Model created with ID: "${payload.data.id}" for appId: "${payload.data.appId}"`, {
+        let appModel = new NexxusAppModel(payload.data, app.getSchema());
+        const logContext = {
           appId: payload.data.appId,
           modelId: payload.data.id,
           modelType: payload.data.type
-        }, NexxusWriterWorker.loggerLabel);
+        };
+
+        try {
+          await NexxusWriterWorker.database.createItems([ appModel ]);
+
+          NexxusWriterWorker.logger.info(`Model created with ID: "${payload.data.id}" for appId: "${payload.data.appId}"`, logContext, NexxusWriterWorker.loggerLabel);
+        } catch (e) {
+          if (!(e instanceof NexxusDatabaseItemsFailedException && e.alreadyExists)) {
+            throw e;
+          }
+
+          // Already stored, by an earlier run of this same message (the API
+          // gives every new record its id) that stopped before the message was
+          // acknowledged: usually the message-queue connection dropped and the
+          // broker redelivered it, or the write's answer timed out and it was
+          // retried. That run may not have published, so the stored record is
+          // published now.
+          const stored = (await NexxusWriterWorker.database.getItems({
+            ids: [ payload.data.id as string ],
+            type: payload.data.type,
+            appId: payload.data.appId
+          })).get(payload.data.id as string);
+
+          if (!stored) {
+            NexxusWriterWorker.logger.info(`Model with ID: "${payload.data.id}" for appId: "${payload.data.appId}" was created by an earlier run and deleted since, nothing to notify`, logContext, NexxusWriterWorker.loggerLabel);
+
+            return;
+          }
+
+          appModel = stored;
+
+          NexxusWriterWorker.logger.info(`Model with ID: "${payload.data.id}" for appId: "${payload.data.appId}" was created by an earlier run; publishing the stored record`, logContext, NexxusWriterWorker.loggerLabel);
+        }
 
         await this.publish('transport-manager', {
           event: 'model_created',

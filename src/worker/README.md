@@ -142,6 +142,8 @@ Every worker reads the `app` section of the config file. The `database`, `messag
 | `hub.endpoint`, `hub.token` | no | Hub to register with. Without it the worker runs standalone. |
 | `port` | websockets transport only | Port of the WebSocket server. |
 | `heartbeatInterval` | no | Websockets transport: seconds between pings to each connection, 5 to 300, default 30. Keep it below the idle timeout of a load balancer in front of the transport. |
+| `maxMessageSize` | no | Websockets transport: largest message a client may send, in bytes after decompression, 16384 to 1048576, default 16384. |
+| `registerTimeout` | no | Websockets transport: seconds a connection gets to register, 5 to 300, default 30. |
 
 No worker reads environment variables of its own.
 
@@ -157,7 +159,7 @@ No worker reads environment variables of its own.
 
 ### Writer
 
-- **Create** — validates the record against the model's schema, stores it, and publishes `model_created`.
+- **Create** — validates the record against the model's schema, stores it, and publishes `model_created`. When the record is already stored, the same message is being processed again, usually after the message-queue connection dropped before the message was acknowledged. The Writer then publishes the record as stored, or nothing if it has been deleted since.
 - **Update** — validates each patch, adds one that sets `updatedAt`, and applies them. It publishes `model_updated` with the record's filterable fields as they are after the update. An update for a record that doesn't exist is dropped, with a warning.
 - **Delete** — removes the record and publishes `model_deleted`. A delete for a record that's already gone publishes nothing.
 - On applications with access control, it also keeps the Redis copy of the fields ACL conditions are checked against.
@@ -180,6 +182,7 @@ A stored filter that no longer compiles against the model's schema — after a f
 - A connection recorded on the instance's queue that the instance doesn't hold is dead: an instance that held the slot before crashed with it open. It is torn down the first time the instance meets it — when an event for it arrives, or when its device registers on this instance.
 - A registration that takes a device over its application's `connections.maxPerDevice` evicts the device's oldest connections, wherever they are. Each one is torn down, then closed with code `4003`: by this instance when it holds it, otherwise by the instance that does, which gets a `connection_evicted` message on its queue. Push connections, dead ones and those being torn down don't count. Two registrations of a device at the same moment can leave it over the cap until its next registration.
 - Messages of 2 KB or more are compressed for clients that support `permessage-deflate`. The server answers pings, and pings every connection every `heartbeatInterval` seconds; a connection that hasn't answered by the next ping is closed.
+- A connection that hasn't registered `registerTimeout` seconds after it opened is closed with code `4004`. A message from a client larger than `maxMessageSize` bytes, after decompression, closes its connection with code `1009`.
 - When its message-queue connection drops, the instance loses its slot queue with it. It closes every connection with code `1012`, and new ones with `1013`. Once the message queue is back, it declares the slot queue again and takes connections again. If the queue exists by then, another instance has taken the slot, and the worker emits `error`.
 
 ---
@@ -194,6 +197,8 @@ Every frame is JSON: `{ "event": "<name>", "data": { … } }`.
 | --- | --- | --- |
 | `register` | `{ "token": "<access token>", "previousConnectionId": "<id>" }` | `register` with `{ "success": true, "connectionId": "<id>" }`, or `error` |
 | `refresh_access_token` | `{ "token": "<new access token>" }` | `refresh_access_token` with `{ "success": true }`, or `error` |
+
+A frame can be at most `maxMessageSize` bytes after decompression, 16 KiB unless the transport is configured otherwise. A larger one closes the connection with code `1009`.
 
 - **`register`** binds the connection to the device the access token names; the token comes from the API. The reply's `connectionId` names this connection: it goes in the `nxx-connection-id` header of `POST` and `DELETE /subscription`. If it fails, the connection stays open and `register` can be sent again. A second `register` on a registered connection is ignored.
 - **`previousConnectionId`** is optional: the `connectionId` of a connection that closed without the client asking, sent with the next `register`. That connection is torn down, with its subscriptions, before the new one opens. Only the device's own connections can be named, and naming one that is gone already does nothing. Naming one whose socket is still open can tear it down without closing the socket: it then gets no events, and the API answers `409` for it.
@@ -226,6 +231,7 @@ Every frame is JSON: `{ "event": "<name>", "data": { … } }`.
 
 ### Connection lifecycle
 
+- Register within `registerTimeout` seconds of connecting, 30 unless the transport is configured otherwise, or the connection is closed with code `4004`.
 - Subscribe over HTTP with `POST /subscription` once the connection is registered, with its `connectionId` in the `nxx-connection-id` header; the API answers `409` for a connection that isn't open.
 - When the connection closes, its subscriptions are removed. After reconnecting, register and subscribe again: the new connection has a new `connectionId`. After a close the client didn't ask for, send the old `connectionId` as `previousConnectionId`.
 - Nothing is delivered past the access token's expiry: the next event for the connection closes it with code `4002`. Each connection rests on its own access token.
@@ -235,6 +241,8 @@ Every frame is JSON: `{ "event": "<name>", "data": { … } }`.
 | `4001` | `logged_out` | The session was ended with `POST /auth/logout`, which closes every connection of the device. Don't reconnect with it. |
 | `4002` | `token_expired` | Refresh the token, reconnect, and register again. |
 | `4003` | `evicted` | The device opened more connections than its application allows, and this was its oldest. Don't reconnect automatically: reconnecting evicts the device's next-oldest connection. |
+| `4004` | `register_timeout` | The connection didn't register in time. Reconnect once you have a token to register with. |
+| `1009` | | A frame was larger than the transport allows. Don't send it again. |
 | `1012` | `service_restart` | The transport instance is shutting down, or has lost its message queue. Reconnect after a short random delay. |
 | `1013` | `try_again_later` | The transport instance can't take connections right now. Reconnect later, waiting longer after each attempt. |
 

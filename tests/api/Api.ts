@@ -363,6 +363,52 @@ describe('NexxusApi.init', () => {
     await occupied.api.close();
   });
 
+  it('answers 413 for a body over maxBodySize, 64 KiB when it is not set', async () => {
+    const { api, request } = await makeApi();
+
+    await api.init();
+
+    const res = await request('/', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ note: 'x'.repeat(65_536) }),
+    });
+
+    expect(res.status).toBe(413);
+    expect(res.body).toEqual({ error: 'PayloadTooLargeException', message: 'Request body is larger than the limit of 65536 bytes' });
+  });
+
+  it('reads a body up to maxBodySize', async () => {
+    const { api, request } = await makeApi({ maxBodySize: 131_072 });
+
+    await api.init();
+
+    const res = await request('/', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ note: 'x'.repeat(65_536) }),
+    });
+
+    // Read, then refused as a route: nothing answers POST /.
+    expect(res.status).toBe(404);
+  });
+
+  it('answers 400 for a malformed JSON body', async () => {
+    const { api, request } = await makeApi();
+
+    await api.init();
+
+    const res = await request('/', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{"note":',
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('InvalidParametersException');
+    expect(res.body.message).toMatch(/^Invalid request body: /);
+  });
+
   it('404s an unknown path through the error middleware', async () => {
     const { api, request } = await makeApi();
 

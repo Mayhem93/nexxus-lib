@@ -939,6 +939,97 @@ describe('NexxusWebsocketsTransportWorker heartbeat', () => {
   });
 });
 
+describe('NexxusWebsocketsTransportWorker register timeout', () => {
+  // Fractions of a second: the config isn't schema-checked here, so a test
+  // doesn't have to wait the 5 s minimum.
+  it('closes a connection that has not registered in time with 4004', async () => {
+    const w = await build({ registerTimeout: 0.05 });
+    const client = await connect();
+
+    expect(await closeOf(client)).toEqual({ code: 4004, reason: 'register_timeout' });
+    await waitFor(() => w.wsToNexxusClientMap.size === 0, 'the connection to be dropped');
+    expect(logger.has('info', /didn't register within 0\.05 s; closing it/)).toBe(true);
+  });
+
+  it('leaves a connection that registered in time open', async () => {
+    const w = await build({ registerTimeout: 0.05 });
+    const client = await registered(w);
+
+    await new Promise(resolve => setTimeout(resolve, 150));
+
+    expect(client.readyState).toBe(WebSocket.OPEN);
+  });
+
+  it('waits registerTimeout seconds, 30 when it is not set', async () => {
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+
+    for (const config of [ { registerTimeout: 12 }, {} ]) {
+      const w = await build(config);
+
+      await connect();
+      await waitFor(() => w.wsToNexxusClientMap.size === 1, 'the connection to be tracked');
+    }
+
+    const delays = setTimeoutSpy.mock.calls.map(call => call[1]);
+
+    expect(delays).toContain(12_000);
+    expect(delays).toContain(30_000);
+  });
+
+  it('stops the timer once the connection closes', async () => {
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+    const w = await build();
+    const client = await connect();
+
+    await waitFor(() => w.wsToNexxusClientMap.size === 1, 'the connection to be tracked');
+
+    const cleared = clearTimeoutSpy.mock.calls.length;
+
+    client.close();
+    await waitFor(() => w.wsToNexxusClientMap.size === 0, 'the disconnect to be handled');
+
+    expect(clearTimeoutSpy.mock.calls.length).toBeGreaterThan(cleared);
+  });
+});
+
+describe('NexxusWebsocketsTransportWorker message size limit', () => {
+  /**
+   * The client compresses a message this repetitive to a few bytes, so this
+   * also shows the limit applies to the message as decompressed.
+   */
+  it('closes a connection whose message is over maxMessageSize with 1009', async () => {
+    await build();
+
+    const client = await connect();
+    const closed = closeOf(client);
+
+    client.send(register('x'.repeat(16_384)));
+
+    expect((await closed).code).toBe(1009);
+  });
+
+  it('reads a message up to the limit', async () => {
+    await build();
+
+    const client = await connect();
+    const reply = nextFrame(client);
+
+    // Refused as a token, not as a message.
+    client.send(register('x'.repeat(16_000)));
+
+    expect(await reply).toMatchObject({ event: 'error', data: { code: 'INVALID_PARAMETERS' } });
+    expect(client.readyState).toBe(WebSocket.OPEN);
+  });
+
+  it('takes maxMessageSize bytes, 16384 when it is not set', async () => {
+    for (const [ config, expected ] of [ [ { maxMessageSize: 65_536 }, 65_536 ], [ {}, 16_384 ] ] as const) {
+      const w = await build(config);
+
+      expect(w.server.options.maxPayload).toBe(expected);
+    }
+  });
+});
+
 describe('NexxusWebsocketsTransportWorker.getOwnStats', () => {
   it('counts registered, unregistered and total connections', async () => {
     const w = await build();

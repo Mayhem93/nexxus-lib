@@ -9,6 +9,8 @@ import {
   NexxusJsonPatch,
   type INexxusAppModel,
   InvalidJsonPatchException,
+  InvalidSchemaDataException,
+  NEXXUS_RESERVED_FIELD_NAMES,
   NexxusJsonPatchInternal,
   NexxusFilterQueryType
 } from '@mayhem93/nexxus-core-lib';
@@ -189,13 +191,30 @@ export default class ModelRoute extends NexxusApiBaseRoute {
       throw new ModelNotFoundException(`Model "${req.body.type}" not found in schema for the application "${appId}"`);
     }
 
+    // Nexxus sets its own fields on a new record; of them, a client sends only `type`.
+    const managedFields = Object.keys(req.body).filter(field => field !== 'type' && NEXXUS_RESERVED_FIELD_NAMES.has(field));
+
+    if (managedFields.length > 0) {
+      throw new InvalidParametersException(`Field(s) "${managedFields.join('", "')}" are set by Nexxus and can't be sent`);
+    }
+
     const aclConstraint = NexxusApiAcl.authorize(app, req, 'create', req.body.type);
 
-    const newModel = new NexxusAppModel({
-      ...req.body,
-      appId: appId,
-      userId: req.user?.id
-    }, appSchema);
+    let newModel: NexxusAppModel;
+
+    try {
+      newModel = new NexxusAppModel({
+        ...req.body,
+        appId: appId,
+        userId: req.user?.id
+      }, appSchema);
+    } catch (error) {
+      if (error instanceof InvalidSchemaDataException) {
+        throw new InvalidParametersException(`Invalid model data: ${error.message}`);
+      }
+
+      throw error;
+    }
 
     // The created object must itself satisfy the row condition (e.g. a role
     // that may only create objects it owns) — checked against the new data.

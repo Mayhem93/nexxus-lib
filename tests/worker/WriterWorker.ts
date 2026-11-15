@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { NexxusWriterWorker, NexxusBaseWorker, NexxusWorkerUnsupportedEventException } from '@mayhem93/nexxus-worker-lib';
 import { NexxusApplication, NexxusAppModel, UnknownApplicationException, UnknownModelTypeException } from '@mayhem93/nexxus-core-lib';
+import { NexxusDatabaseItemsFailedException } from '@mayhem93/nexxus-database-lib';
 import { NexxusModelFieldCache } from '@mayhem93/nexxus-redis';
 import { makeHarness, logger, dbState, mqState, resetWorkerStatics, type WorkerHarness } from './harness';
 
@@ -147,6 +148,56 @@ describe('NexxusWriterWorker model_created', () => {
     await expect(writer().processMessage(created({ owner: 'u1' }))).resolves.toBeUndefined();
     expect(dbState.created).toHaveLength(1); // the DB write still stands
     expect(logger.has('warning', /Field cache op failed \(create cache for "r1"\) — non-fatal: redis down/)).toBe(true);
+  });
+
+  /**
+   * The same message run a second time — redelivered after a dropped
+   * message-queue connection, or retried after a write whose answer timed out.
+   * The first run may have stopped before publishing, so the record as stored
+   * is published, with its stored version and fields.
+   */
+  it('publishes the stored record when an earlier run of the message already wrote it', async () => {
+    loadApp();
+    dbState.existingIds = [ 'r1' ];
+    dbState.stored = [ NexxusAppModel.fromStorage({ id: 'r1', appId: 'app1', type: 'runs', title: 'changed since', version: 2 } as never) ];
+
+    await writer().processMessage(created());
+
+    expect(dbState.created).toHaveLength(0);
+    expect(mqState.published).toHaveLength(1);
+    expect(mqState.published[0].message.event).toBe('model_created');
+    expect(mqState.published[0].message.data).toMatchObject({ id: 'r1', title: 'changed since', version: 2 });
+    expect(logger.has('info', /was created by an earlier run; publishing the stored record/)).toBe(true);
+  });
+
+  it('mirrors the stored record into the field cache when ACLs are on', async () => {
+    loadApp({ acl: true });
+    dbState.existingIds = [ 'r1' ];
+    dbState.stored = [ NexxusAppModel.fromStorage({ id: 'r1', appId: 'app1', type: 'runs', owner: 'u2', userId: 'u2', createdAt: 100 } as never) ];
+
+    await writer().processMessage(created({ owner: 'u1', userId: 'u1' }));
+
+    expect(cachedFields('r1')).toMatchObject({ id: 'r1', owner: 'u2', userId: 'u2', createdAt: 100 });
+  });
+
+  it('publishes nothing when the record an earlier run wrote has been deleted since', async () => {
+    loadApp();
+    dbState.existingIds = [ 'r1' ];
+
+    await expect(writer().processMessage(created())).resolves.toBeUndefined();
+
+    expect(mqState.published).toHaveLength(0);
+    expect(logger.has('info', /was created by an earlier run and deleted since, nothing to notify/)).toBe(true);
+  });
+
+  it('lets any other create failure through, to be retried or dead-lettered', async () => {
+    loadApp();
+    h.db.createItems = async () => {
+      throw new NexxusDatabaseItemsFailedException('createItems', [ { id: 'r1', reason: 'mapper_parsing_exception', terminal: true } ]);
+    };
+
+    await expect(writer().processMessage(created())).rejects.toThrow(NexxusDatabaseItemsFailedException);
+    expect(mqState.published).toHaveLength(0);
   });
 });
 

@@ -36,6 +36,10 @@ export type NexxusWebsocketsTransportWorkerConfig = NexxusVolatileTransportWorke
   port: number;
   /** Seconds between pings to each connection. */
   heartbeatInterval?: number;
+  /** Largest message, in bytes after decompression, a client may send. */
+  maxMessageSize?: number;
+  /** Seconds a connection gets to register before it is closed. */
+  registerTimeout?: number;
   /** Class name of the logger service (see `NexxusApiConfig.logger`). */
   logger: string;
   /** Class name of the database adapter (see `NexxusApiConfig.database`). */
@@ -90,8 +94,21 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
    */
   private static readonly TRY_AGAIN_LATER = { code: 1013, reason: 'try_again_later' } as const;
 
+  /**
+   * Code and reason a connection is closed with when it hasn't registered
+   * within `registerTimeout` seconds. The client reconnects once it has a
+   * token to register with.
+   */
+  private static readonly REGISTER_TIMEOUT = { code: 4004, reason: 'register_timeout' } as const;
+
   /** Seconds between pings when `heartbeatInterval` isn't configured. */
   private static readonly DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30;
+
+  /** Bytes when `maxMessageSize` isn't configured. */
+  private static readonly DEFAULT_MAX_MESSAGE_SIZE = 16_384;
+
+  /** Seconds when `registerTimeout` isn't configured. */
+  private static readonly DEFAULT_REGISTER_TIMEOUT_SECONDS = 30;
 
   /**
    * How long connections get to close cleanly when they are all ended at once,
@@ -130,6 +147,8 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
     this.server = new WebSocketServer({
       port: this.config.port,
       autoPong: true,
+      // Checked after decompression. A larger message closes its connection with 1009.
+      maxPayload: this.config.maxMessageSize ?? NexxusWebsocketsTransportWorker.DEFAULT_MAX_MESSAGE_SIZE,
       perMessageDeflate: {
         zlibDeflateOptions: {
           chunkSize: 1024,
@@ -387,6 +406,24 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
     this.wsToNexxusClientMap.set(ws, client);
     this.unregisteredClients.add(client);
 
+    // A connection that never registers holds a socket for nothing. One still
+    // registering when time is up is closed too; its teardown waits for the
+    // registration, as for any close.
+    const registerTimeout = this.config.registerTimeout ?? NexxusWebsocketsTransportWorker.DEFAULT_REGISTER_TIMEOUT_SECONDS;
+    const registerTimer = setTimeout(() => {
+      if (client.isRegistered()) {
+        return;
+      }
+
+      NexxusWebsocketsTransportWorker.logger.info(
+        `Client "${clientId}" didn't register within ${registerTimeout} s; closing it`,
+        { clientId },
+        NexxusWebsocketsTransportWorker.loggerLabel
+      );
+
+      client.close(NexxusWebsocketsTransportWorker.REGISTER_TIMEOUT.code, NexxusWebsocketsTransportWorker.REGISTER_TIMEOUT.reason);
+    }, registerTimeout * 1000);
+
     // The registration in flight on this connection, if any. The connection's
     // teardown waits for it: one that closed mid-registration would otherwise
     // find nothing to tear down, and the registration would then open the
@@ -447,6 +484,8 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
     });
 
     ws.on('close', (code: number, reason: Buffer) => {
+      clearTimeout(registerTimer);
+
       void registration.then(() => this.handleDisconnect(ws, code, reason));
     });
   }

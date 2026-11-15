@@ -18,6 +18,12 @@
     "message_queue": {
       "type": "string"
     },
+    "maxBodySize": {
+      "type": "integer",
+      "minimum": 65536,
+      "maximum": 1048576,
+      "default": 65536
+    },
     "ssl": {
       "type": "object",
       "properties": {

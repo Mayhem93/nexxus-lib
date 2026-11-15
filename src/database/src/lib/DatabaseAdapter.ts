@@ -113,7 +113,8 @@ export abstract class NexxusDatabaseAdapter<
    * retrying.
    *
    * `createItems` has nothing to miss: it resolves when every item was
-   * written, and throws otherwise.
+   * written, and throws otherwise. It never replaces a stored item: an id
+   * that is already stored fails, terminal and flagged `alreadyExists`.
    */
   public abstract createItems(collection: Array<AnyNexxusModel>): Promise<void>;
   public abstract getItems(options: NexxusDbGetOptions<'application'>): Promise<NexxusDbItemResults<NexxusApplication>>;

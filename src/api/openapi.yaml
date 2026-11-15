@@ -42,6 +42,12 @@ info:
       `session.refreshTokenExpiresIn` after the session was issued (30 days by
       default), or at `POST /auth/logout`.
 
+    ### Request bodies
+
+    A body larger than the deployment's limit (64 KiB unless configured) is
+    answered `413 PayloadTooLargeException`. A body that isn't valid JSON is
+    answered `400 InvalidParametersException`.
+
     ### Dates
 
     Every date is an integer UNIX timestamp in **seconds**.
@@ -1276,12 +1282,8 @@ components:
         `type`, plus the fields the application's schema declares for that type.
         Nothing else — an undeclared field is a `400`.
 
-        The framework-managed fields are not part of this body:
-
-        - `id`, `createdAt` and `updatedAt` are generated when absent.
-        - `appId` and `userId` are set by the server; values sent here are
-          overwritten.
-        - `version` is rejected.
+        `id`, `createdAt`, `updatedAt`, `version`, `appId` and `userId` are set
+        by the server. A body that contains any of them is a `400`.
       required: [ type ]
       properties:
         type:

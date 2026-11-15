@@ -1,6 +1,6 @@
 import { vi } from 'vitest';
 import { NexxusBaseLogger } from '@mayhem93/nexxus-core-lib';
-import { NexxusDatabaseAdapter, type NexxusDatabaseAdapterEvents } from '@mayhem93/nexxus-database-lib';
+import { NexxusDatabaseAdapter, NexxusDatabaseItemsFailedException, type NexxusDatabaseAdapterEvents } from '@mayhem93/nexxus-database-lib';
 import { NexxusMessageQueueAdapter, type NexxusMessageDelivery } from '@mayhem93/nexxus-message-queue-lib';
 import { NexxusRedis } from '@mayhem93/nexxus-redis';
 import type { NexxusApplication, NexxusAclRole, INexxusBaseServices } from '@mayhem93/nexxus-core-lib';
@@ -40,9 +40,14 @@ export const dbState: {
   deleteResult: any[];
   /** Ids no document is stored under: `updateItems` and `deleteItems` answer `null` for them. */
   missingIds: string[];
+  /** Ids already stored: `createItems` refuses them, flagged `alreadyExists`, as the adapter does. */
+  existingIds: string[];
+  /** What `getItems` finds, matched by `id`; any other requested id is `null`. */
+  stored: any[];
 } = {
   applications: [], aclRoles: {}, connectImpl: null, disconnectImpl: null, searchCalls: [],
   created: [], deleted: [], deleteOptions: [], updateCalls: [], updateResult: [], deleteResult: [], missingIds: [],
+  existingIds: [], stored: [],
 };
 
 export class FakeDb extends NexxusDatabaseAdapter<any, NexxusDatabaseAdapterEvents> {
@@ -58,11 +63,22 @@ export class FakeDb extends NexxusDatabaseAdapter<any, NexxusDatabaseAdapterEven
 
   public getBootstrapper(): never { return undefined as never; }
 
-  public async createItems(collection: any[]): Promise<void> { dbState.created.push(collection); }
+  /** As the adapter does: an id in `existingIds` is already stored, so the whole call is refused. */
+  public async createItems(collection: any[]): Promise<void> {
+    const existing: string[] = collection.map(item => item.getData().id).filter((id: string) => dbState.existingIds.includes(id));
 
-  /** Nothing is stored here: every requested id is reported missing. */
+    if (existing.length > 0) {
+      throw new NexxusDatabaseItemsFailedException('createItems', existing.map(id => ({
+        id, reason: 'version_conflict_engine_exception', terminal: true, alreadyExists: true,
+      })));
+    }
+
+    dbState.created.push(collection);
+  }
+
+  /** Finds what `stored` holds; every other requested id is reported missing. */
   public async getItems(options: any): Promise<any> {
-    return new Map(options.ids.map((id: string) => [ id, null ]));
+    return new Map(options.ids.map((id: string) => [ id, dbState.stored.find(m => m.getData().id === id) ?? null ]));
   }
 
   public async searchItems(options: any): Promise<any> {
@@ -250,6 +266,7 @@ export async function makeHarness(appConfigOverrides: Record<string, unknown> = 
   Object.assign(dbState, {
     applications: [], aclRoles: {}, connectImpl: null, disconnectImpl: null, searchCalls: [],
     created: [], deleted: [], deleteOptions: [], updateCalls: [], updateResult: [], deleteResult: [], missingIds: [],
+    existingIds: [], stored: [],
   });
   Object.assign(mqState, {
     connectImpl: null, consumed: [], published: [], queueExistsResult: false,

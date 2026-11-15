@@ -122,6 +122,7 @@ The API reads the `app` section of the config file. The `database`, `message_que
 | `database` | yes | Database adapter: `NexxusElasticsearchDb`, or an npm package name. |
 | `message_queue` | yes | Message-queue adapter: `NexxusRabbitMq`, or an npm package name. |
 | `ssl.sslKeyPath`, `ssl.sslCertPath` | no | PEM key and certificate. When set, the API serves HTTPS only and sends `Strict-Transport-Security`. |
+| `maxBodySize` | no | Largest request body in bytes, 65536–1048576. Default `65536`. |
 | `auth.availableStrategies` | no | Strategies this deployment offers: `local`, `google`, or npm package names. Applications can only enable strategies listed here. |
 | `management.port`, `management.token` | yes | Port and bearer token of the management server. |
 | `hub.endpoint`, `hub.token` | no | Hub to register with. Without it the API runs standalone. |
@@ -188,6 +189,8 @@ Every error has the same body, with the HTTP status set to match:
 ```json
 { "error": "AccessDeniedException", "message": "Access denied" }
 ```
+
+A body larger than `app.maxBodySize` is answered `413 PayloadTooLargeException`, and a body that isn't valid JSON `400 InvalidParametersException`.
 
 While the database, the message queue or Redis is disconnected, every request is answered `503 ServiceUnavailableException`. Requests are served again as soon as it reconnects.
 
