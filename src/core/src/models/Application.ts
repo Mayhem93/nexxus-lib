@@ -128,6 +128,17 @@ export interface NexxusApplicationConnectionsConfig {
   maxPerDevice?: number;
 }
 
+/**
+ * Per-application rate limiting of API requests. A field left out takes the
+ * API deployment's value, so the constructor fills in no defaults.
+ */
+export interface NexxusApplicationRateLimitConfig {
+  /** Whether the API limits this application's requests. */
+  enabled?: boolean;
+  /** Multiplies the base limit of every limited route. 1–100. */
+  factor?: number;
+}
+
 export type INexxusApplication =
   & INexxusBaseModel<'application'>
   & InferModel<typeof NEXXUS_BUILTIN_MODEL_SCHEMAS.application>
@@ -136,6 +147,7 @@ export type INexxusApplication =
     auth?: NexxusApplicationAuthConfig;
     session?: NexxusApplicationSessionConfig;
     connections?: NexxusApplicationConnectionsConfig;
+    rateLimit?: NexxusApplicationRateLimitConfig;
     //defaults to 10 inside the class constructor
     defaultLimit?: number
     //defaults to 100 inside the class constructor. TODO: make this configurable in the Consumer config
@@ -151,6 +163,12 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
 
   /** How many connections a device can hold open at once when the application declares no cap. */
   private static readonly DEFAULT_MAX_CONNECTIONS_PER_DEVICE = 20;
+
+  /** Smallest `rateLimit.factor` an application can set. */
+  private static readonly MIN_RATE_LIMIT_FACTOR = 1;
+
+  /** Largest `rateLimit.factor` an application can set. */
+  private static readonly MAX_RATE_LIMIT_FACTOR = 100;
 
   /**
    * ACL role managers for this app, keyed by role name. Populated at boot by
@@ -275,6 +293,27 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
 
     this.data.connections = { maxPerDevice };
 
+    if (data.rateLimit !== undefined) {
+      if (typeof data.rateLimit !== 'object' || data.rateLimit === null) {
+        throw new Error('Application "rateLimit" must be an object if provided');
+      }
+
+      const { enabled, factor } = data.rateLimit;
+
+      if (enabled !== undefined && typeof enabled !== 'boolean') {
+        throw new Error('Application "rateLimit.enabled" must be a boolean if provided');
+      }
+
+      if (factor !== undefined) {
+        NexxusApplication.assertNumber(
+          'rateLimit.factor', factor, NexxusApplication.MIN_RATE_LIMIT_FACTOR, NexxusApplication.MAX_RATE_LIMIT_FACTOR
+        );
+      }
+
+      // No defaults: a field left out takes the API deployment's value.
+      this.data.rateLimit = { enabled, factor };
+    }
+
     if (data.auth) {
       // Per-app auth block. Per-strategy config shapes are NOT validated here —
       // each strategy's own JSON Schema handles that when the strategy is
@@ -373,10 +412,25 @@ export class NexxusApplication extends NexxusBuiltinModel<INexxusApplication> {
     return this.data.connections!.maxPerDevice!;
   }
 
+  /**
+   * This application's own rate-limit settings. A field it left out is
+   * undefined here and takes the API deployment's value.
+   */
+  public getRateLimit(): Readonly<NexxusApplicationRateLimitConfig> {
+    return this.data.rateLimit ?? {};
+  }
+
   /** Throws unless `value` is a whole number from `min` to `max`; `unit`, if given, names what it counts. */
   private static assertWholeNumber(field: string, value: unknown, min: number, max: number, unit?: string): void {
     if (typeof value !== 'number' || !Number.isInteger(value) || value < min || value > max) {
       throw new Error(`Application "${field}" must be a whole number${unit ? ` of ${unit}` : ''} between ${min} and ${max}`);
+    }
+  }
+
+  /** Throws unless `value` is a number from `min` to `max`, fractions included. */
+  private static assertNumber(field: string, value: unknown, min: number, max: number): void {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max) {
+      throw new Error(`Application "${field}" must be a number between ${min} and ${max}`);
     }
   }
 

@@ -90,6 +90,7 @@ const total = await db.countItems({ type: 'task', appId: 'app-123' });
 - An item that fails for any other reason makes the call throw a `NexxusDatabaseItemsFailedException`, listing each failed id and why in `failures`.
 - That exception is `terminal` when the database refused the data itself, so retrying can't help; otherwise it's worth retrying. A queue consumer dead-letters a terminal failure at once and retries the rest.
 - `createItems` has nothing to miss: it resolves when every item is written, and throws the same exception otherwise.
+- `createItems` never replaces a stored item. An id that is already stored fails, terminal, with `alreadyExists` set on its entry in `failures` and, when every failure is one, on the exception.
 
 ---
 
@@ -175,7 +176,7 @@ To add support for a new store, ship a package that:
 1. **Extends `NexxusDatabaseAdapter<Config, Events, Stats>`** and sets the static config hooks it inherits from `NexxusBaseService` — `configRootKey` is already `'database'`; you provide `schemaPath` (a JSON schema for your config) and any `envVars` / `cliArgs` specs.
 2. **Implements the operations** in the interface table above. Remember the inputs are framework objects: `createItems` receives model instances (`getData()` to read them), `updateItems` receives `NexxusJsonPatch` instances (`get()` after `validate()`), `deleteItems` receives `NexxusBaseModel` instances.
 3. **Lowers FilterQuery and JsonPatch** to native queries/updates in `searchItems`/`buildQuery` and `updateItems` respectively.
-4. **Reports every requested id** as described in [Results and failures](#results-and-failures). A store that doesn't report misses — a SQL `WHERE id IN (…)` — gets them by comparing what came back with the ids it was given. A store that can't return a deleted row (no `DELETE … RETURNING`) reads `returnFields` first, and only when they're asked for.
+4. **Reports every requested id** as described in [Results and failures](#results-and-failures). A store that doesn't report misses — a SQL `WHERE id IN (…)` — gets them by comparing what came back with the ids it was given. A store that can't return a deleted row (no `DELETE … RETURNING`) reads `returnFields` first, and only when they're asked for. `createItems` inserts and never replaces: an id that's already stored is a failure flagged `alreadyExists`, the way a SQL `INSERT` fails on an existing primary key.
 5. **Drives the lifecycle events** — resolve `connect()` on first successful connection and keep retrying rather than failing fast; emit `disconnect` when the connection drops and `connect` when it returns. The API/worker gate request availability on these, so getting them right matters more than the CRUD.
 6. **Preserves the `version` field** — it's a per-write counter the client uses for gap detection. Assign it on every write, and return it with every app model read back, from `getItems` and `searchItems` alike, the way ES surfaces `_version`; a store without a native document version needs its own monotonic counter (see the write-concurrency notes in core).
 7. **Provides a `NexxusDatabaseBootstrapper` subclass** via `getBootstrapper()` for deployment/app provisioning.

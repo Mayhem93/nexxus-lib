@@ -16,6 +16,8 @@ export type NexxusDatabaseItemFailure = {
   reason: string;
   /** Whether the database would fail it the same way again: it refused the data itself. */
   terminal: boolean;
+  /** Set when `createItems` refused the item because one with its id is already stored. */
+  alreadyExists?: boolean;
 };
 
 /**
@@ -24,6 +26,8 @@ export type NexxusDatabaseItemFailure = {
  */
 export class NexxusDatabaseItemsFailedException extends NexxusDatabaseException {
   public readonly terminal: boolean;
+  /** Whether every failed item is one `createItems` refused because its id is already stored. */
+  public readonly alreadyExists: boolean;
   public readonly failures: ReadonlyArray<NexxusDatabaseItemFailure>;
 
   constructor(operation: string, failures: Array<NexxusDatabaseItemFailure>) {
@@ -34,5 +38,6 @@ export class NexxusDatabaseItemsFailedException extends NexxusDatabaseException 
 
     this.failures = failures;
     this.terminal = failures.length > 0 && failures.every(f => f.terminal);
+    this.alreadyExists = failures.length > 0 && failures.every(f => f.alreadyExists === true);
   }
 }

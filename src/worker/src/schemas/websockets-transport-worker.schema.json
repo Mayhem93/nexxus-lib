@@ -10,6 +10,18 @@
       "maximum": 300,
       "default": 30
     },
+    "maxMessageSize": {
+      "type": "integer",
+      "minimum": 16384,
+      "maximum": 1048576,
+      "default": 16384
+    },
+    "registerTimeout": {
+      "type": "integer",
+      "minimum": 5,
+      "maximum": 300,
+      "default": 30
+    },
     "logger": {
       "type": "string"
     },

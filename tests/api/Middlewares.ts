@@ -399,6 +399,44 @@ describe('ErrorMiddleware', () => {
    * should. `AuthMiddleware` translating core's token errors is exactly this
    * being done properly.
    */
+  /**
+   * The body parsers refuse a body with an HTTP error of their own — not a
+   * Nexxus exception — whose `type` names what was wrong; one the client caused
+   * carries `expose`.
+   */
+  it('answers a body over the size limit with a 413', async () => {
+    toThrow = Object.assign(new Error('request entity too large'), {
+      type: 'entity.too.large', status: 413, statusCode: 413, expose: true, limit: 65536,
+    });
+
+    const res = await server.request('/throw');
+
+    expect(res.status).toBe(413);
+    expect(res.body).toEqual({ error: 'PayloadTooLargeException', message: 'Request body is larger than the limit of 65536 bytes' });
+  });
+
+  it('answers a malformed body with a 400', async () => {
+    toThrow = Object.assign(new Error('Unexpected end of JSON input'), {
+      type: 'entity.parse.failed', status: 400, statusCode: 400, expose: true,
+    });
+
+    const res = await server.request('/throw');
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: 'InvalidParametersException', message: 'Invalid request body: Unexpected end of JSON input' });
+  });
+
+  it('keeps a body parser failure the client did not cause a generic 500', async () => {
+    toThrow = Object.assign(new Error('stream is not readable'), {
+      type: 'stream.not.readable', status: 500, statusCode: 500, expose: false,
+    });
+
+    const res = await server.request('/throw');
+
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ error: 'ServerErrorException', message: 'An unexpected server error occurred.' });
+  });
+
   it('falls back to 500 for a core exception, passing its message through', async () => {
     toThrow = new InvalidTokenException('jwt malformed');
 

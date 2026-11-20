@@ -104,19 +104,19 @@ describe('NexxusElasticsearchDb.createItems', () => {
 
     const req = state.calls.bulk[0];
 
-    expect(req.operations[0]).toEqual({ index: { _index: 'nxx-application', _id: 'app1' } });
+    expect(req.operations[0]).toEqual({ create: { _index: 'nxx-application', _id: 'app1' } });
     expect(req.refresh).toBe('wait_for');
   });
 
   it('routes an app model to its per-app index with refresh:false and back-fills the version', async () => {
     const model = appModel();
 
-    state.bulkResult = { errors: false, items: [{ index: { _version: 7 } }] };
+    state.bulkResult = { errors: false, items: [{ create: { _version: 7 } }] };
     await db().createItems([model]);
 
     const req = state.calls.bulk[0];
 
-    expect(req.operations[0]).toEqual({ index: { _index: 'nxx-app-app1-runs', _id: 'r1' } });
+    expect(req.operations[0]).toEqual({ create: { _index: 'nxx-app-app1-runs', _id: 'r1' } });
     expect(req.refresh).toBe(false);
     expect((model.getData() as { version?: number }).version).toBe(7);
   });
@@ -126,8 +126,27 @@ describe('NexxusElasticsearchDb.createItems', () => {
 
     const ops = state.calls.bulk[0].operations;
 
-    expect(ops[0].index._index).toBe('nxx-app-app1-user');
-    expect(ops[2].index._index).toBe('nxx-setting');
+    expect(ops[0].create._index).toBe('nxx-app-app1-user');
+    expect(ops[2].create._index).toBe('nxx-setting');
+  });
+
+  /**
+   * `create` rather than `index`: Elasticsearch answers 409 for an id it
+   * already stores instead of replacing the document. Retrying can't change
+   * that, so the failure is terminal.
+   */
+  it('refuses an id that is already stored, terminal and flagged alreadyExists', async () => {
+    state.bulkResult = {
+      errors: true,
+      items: [{ create: { status: 409, error: { type: 'version_conflict_engine_exception', reason: '[pipeline]: version conflict, document already exists (current version [1])' } } }],
+    };
+
+    const err = await db().createItems([setting()]).catch((e: unknown) => e) as NexxusDatabaseItemsFailedException;
+
+    expect(err).toBeInstanceOf(NexxusDatabaseItemsFailedException);
+    expect(err.alreadyExists).toBe(true);
+    expect(err.terminal).toBe(true);
+    expect(err.failures[0]).toMatchObject({ id: 'pipeline', alreadyExists: true, terminal: true });
   });
 
   it('throws on an unsupported model type', async () => {
@@ -139,7 +158,7 @@ describe('NexxusElasticsearchDb.createItems', () => {
   it('throws for an item it could not write — terminal when the data itself was refused', async () => {
     state.bulkResult = {
       errors: true,
-      items: [{ index: { status: 400, error: { type: 'mapper_parsing_exception', reason: 'failed to parse field [count]' } } }],
+      items: [{ create: { status: 400, error: { type: 'mapper_parsing_exception', reason: 'failed to parse field [count]' } } }],
     };
 
     const err = await db().createItems([application()]).catch((e: unknown) => e) as NexxusDatabaseItemsFailedException;
@@ -147,12 +166,13 @@ describe('NexxusElasticsearchDb.createItems', () => {
     expect(err).toBeInstanceOf(NexxusDatabaseItemsFailedException);
     expect(err.message).toBe('createItems failed for "app1" (mapper_parsing_exception: failed to parse field [count])');
     expect(err.terminal).toBe(true);
+    expect(err.alreadyExists).toBe(false);
   });
 
   it('is not terminal when the database may take the same data later', async () => {
     state.bulkResult = {
       errors: true,
-      items: [{ index: { status: 429, error: { type: 'cluster_block_exception', reason: 'index has read-only-allow-delete block' } } }],
+      items: [{ create: { status: 429, error: { type: 'cluster_block_exception', reason: 'index has read-only-allow-delete block' } } }],
     };
 
     const err = await db().createItems([application()]).catch((e: unknown) => e) as NexxusDatabaseItemsFailedException;

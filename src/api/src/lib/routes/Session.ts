@@ -7,6 +7,7 @@ import {
 import { RequiredHeadersMiddleware, AppExistsMiddleware } from '../middlewares';
 import { InvalidParametersException } from '../Exceptions';
 import { NexxusApiSession } from '../Session';
+import { NexxusApiRateLimit } from '../RateLimit';
 
 import type { Router, RequestHandler } from 'express';
 
@@ -44,8 +45,8 @@ export default class SessionRoute extends NexxusApiBaseRoute {
       AppExistsMiddleware() as RequestHandler
     ];
 
-    this.router.post('/refresh', ...guards, this.refresh.bind(this) as RequestHandler);
-    this.router.post('/logout', ...guards, this.logout.bind(this) as RequestHandler);
+    this.router.post('/refresh', ...guards, NexxusApiRateLimit.limiter('POST /auth/refresh'), this.refresh.bind(this) as RequestHandler);
+    this.router.post('/logout', ...guards, NexxusApiRateLimit.limiter('POST /auth/logout'), this.logout.bind(this) as RequestHandler);
   }
 
   private async refresh(req: SessionRequest, res: NexxusApiResponse): Promise<void> {

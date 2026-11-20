@@ -142,7 +142,34 @@ describe('POST /model — create', () => {
 
     const res = await send('POST', '/model', { type: 'runs', undeclared: 'x' });
 
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('InvalidParametersException');
+    expect(mqState.published).toHaveLength(0);
+  });
+
+  it('rejects a value of the wrong type', async () => {
+    await serve(makeApp({ schema: SCHEMA }));
+
+    const res = await send('POST', '/model', { type: 'runs', distance: 'far' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('InvalidParametersException');
+    expect(mqState.published).toHaveLength(0);
+  });
+
+  /**
+   * Nexxus sets its own fields on a new record — the id, the timestamps, the
+   * version, the application and the owner — so a body naming any of them is
+   * refused rather than having it overwritten.
+   */
+  it.each([ 'id', 'createdAt', 'updatedAt', 'version', 'appId', 'userId' ])('rejects a body that sets "%s"', async field => {
+    await serve(makeAuthApp({ schema: SCHEMA }));
+
+    const res = await send('POST', '/model', { type: 'runs', note: 'x', [field]: 'v' }, as());
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('InvalidParametersException');
+    expect(res.body.message).toContain(`"${field}"`);
     expect(mqState.published).toHaveLength(0);
   });
 
@@ -156,17 +183,17 @@ describe('POST /model — create', () => {
   });
 
   /**
-   * `userId` is applied AFTER the body is spread, so a client-supplied one is
-   * overwritten rather than honoured. Ownership can't be forged at creation —
+   * Ownership comes from the token alone: a body naming an owner is refused,
    * which is also why the row check below always passes for a role that may
    * only create what it owns.
    */
-  it('stamps ownership from the token, ignoring a client-supplied userId', async () => {
+  it('refuses a client-supplied userId rather than taking it as the owner', async () => {
     await serve(makeAuthApp({ schema: SCHEMA }));
 
-    await send('POST', '/model', { type: 'runs', note: 'x', userId: 'someone-else' }, as());
+    const res = await send('POST', '/model', { type: 'runs', note: 'x', userId: 'someone-else' }, as());
 
-    expect(mqState.published[0]!.message.data.userId).toBe('u1');
+    expect(res.status).toBe(400);
+    expect(mqState.published).toHaveLength(0);
   });
 
   it('row-checks the object it is about to create', async () => {

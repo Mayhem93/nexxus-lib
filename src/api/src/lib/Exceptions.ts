@@ -2,12 +2,15 @@ import { NexxusException } from "@mayhem93/nexxus-core-lib";
 
 enum ApiExceptions {
   INVALID_PARAMETERS = "InvalidParametersException",
+  PAYLOAD_TOO_LARGE = "PayloadTooLargeException",
+  TOO_MANY_REQUESTS = "TooManyRequestsException",
   NOT_FOUND = "NotFoundException",
   SERVER_ERROR = "ServerErrorException",
   SERVICE_UNAVAILABLE = "ServiceUnavailableException",
   APPLICATION_NOT_FOUND = "ApplicationNotFoundException",
   MODEL_NOT_FOUND = "ModelNotFoundException",
   ACCESS_DENIED = "AccessDeniedException",
+  ORIGIN_NOT_ALLOWED = "OriginNotAllowedException",
   DEVICE_NOT_CONNECTED = "DeviceNotConnectedException",
   INVALID_AUTH_METHOD = "InvalidAuthMethodException",
   NO_AUTH_PRESENT = "NoAuthPresentException",
@@ -30,6 +33,24 @@ export class InvalidParametersException extends NexxusApiException {
 
   constructor(message: string) {
     super(ApiExceptions.INVALID_PARAMETERS, message);
+  }
+}
+
+/** A request body over the API's `maxBodySize`. */
+export class PayloadTooLargeException extends NexxusApiException {
+  public readonly statusCode = 413;
+
+  constructor(message: string) {
+    super(ApiExceptions.PAYLOAD_TOO_LARGE, message);
+  }
+}
+
+/** A request over its route's rate limit. */
+export class TooManyRequestsException extends NexxusApiException {
+  public readonly statusCode = 429;
+
+  constructor(message: string) {
+    super(ApiExceptions.TOO_MANY_REQUESTS, message);
   }
 }
 
@@ -88,6 +109,15 @@ export class AccessDeniedException extends NexxusApiException {
 
   constructor(message: string = 'Access denied') {
     super(ApiExceptions.ACCESS_DENIED, message);
+  }
+}
+
+/** A browser's preflight from an origin the deployment's `cors.origins` doesn't list. */
+export class OriginNotAllowedException extends NexxusApiException {
+  public readonly statusCode = 403;
+
+  constructor(message: string) {
+    super(ApiExceptions.ORIGIN_NOT_ALLOWED, message);
   }
 }
 

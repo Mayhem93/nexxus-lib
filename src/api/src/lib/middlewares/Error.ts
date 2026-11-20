@@ -1,4 +1,10 @@
-import { NexxusApiException, ServerErrorException, ServiceUnavailableException } from '../Exceptions';
+import {
+  NexxusApiException,
+  InvalidParametersException,
+  PayloadTooLargeException,
+  ServerErrorException,
+  ServiceUnavailableException
+} from '../Exceptions';
 import { NexxusApi } from '../Api';
 import { FatalErrorException, NexxusException } from '@mayhem93/nexxus-core-lib';
 import { NexxusDatabaseException } from '@mayhem93/nexxus-database-lib';
@@ -9,6 +15,15 @@ import { Request, Response, NextFunction } from 'express';
 export default async (err: Error | NexxusApiException, _req: Request, res: Response, _next: NextFunction) : Promise<void> => {
   // What the client is told may be a generic stand-in; the log gets what happened.
   const original = err;
+  // The body parsers refuse a request body with an HTTP error of their own: one
+  // the client caused carries `expose`, and its `type` names what was wrong.
+  const bodyError = err as Error & { type?: unknown; expose?: unknown; limit?: unknown };
+
+  if (bodyError.type === 'entity.too.large') {
+    err = new PayloadTooLargeException(`Request body is larger than the limit of ${bodyError.limit} bytes`);
+  } else if (typeof bodyError.type === 'string' && bodyError.expose === true) {
+    err = new InvalidParametersException(`Invalid request body: ${err.message}`);
+  }
 
   if (!(err instanceof NexxusException)) {
     err = new ServerErrorException('An unexpected server error occurred.');

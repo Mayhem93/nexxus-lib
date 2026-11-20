@@ -390,8 +390,10 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
           throw new Error(`ElasticsearchDb.createItems: Unsupported model type: ${(item as NexxusBaseModel).getData().type}`);
         }
 
+        // `create`, not `index`: a document whose id is already stored fails
+        // the item instead of being replaced.
         bulkReq.body.push(
-          { index: { _index: index, _id: itemData.id as string } },
+          { create: { _index: index, _id: itemData.id as string } },
           itemData
         );
       }
@@ -402,9 +404,18 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
 
       if (dbResult.errors) {
         // Bulk items come back in the order they were sent.
-        const failures = dbResult.items.flatMap((item, i) => item.index?.error
-          ? [ NexxusElasticsearchDb.itemFailure(String(collection[i]!.getData().id), item.index.status, item.index.error) ]
-          : []);
+        const failures = dbResult.items.flatMap((item, i) => {
+          const result = item.create;
+
+          if (!result?.error) {
+            return [];
+          }
+
+          const failure = NexxusElasticsearchDb.itemFailure(String(collection[i]!.getData().id), result.status, result.error);
+
+          // 409: the id is already stored, which no retry changes.
+          return [ result.status === 409 ? { ...failure, terminal: true, alreadyExists: true } : failure ];
+        });
 
         if (failures.length > 0) {
           throw new NexxusDatabaseItemsFailedException('createItems', failures);
@@ -414,10 +425,10 @@ export class NexxusElasticsearchDb extends NexxusDatabaseAdapter<ElasticsearchCo
       // Back-fill the adapter-assigned version onto each successfully-written AppModel.
       // Built-in models (Application, User) do not carry a version field.
       collection.forEach((item, i) => {
-        const indexResult = dbResult.items[i]?.index;
+        const createResult = dbResult.items[i]?.create;
 
-        if (item instanceof NexxusAppModel && indexResult?._version !== undefined) {
-          (item.getData() as INexxusAppModel).version = indexResult._version;
+        if (item instanceof NexxusAppModel && createResult?._version !== undefined) {
+          (item.getData() as INexxusAppModel).version = createResult._version;
         }
       });
     }, 'createItems');

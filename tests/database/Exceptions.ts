@@ -28,4 +28,13 @@ describe('NexxusDatabaseItemsFailedException', () => {
     expect(new NexxusDatabaseItemsFailedException('createItems', [ refused ]).terminal).toBe(true);
     expect(new NexxusDatabaseItemsFailedException('createItems', [ refused, busy ]).terminal).toBe(false);
   });
+
+  it('is alreadyExists only when every failure is an id that is already stored', () => {
+    const stored = { id: 'r1', reason: 'version_conflict_engine_exception', terminal: true, alreadyExists: true };
+    const refused = { id: 'r2', reason: 'mapper_parsing_exception', terminal: true };
+
+    expect(new NexxusDatabaseItemsFailedException('createItems', [ stored ]).alreadyExists).toBe(true);
+    expect(new NexxusDatabaseItemsFailedException('createItems', [ stored, refused ]).alreadyExists).toBe(false);
+    expect(new NexxusDatabaseItemsFailedException('createItems', []).alreadyExists).toBe(false);
+  });
 });

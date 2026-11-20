@@ -2,7 +2,7 @@ openapi: 3.1.1
 
 info:
   title: Nexxus API
-  version: 0.0.13
+  version: 0.0.14
   summary: HTTP surface of a Nexxus deployment.
   description: |
     Nexxus is a config-driven, real-time backend-as-a-service. This document
@@ -41,6 +41,46 @@ info:
       before the access token expires. Each refresh replaces it. It stops working
       `session.refreshTokenExpiresIn` after the session was issued (30 days by
       default), or at `POST /auth/logout`.
+
+    ### Request bodies
+
+    A body larger than the deployment's limit (64 KiB unless configured) is
+    answered `413 PayloadTooLargeException`. A body that isn't valid JSON is
+    answered `400 InvalidParametersException`.
+
+    ### Cross-origin requests
+
+    A web page served from another origin can call the API only if the
+    deployment lists that origin. Before each request, the browser sends an
+    `OPTIONS` preflight to the same URL, answered `204` for a listed origin and
+    `403 OriginNotAllowedException` for any other. Requests can carry
+    `Authorization`, `Content-Type`, `nxx-app-id` and `nxx-connection-id`, and
+    pages can read `Retry-After`, `RateLimit` and `RateLimit-Policy`. Clients
+    outside a browser are not affected.
+
+    ### Rate limits
+
+    Off unless the deployment or the application turns it on. Each route then
+    allows a number of requests a minute: the base below, times the
+    application's factor (1–100). A request counts against its user; on an
+    application without authentication, against its device; with no token,
+    against its IP address. `POST /device/register` counts against the user,
+    or the IP address without one.
+
+    | Route | Base per minute |
+    | --- | --- |
+    | `POST /auth/{strategy}`, `POST /auth/logout`, `POST /user/register`, `POST /device/register`, `PUT /device` | 5 |
+    | `GET /device`, `GET /device/list` | 10 |
+    | `POST /auth/refresh` | 20 |
+    | `GET /user/me`, `PUT /user`, `POST /model`, `DELETE /model/{id}`, `POST /subscription`, `DELETE /subscription` | 60 |
+    | `POST /model/{type}/search`, `PUT /model/{id}` | 90 |
+    | `POST /model/count` | 120 |
+    | `GET /model/{id}` | 240 |
+
+    A request over the limit is not carried out: it is answered
+    `429 TooManyRequestsException`, with `Retry-After` in seconds. Every
+    counted response carries `RateLimit` and `RateLimit-Policy` (IETF draft 8).
+    `GET /` and `GET /auth/{strategy}/callback` are never limited.
 
     ### Dates
 
@@ -175,6 +215,8 @@ paths:
                         const: UserAuthenticationFailedException
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '503':
           $ref: '#/components/responses/Unavailable'
 
@@ -301,6 +343,8 @@ paths:
                         const: InvalidRefreshTokenException
         '404':
           $ref: '#/components/responses/AppNotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
 
   /auth/logout:
     post:
@@ -342,6 +386,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '404':
           $ref: '#/components/responses/AppNotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
 
   /user/register:
     post:
@@ -410,6 +456,8 @@ paths:
                     properties:
                       error:
                         const: UserAlreadyExistsException
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '503':
           $ref: '#/components/responses/Unavailable'
 
@@ -449,6 +497,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/AppNotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
 
   /user:
     put:
@@ -504,6 +554,8 @@ paths:
                     properties:
                       error:
                         enum: [ ApplicationNotFoundException, NotFoundException ]
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/ServerError'
 
@@ -570,6 +622,8 @@ paths:
                     properties:
                       error:
                         enum: [ ApplicationNotFoundException, NotFoundException ]
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '503':
           $ref: '#/components/responses/Unavailable'
 
@@ -612,6 +666,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/AppNotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
 
   /device:
     get:
@@ -644,6 +700,8 @@ paths:
                     properties:
                       error:
                         const: NotFoundException
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
     put:
       tags: [ Devices ]
       summary: Rename the calling device
@@ -677,6 +735,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/AppNotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
 
   /model:
     post:
@@ -709,6 +769,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/ModelNotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/ServerError'
         '503':
@@ -763,6 +825,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/ModelNotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
 
   /model/{type}/search:
     post:
@@ -828,6 +892,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/ModelNotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
 
   /model/{id}:
     get:
@@ -870,6 +936,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/ModelNotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
     put:
       tags: [ Models ]
       summary: Patch one instance
@@ -907,6 +975,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/ModelNotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '503':
           $ref: '#/components/responses/Unavailable'
     delete:
@@ -940,6 +1010,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/ModelNotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '503':
           $ref: '#/components/responses/Unavailable'
 
@@ -1037,6 +1109,8 @@ paths:
                     properties:
                       error:
                         const: DeviceNotConnectedException
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
     delete:
       tags: [ Subscriptions ]
       summary: Unsubscribe from a channel
@@ -1101,6 +1175,8 @@ paths:
                     properties:
                       error:
                         const: DeviceNotConnectedException
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
 
 components:
   securitySchemes:
@@ -1276,12 +1352,8 @@ components:
         `type`, plus the fields the application's schema declares for that type.
         Nothing else — an undeclared field is a `400`.
 
-        The framework-managed fields are not part of this body:
-
-        - `id`, `createdAt` and `updatedAt` are generated when absent.
-        - `appId` and `userId` are set by the server; values sent here are
-          overwritten.
-        - `version` is rejected.
+        `id`, `createdAt`, `updatedAt`, `version`, `appId` and `userId` are set
+        by the server. A body that contains any of them is a `400`.
       required: [ type ]
       properties:
         type:
@@ -1507,6 +1579,25 @@ components:
                 properties:
                   error:
                     const: InvalidParametersException
+
+    TooManyRequests:
+      description: |
+        The route's rate limit is used up. The request was not carried out;
+        send it again once `Retry-After` seconds have passed.
+      headers:
+        Retry-After:
+          description: Seconds until the count starts over.
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: '#/components/schemas/Error'
+              - type: object
+                properties:
+                  error:
+                    const: TooManyRequestsException
 
     ServerError:
       description: |

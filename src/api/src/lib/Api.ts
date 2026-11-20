@@ -65,6 +65,9 @@ import {
   NotFoundException,
   InvalidParametersException
 } from './Exceptions';
+import { NexxusApiRateLimit } from './RateLimit';
+import { NexxusApiClientAddress } from './ClientAddress';
+import { NexxusApiCors } from './Cors';
 
 /**
  * Constructable type for `NexxusAuthStrategy` subclasses. Used to type the
@@ -182,6 +185,30 @@ export type NexxusApiConfig = {
   ssl?: {
     sslKeyPath: string;
     sslCertPath: string;
+  };
+  /** Largest request body, in bytes, the API reads; a larger one is answered `413`. */
+  maxBodySize?: number;
+  /**
+   * How many proxies in front of the API add the client's address to
+   * `X-Forwarded-For`. The client's address is then the one that many entries
+   * from the header's right end. With `0` (the default) it is the address the
+   * connection comes from, and the header is ignored.
+   */
+  trustProxy?: number;
+  /** Browser pages on other origins that may call the API (CORS). */
+  cors?: {
+    /** Exact origins, such as `https://app.example.com`, or `*` for any. Default: none. */
+    origins?: string[];
+  };
+  /**
+   * Rate limiting of API requests, for every application. A field an
+   * application sets in its own `rateLimit` wins over the one here.
+   */
+  rateLimit?: {
+    /** Whether requests are limited. Default `false`. */
+    enabled?: boolean;
+    /** Multiplies the base limit of every limited route, 1–100. Default `1`. */
+    factor?: number;
   };
   /**
    * Auth at the deployment level is now just the list of strategy types this
@@ -303,6 +330,12 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig, {}, NexxusApiS
   private appAuthStrategies: Map<string, NexxusAuthStrategy> = new Map();
   private static readonly loadedApps: Map<string, NexxusApplication> = new Map();
   private static loggerLabel: Readonly<string> = 'NxxApi';
+  /** `maxBodySize` when the config doesn't set it. */
+  private static readonly DEFAULT_MAX_BODY_SIZE = 65_536;
+  /** `trustProxy` when the config doesn't set it: the address of the connection. */
+  private static readonly DEFAULT_TRUST_PROXY = 0;
+  /** `cors.origins` when the config doesn't set it: no other origin. */
+  private static readonly DEFAULT_CORS_ORIGINS: readonly string[] = [];
 
   /**
    * Per-service connection state. Kept up-to-date by the `'connect'`/
@@ -367,6 +400,10 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig, {}, NexxusApiS
 
     this.express = Express();
     this.express.disable("x-powered-by");
+    // What `req.ip` resolves to. A hop count, read from the right end of
+    // `X-Forwarded-For`: proxies append, so only the entries they added can be
+    // trusted, and anything further left is whatever the client sent.
+    this.express.set('trust proxy', this.config.trustProxy ?? NexxusApi.DEFAULT_TRUST_PROXY);
 
     if (this.config.ssl !== undefined) {
       this.httpsServer = https.createServer({
@@ -454,6 +491,18 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig, {}, NexxusApiS
     NexxusApi.logger.info('All upstream services connected', NexxusApi.loggerLabel);
 
     this.express.use(RequestLoggerMiddleware as Express.RequestHandler);
+
+    // Ahead of everything that can answer: a browser on another origin reads a
+    // response, errors and 503s included, only if it carries the CORS headers,
+    // and a preflight is answered before auth and rate limits ever see it.
+    this.express.use(NexxusApiCors.middleware(this.config.cors?.origins ?? NexxusApi.DEFAULT_CORS_ORIGINS));
+
+    // Behind proxies, the client's address comes out of `X-Forwarded-For`:
+    // ports go before anything reads it.
+    if ((this.config.trustProxy ?? NexxusApi.DEFAULT_TRUST_PROXY) > 0) {
+      this.express.use(NexxusApiClientAddress.stripForwardedPorts as Express.RequestHandler);
+    }
+
     this.express.use(helmet({
       xDownloadOptions: false,
       xXssProtection: false,
@@ -467,8 +516,10 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig, {}, NexxusApiS
         preload: true
       } : false
     }));
-    this.express.use(Express.json());
-    this.express.use(Express.urlencoded({ extended: true }));
+    const maxBodySize = this.config.maxBodySize ?? NexxusApi.DEFAULT_MAX_BODY_SIZE;
+
+    this.express.use(Express.json({ limit: maxBodySize }));
+    this.express.use(Express.urlencoded({ extended: true, limit: maxBodySize }));
 
     // Availability gate — runs AFTER helmet + body parsers so every 503
     // response still carries the standard security headers and any code
@@ -830,6 +881,7 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig, {}, NexxusApiS
         `/auth/${name}`,
         RequiredHeadersMiddleware('nxx-app-id') as Express.RequestHandler,
         AppExistsMiddleware() as Express.RequestHandler,
+        NexxusApiRateLimit.limiter('POST /auth/{strategy}'),
         (req, res, next) => {
           const appId = req.headers['nxx-app-id'] as string;
           const strategy = this.getAppAuthStrategy(appId, name);
@@ -843,6 +895,9 @@ export class NexxusApi extends NexxusBaseService<NexxusApiConfig, {}, NexxusApiS
       );
 
       if (requiresCallback) {
+        // Not rate limited: a forged `state` fails its signature check before
+        // any I/O, and a valid one is single-use and comes only from the
+        // limited `POST /auth/<name>`.
         this.express.get(`/auth/${name}/callback`, (req, res, next) => {
           // OAuth providers redirect here. The `nxx-app-id` header isn't
           // available on callbacks — they come from the provider's redirect,

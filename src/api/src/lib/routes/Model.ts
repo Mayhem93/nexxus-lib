@@ -4,11 +4,14 @@ import { type NexxusApiRequest, type NexxusApiResponse, NexxusApi } from '../Api
 import { RequiredHeadersMiddleware, AppExistsMiddleware, AuthMiddleware } from '../middlewares';
 import { NexxusApiModelParams } from '../ModelParams';
 import { NexxusApiAcl } from '../Acl';
+import { NexxusApiRateLimit } from '../RateLimit';
 import {
   NexxusAppModel,
   NexxusJsonPatch,
   type INexxusAppModel,
   InvalidJsonPatchException,
+  InvalidSchemaDataException,
+  NEXXUS_RESERVED_FIELD_NAMES,
   NexxusJsonPatchInternal,
   NexxusFilterQueryType
 } from '@mayhem93/nexxus-core-lib';
@@ -86,20 +89,28 @@ export default class ModelRoute extends NexxusApiBaseRoute {
     this.router.use(AppExistsMiddleware() as RequestHandler);
     this.router.use(AuthMiddleware as RequestHandler);
 
-    this.router.post('/', this.createModel.bind(this) as RequestHandler);
+    this.router.post('/',
+      NexxusApiRateLimit.limiter('POST /model'),
+      this.createModel.bind(this) as RequestHandler
+    );
     this.router.get('/:id',
+      NexxusApiRateLimit.limiter('GET /model/{id}'),
       this.getModel.bind(this) as RequestHandler<GetModelRequest['params'], any, any, GetModelRequest['query']>
     );
     this.router.put('/:id',
+      NexxusApiRateLimit.limiter('PUT /model/{id}'),
       this.updateModel.bind(this) as RequestHandler<UpdateAppModelRequest['params'], any, UpdateAppModelRequest['body']>
     );
     this.router.delete('/:id',
+      NexxusApiRateLimit.limiter('DELETE /model/{id}'),
       this.deleteModel.bind(this) as RequestHandler<DeleteAppModelRequest['params']>
     );
     this.router.post('/count',
+      NexxusApiRateLimit.limiter('POST /model/count'),
       this.countModel.bind(this) as RequestHandler<any, any, CountModelRequestBody>
     );
     this.router.post('/:type/search',
+      NexxusApiRateLimit.limiter('POST /model/{type}/search'),
       this.searchModel.bind(this) as RequestHandler<SearchModelRequest['params'], any, SearchModelRequest['body']>
     );
   }
@@ -189,13 +200,30 @@ export default class ModelRoute extends NexxusApiBaseRoute {
       throw new ModelNotFoundException(`Model "${req.body.type}" not found in schema for the application "${appId}"`);
     }
 
+    // Nexxus sets its own fields on a new record; of them, a client sends only `type`.
+    const managedFields = Object.keys(req.body).filter(field => field !== 'type' && NEXXUS_RESERVED_FIELD_NAMES.has(field));
+
+    if (managedFields.length > 0) {
+      throw new InvalidParametersException(`Field(s) "${managedFields.join('", "')}" are set by Nexxus and can't be sent`);
+    }
+
     const aclConstraint = NexxusApiAcl.authorize(app, req, 'create', req.body.type);
 
-    const newModel = new NexxusAppModel({
-      ...req.body,
-      appId: appId,
-      userId: req.user?.id
-    }, appSchema);
+    let newModel: NexxusAppModel;
+
+    try {
+      newModel = new NexxusAppModel({
+        ...req.body,
+        appId: appId,
+        userId: req.user?.id
+      }, appSchema);
+    } catch (error) {
+      if (error instanceof InvalidSchemaDataException) {
+        throw new InvalidParametersException(`Invalid model data: ${error.message}`);
+      }
+
+      throw error;
+    }
 
     // The created object must itself satisfy the row condition (e.g. a role
     // that may only create objects it owns) — checked against the new data.

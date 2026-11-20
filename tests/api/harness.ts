@@ -8,7 +8,7 @@ import { NexxusDatabaseAdapter, type NexxusDatabaseAdapterEvents } from '@mayhem
 import { NexxusMessageQueueAdapter, type NexxusMessageDelivery } from '@mayhem93/nexxus-message-queue-lib';
 import { NexxusRedis } from '@mayhem93/nexxus-redis';
 
-import { NexxusApi } from '../../src/api/src/lib/Api';
+import { NexxusApi, type NexxusApiConfig } from '../../src/api/src/lib/Api';
 import { NotFoundMiddleware, ErrorMiddleware } from '../../src/api/src/lib/middlewares';
 
 import Express from 'express';
@@ -159,6 +159,14 @@ const loadedApps = (NexxusApi as unknown as { loadedApps: Map<string, NexxusAppl
 /** Strategy instances the fake `NexxusApi.instance` hands back, keyed `${appId}|${name}`. */
 export const authStrategies: Map<string, unknown> = new Map();
 
+/** The deployment config the fake `NexxusApi.instance` reports. */
+let apiConfig: Partial<NexxusApiConfig> = {};
+
+/** Set the deployment config the fake `NexxusApi.instance` reports, until the next `installApiStatics`. */
+export function setApiConfig(config: Partial<NexxusApiConfig>): void {
+  apiConfig = config;
+}
+
 export type ApiHarness = {
   db: FakeDb;
   mq: FakeMq;
@@ -178,6 +186,7 @@ export function installApiStatics(): ApiHarness {
   logger.entries = [];
   loadedApps.clear();
   authStrategies.clear();
+  apiConfig = {};
 
   Object.assign(dbState, {
     getItemsResult: [], searchResult: [], countResult: 0, missingIds: [],
@@ -206,6 +215,7 @@ export function installApiStatics(): ApiHarness {
   // constructing one would require the full config + service validation.
   NexxusApi.instance = {
     getAppAuthStrategy: (appId: string, name: string) => authStrategies.get(`${appId}|${name}`),
+    getConfig: () => apiConfig,
   } as unknown as NexxusApi;
 
   return { db, mq, redis };

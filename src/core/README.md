@@ -47,6 +47,13 @@ The multi-tenant app definition. Its `schema` field is where an app declares its
     "maxPerDevice": 20                  // 1–100, default 20; registering one more evicts the oldest
   },
 
+  // OPTIONAL. API rate limits for this app. A field left out takes the API
+  // deployment's value (see nexxus-api-lib).
+  "rateLimit": {
+    "enabled": true,                    // turns rate limits on or off for this app
+    "factor": 2                         // 1–100; multiplies every route's base limit
+  },
+
   // Developer-defined models for THIS app. Each entry is a set of field
   // definitions plus two per-model flags (see "Application models" below).
   "schema": {

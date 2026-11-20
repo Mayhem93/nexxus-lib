@@ -17,6 +17,7 @@ import {
 } from '../Exceptions';
 import { NexxusApiModelParams } from '../ModelParams';
 import { NexxusApiAcl } from '../Acl';
+import { NexxusApiRateLimit } from '../RateLimit';
 
 import { NexxusFilterQueryType } from '@mayhem93/nexxus-core-lib';
 import {
@@ -65,8 +66,8 @@ export default class SubscriptionRoute extends NexxusApiBaseRoute {
 
     // ACL enforcement for subscribe/unsubscribe is wired inside the handlers
     // (step 3) so it can inject the row constraint into the subscription.
-    this.router.post('/', this.subscribe.bind(this) as RequestHandler);
-    this.router.delete('/', this.unsubscribe.bind(this) as RequestHandler);
+    this.router.post('/', NexxusApiRateLimit.limiter('POST /subscription'), this.subscribe.bind(this) as RequestHandler);
+    this.router.delete('/', NexxusApiRateLimit.limiter('DELETE /subscription'), this.unsubscribe.bind(this) as RequestHandler);
   }
 
   private async subscribe(req: SubscribeRequest, res: NexxusApiResponse): Promise<void> {
