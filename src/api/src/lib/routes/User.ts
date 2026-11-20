@@ -19,6 +19,7 @@ import {
 } from '../middlewares';
 import { NexxusAuthStrategy } from '../auth';
 import { NexxusApiDeviceRegistration } from '../DeviceRegistration';
+import { NexxusApiRateLimit } from '../RateLimit';
 
 import {
   InvalidJsonPatchException,
@@ -93,26 +94,31 @@ export default class UserRoute extends NexxusApiBaseRoute {
     this.router.use(AppExistsMiddleware() as RequestHandler);
 
     this.router.post('/register',
+      NexxusApiRateLimit.limiter('POST /user/register'),
       this.register.bind(this) as RequestHandler
     );
     this.router.get('/me',
       AuthMiddleware as RequestHandler,
       RequiresUserMiddleware as RequestHandler,
+      NexxusApiRateLimit.limiter('GET /user/me'),
       this.me.bind(this) as RequestHandler
     );
     this.router.put('/',
       AuthMiddleware as RequestHandler,
       RequiresUserMiddleware as RequestHandler,
+      NexxusApiRateLimit.limiter('PUT /user'),
       this.update.bind(this) as RequestHandler
     );
   }
 
-  private async me(req: NexxusApiRequest, res: NexxusApiResponse): Promise<void> {
+  private me(req: NexxusApiRequest, res: NexxusApiResponse): Promise<void> {
     // The registered claims (iat/exp/aud/iss) sit on the token, not inside its
     // `user` claim, so there is nothing to strip out here.
     NexxusApi.logger.debug('Fetching current user data', { user: req.user }, 'UserRoute');
 
     res.status(200).json(req.user);
+
+    return Promise.resolve();
   }
 
   private async register(req: UserRegisterRequest, res: NexxusApiResponse): Promise<void> {

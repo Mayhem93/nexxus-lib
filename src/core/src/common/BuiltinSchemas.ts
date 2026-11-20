@@ -1,4 +1,4 @@
-import type { NexxusModelDef } from "./ModelTypes";
+import type { NexxusModelDef } from './ModelTypes';
 
 /**
  * Universal fields present in all models (auto-managed by NexxusBaseModel).
@@ -100,6 +100,18 @@ export const NEXXUS_DEPLOYMENT_MODEL_SCHEMAS = {
       type: 'object', required: false,
       properties: {
         maxPerDevice: { type: 'int', required: false }
+      },
+    },
+    /**
+     * Rate limiting of this application's API requests. A field left out takes
+     * the API deployment's value. Bounds are enforced by the
+     * `NexxusApplication` constructor.
+     */
+    rateLimit: {
+      type: 'object', required: false,
+      properties: {
+        enabled: { type: 'boolean', required: false },
+        factor:  { type: 'float',   required: false }
       },
     },
     /**

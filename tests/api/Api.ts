@@ -1048,3 +1048,145 @@ describe('NexxusApi — accessors', () => {
   });
 });
 
+describe('NexxusApi — rate limiting', () => {
+  it('limits sign-in attempts once the deployment turns rate limiting on', async () => {
+    const { api, request } = await makeApi({ auth: { availableStrategies: [ 'local' ] }, rateLimit: { enabled: true } });
+
+    dbState.searchImpl = (o) => (o.type === 'application' ? [ makeAuthApp() ] : []);
+
+    await api.init();
+
+    const signIn = () => request('/auth/local', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'nxx-app-id': 'app1' },
+      body: JSON.stringify({ username: 'ann', password: 'wrong' }),
+    });
+
+    for (let i = 0; i < 5; i++) {
+      expect((await signIn()).status).toBe(401);
+    }
+
+    expect(await signIn()).toMatchObject({ status: 429, body: { error: 'TooManyRequestsException' } });
+  });
+
+  /** `POST /auth/logout` with `X-Forwarded-For` set; answered `400` without a refresh token, and counted. */
+  const logoutVia = (request: Harness['request'], forwardedFor: string) => request('/auth/logout', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'nxx-app-id': 'app1', 'x-forwarded-for': forwardedFor },
+    body: '{}',
+  });
+
+  it('counts per forwarded address, ports dropped, once trustProxy is set', async () => {
+    const { api, request } = await makeApi({ trustProxy: 1, rateLimit: { enabled: true } });
+
+    dbState.searchImpl = (o) => (o.type === 'application' ? [ appDoc() ] : []);
+
+    await api.init();
+
+    const result: number[] = [];
+
+    for (let i = 1; i <= 6; i++) {
+      result.push((await logoutVia(request, `198.51.100.${i}, 203.0.113.7:${40_000 + i}`)).status);
+    }
+
+    expect(result).toEqual([ 400, 400, 400, 400, 400, 429 ]);
+    expect((await logoutVia(request, '203.0.113.8')).status).toBe(400);
+  });
+
+  it('ignores X-Forwarded-For by default', async () => {
+    const { api, request } = await makeApi({ rateLimit: { enabled: true } });
+
+    dbState.searchImpl = (o) => (o.type === 'application' ? [ appDoc() ] : []);
+
+    await api.init();
+
+    const result: number[] = [];
+
+    for (let i = 1; i <= 6; i++) {
+      result.push((await logoutVia(request, `203.0.113.${i}`)).status);
+    }
+
+    expect(result).toEqual([ 400, 400, 400, 400, 400, 429 ]);
+  });
+
+  it('leaves GET / unlimited', async () => {
+    const h = await makeApi({ rateLimit: { enabled: true } });
+
+    await h.api.init();
+
+    const res = await fetch(`http://127.0.0.1:${h.port}/`, { headers: { connection: 'close' } });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get('ratelimit-policy')).toBeNull();
+  });
+});
+
+describe('NexxusApi — CORS', () => {
+  const DEMO = 'https://demo.example.com';
+
+  /** `fetch` against the API's own port, handing back the headers the harness's `request` drops. */
+  const raw = (h: Harness, path: string, init: RequestInit): Promise<Response> =>
+    fetch(`http://127.0.0.1:${h.port}${path}`, {
+      ...init,
+      headers: { connection: 'close', ...(init.headers as Record<string, string>) },
+    });
+
+  const preflight = (h: Harness): Promise<Response> => raw(h, '/model', {
+    method: 'OPTIONS',
+    headers: {
+      origin: DEMO,
+      'access-control-request-method': 'POST',
+      'access-control-request-headers': 'authorization, content-type, nxx-app-id',
+    },
+  });
+
+  it('answers a listed origin\'s preflight before any route\'s checks run', async () => {
+    const h = await makeApi({ cors: { origins: [ DEMO ] } });
+
+    await h.api.init();
+
+    // No `nxx-app-id` and no token: a preflight carries neither.
+    const res = await preflight(h);
+
+    expect(res.status).toBe(204);
+    expect(res.headers.get('access-control-allow-origin')).toBe(DEMO);
+  });
+
+  it('refuses every preflight by default', async () => {
+    const h = await makeApi();
+
+    await h.api.init();
+
+    const res = await preflight(h);
+
+    expect(res.status).toBe(403);
+    expect(res.headers.get('access-control-allow-origin')).toBeNull();
+  });
+
+  it('lets a listed origin read a rate-limit refusal and its Retry-After', async () => {
+    const h = await makeApi({ cors: { origins: [ DEMO ] }, rateLimit: { enabled: true } });
+
+    dbState.searchImpl = (o) => (o.type === 'application' ? [ appDoc() ] : []);
+
+    await h.api.init();
+
+    // Answered `400` without a refresh token, and counted.
+    const logout = (): Promise<Response> => raw(h, '/auth/logout', {
+      method: 'POST',
+      headers: { origin: DEMO, 'content-type': 'application/json', 'nxx-app-id': 'app1' },
+      body: '{}',
+    });
+
+    for (let i = 0; i < 5; i++) {
+      await (await logout()).text();
+    }
+
+    const res = await logout();
+
+    expect(res.status).toBe(429);
+    expect(res.headers.get('access-control-allow-origin')).toBe(DEMO);
+    expect(res.headers.get('access-control-expose-headers')).toContain('Retry-After');
+    expect(Number(res.headers.get('retry-after'))).toBeGreaterThan(0);
+  });
+});
+

@@ -245,6 +245,55 @@ describe('NexxusApplication connections', () => {
   });
 });
 
+describe('NexxusApplication rateLimit', () => {
+  it('has no rate-limit settings of its own unless it declares them', () => {
+    const app = new NexxusApplication(makeData());
+
+    expect(app.getRateLimit()).toEqual({});
+    expect(app.getData().rateLimit).toBeUndefined();
+  });
+
+  it('keeps the fields it declares and leaves the others unset, for the deployment to fill', () => {
+    const app = new NexxusApplication(makeData({ rateLimit: { enabled: true } }));
+
+    expect(app.getRateLimit().enabled).toBe(true);
+    expect(app.getRateLimit().factor).toBeUndefined();
+    expect(new NexxusApplication(makeData({ rateLimit: { enabled: false, factor: 2.5 } })).getRateLimit())
+      .toEqual({ enabled: false, factor: 2.5 });
+  });
+
+  it('drops a field it does not know', () => {
+    const app = new NexxusApplication(makeData({ rateLimit: { factor: 3, burst: 9 } }));
+
+    expect(app.getData().rateLimit).not.toHaveProperty('burst');
+    expect(app.getRateLimit()).toEqual({ factor: 3 });
+  });
+
+  it('bounds rateLimit.factor to 1–100, fractions included', () => {
+    for (const bad of [ 0.5, 0, 101, Number.NaN, Number.POSITIVE_INFINITY, '2' ]) {
+      expect(() => new NexxusApplication(makeData({ rateLimit: { factor: bad } })))
+        .toThrow(/"rateLimit.factor" must be a number between 1 and 100/);
+    }
+
+    for (const good of [ 1, 1.5, 100 ]) {
+      expect(new NexxusApplication(makeData({ rateLimit: { factor: good } })).getRateLimit().factor).toBe(good);
+    }
+  });
+
+  it('rejects a rateLimit.enabled that is not a boolean', () => {
+    for (const bad of [ 'yes', 1 ]) {
+      expect(() => new NexxusApplication(makeData({ rateLimit: { enabled: bad } })))
+        .toThrow(/"rateLimit.enabled" must be a boolean/);
+    }
+  });
+
+  it('rejects a rateLimit block that is not an object', () => {
+    for (const bad of [ 'nope', null ]) {
+      expect(() => new NexxusApplication(makeData({ rateLimit: bad }))).toThrow(/"rateLimit" must be an object/);
+    }
+  });
+});
+
 describe('NexxusApplication accessors', () => {
   it('getAppModelSchema injects a filterable userId when auth is enabled', () => {
     const app = new NexxusApplication(withAuth());

@@ -123,6 +123,10 @@ The API reads the `app` section of the config file. The `database`, `message_que
 | `message_queue` | yes | Message-queue adapter: `NexxusRabbitMq`, or an npm package name. |
 | `ssl.sslKeyPath`, `ssl.sslCertPath` | no | PEM key and certificate. When set, the API serves HTTPS only and sends `Strict-Transport-Security`. |
 | `maxBodySize` | no | Largest request body in bytes, 65536–1048576. Default `65536`. |
+| `trustProxy` | no | How many proxies in front of the API add the client's address to `X-Forwarded-For`, 0–10. Default `0`: the client's address is the connection's. See [Behind a load balancer](#behind-a-load-balancer). |
+| `cors.origins` | no | Origins whose web pages may call the API from a browser: exact origins, or `*` for any. Default: none. See [Browsers (CORS)](#browsers-cors). |
+| `rateLimit.enabled` | no | `true` turns on [rate limits](#rate-limits) for every application that doesn't set its own `rateLimit.enabled`. Default `false`. |
+| `rateLimit.factor` | no | Multiplies every route's base limit, 1–100, for every application that doesn't set its own. Default `1`. |
 | `auth.availableStrategies` | no | Strategies this deployment offers: `local`, `google`, or npm package names. Applications can only enable strategies listed here. |
 | `management.port`, `management.token` | yes | Port and bearer token of the management server. |
 | `hub.endpoint`, `hub.token` | no | Hub to register with. Without it the API runs standalone. |
@@ -141,6 +145,8 @@ These live on each application's document (see [`nexxus-core-lib`](../core/READM
 | `session.jwtExpiresIn` | Access-token lifetime in seconds, 600–7200. Default `3600`. |
 | `session.refreshTokenExpiresIn` | Session lifetime in seconds, 86400–31536000. Default 30 days. |
 | `connections.maxPerDevice` | How many connections a device can hold at once, 1–100. Default `20`. Registering one more closes the device's oldest — see [`nexxus-worker-lib`](../worker/README.md#websockets-transport). |
+| `rateLimit.enabled` | `true` or `false` turns [rate limits](#rate-limits) on or off for this application, whatever `app.rateLimit.enabled` says. Unset, the deployment's value applies. |
+| `rateLimit.factor` | Multiplies every route's base limit for this application, 1–100. Unset, the deployment's value applies. |
 | `auth.strategies.<name>` | Enables a strategy for this application, with its config — see [Authentication](#authentication). |
 | `auth.userTypes.<type>.roles` | ACL roles granted to a user type — see [Access control](#access-control). |
 | `auth.userDetailSchema.<type>` | Fields a user of that type keeps in `details`. Registration and `PUT /user` are validated against it. |
@@ -192,6 +198,8 @@ Every error has the same body, with the HTTP status set to match:
 
 A body larger than `app.maxBodySize` is answered `413 PayloadTooLargeException`, and a body that isn't valid JSON `400 InvalidParametersException`.
 
+With rate limits on, a request over its route's limit is answered `429 TooManyRequestsException` — see [Rate limits](#rate-limits).
+
 While the database, the message queue or Redis is disconnected, every request is answered `503 ServiceUnavailableException`. Requests are served again as soon as it reconnects.
 
 A request the database fails is answered `500 ServerErrorException` with a generic message; the database's own error is only logged.
@@ -199,6 +207,116 @@ A request the database fails is answered `500 ServerErrorException` with a gener
 A model write the message queue doesn't confirm is answered `503 ServiceUnavailableException` instead of `202`.
 
 Each request is logged at `info` when it completes, with its method, URL, status and duration. Errors with a `5xx` status are logged at `error`, others at `info`.
+
+---
+
+## Rate limits
+
+Off unless `app.rateLimit.enabled` or the application's own `rateLimit.enabled` is `true`. Each route below then allows a number of requests a minute: its base, times the factor (`rateLimit.factor`), rounded up.
+
+| Route | Base per minute |
+| --- | --- |
+| `POST /auth/{strategy}`, `POST /auth/logout`, `POST /user/register`, `POST /device/register`, `PUT /device` | 5 |
+| `GET /device`, `GET /device/list` | 10 |
+| `POST /auth/refresh` | 20 |
+| `GET /user/me`, `PUT /user`, `POST /model`, `DELETE /model/{id}`, `POST /subscription`, `DELETE /subscription` | 60 |
+| `POST /model/{type}/search`, `PUT /model/{id}` | 90 |
+| `POST /model/count` | 120 |
+| `GET /model/{id}` | 240 |
+
+- A request counts against its user; on an application without authentication, against its device; with no token, against its IP address. `POST /device/register` counts against the user, or the IP address without one.
+- The IP address is the connection's, or the one a load balancer passes on — see [Behind a load balancer](#behind-a-load-balancer).
+- IPv6 addresses count per /56 network.
+- Each application and each route counts separately. A count runs for one minute from its first request, then starts over.
+- A request turned away before its route runs — no `nxx-app-id`, an unknown application, an invalid token — isn't counted.
+- A request over the limit is not carried out. It is answered `429 TooManyRequestsException`, with `Retry-After` in seconds.
+- Every counted response carries `RateLimit` and `RateLimit-Policy` (IETF draft 8).
+- `GET /`, `GET /auth/{strategy}/callback` and unknown paths are never limited.
+- Each API instance keeps its own counts, in memory, and a restart starts them over. Behind a load balancer, use sticky sessions, or a client gets the limit from every instance.
+
+---
+
+## Behind a load balancer
+
+Rate limits count requests without a token per client IP address. Behind a load balancer, the API only knows that address if `app.trustProxy` tells it where to find it:
+
+- `0`, the default: the address the connection comes from. `X-Forwarded-For` is ignored.
+- `N`: the Nth address from the right end of `X-Forwarded-For`. Each proxy appends the address the request reached it from, so `N` is the number of proxies between the client and the API that do.
+
+An address written with a port, such as `203.0.113.7:4711` or `[2001:db8::7]:4711`, counts without it.
+
+When `trustProxy` is wrong:
+
+- **Too low**, such as `0` behind an AWS ALB: every request seems to come from the load balancer. All clients without a token share one count, and one busy client gets everyone else refused.
+- **Too high**: the API takes an address the client wrote into its own `X-Forwarded-For`. A client can name a new address with every request, and is never limited.
+
+With `trustProxy` above `0`, the API must be reachable only through those proxies. A client that connects to it directly can send any `X-Forwarded-For`.
+
+| In front of the API | The client's address arrives in | `trustProxy` |
+| --- | --- | --- |
+| Nothing, or a router's port forward | the connection | `0` |
+| AWS NLB with client IP preservation | the connection | `0` |
+| nginx or HAProxy as a transparent proxy | the connection | `0` |
+| AWS ALB | `X-Forwarded-For` | `1` |
+| nginx | `X-Forwarded-For` | `1` |
+| HAProxy | `X-Forwarded-For` | `1` |
+| Amazon CloudFront, then an AWS ALB | `X-Forwarded-For` | `2` |
+
+**AWS ALB.** Keep the load balancer's X-Forwarded-For header setting (`routing.http.xff_header_processing.mode`) at `append`, the default. `preserve` passes the client's own header on unchanged, and `remove` drops it.
+
+**AWS NLB.** The client's address arrives in the connection only with client IP preservation (`preserve_client_ip.enabled` on the target group). It is on by default for instance targets, and off for IP targets with TCP or TLS. An IPv6 client reaching an IPv4 target, or the reverse, still arrives from the load balancer's address.
+
+**nginx.**
+
+```nginx
+location / {
+  proxy_pass http://nexxus_api;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+}
+```
+
+As a transparent proxy, with `proxy_bind $remote_addr transparent;`, nginx connects to the API from the client's address instead, and `trustProxy` is `0`. It needs kernel routing set up on the nginx host, and the API servers' replies must route back through it.
+
+**HAProxy.**
+
+```haproxy
+backend nexxus_api
+  mode http
+  option forwardfor
+  server api1 10.0.1.10:5000 check
+```
+
+Leave out `if-none`: with it, HAProxy passes on a header the client sent and adds nothing.
+
+As a transparent proxy, with `source 0.0.0.0 usesrc clientip`, HAProxy connects to the API from the client's address instead, and `trustProxy` is `0`. It needs kernel routing set up on the HAProxy host, and the API servers must use it as their default gateway.
+
+**Not supported: the PROXY protocol** — HAProxy `send-proxy`, nginx `proxy_protocol`, AWS NLB proxy protocol v2. The API can't read it, and every request fails.
+
+**Docker.** On Linux, published ports keep the client's address. Docker Desktop doesn't, and neither does Docker's userland proxy, which handles, for one, IPv6 clients of a container network without IPv6. Behind either, every request comes from the proxy's address.
+
+**Checking the setup.** Turn rate limits on and send a request without a token, such as `POST /auth/logout`, from two different networks. The `pk` values in their `RateLimit-Policy` headers differ when the API sees two addresses.
+
+---
+
+## Browsers (CORS)
+
+A web page served from another origin than the API's — another scheme, host or port — can call the API only if `app.cors.origins` lists its origin. Only browsers apply this: servers, scripts and mobile apps are never affected.
+
+```jsonc
+"cors": { "origins": [ "https://demo.example.com", "http://localhost:5173" ] }
+```
+
+- Each entry is an exact origin: scheme, host and port, without a path or a trailing slash. `"*"` allows every origin. By default, none is listed.
+- Before each API request, a browser sends an `OPTIONS` preflight to the same URL. A listed origin's preflight is answered `204`, and the browser then sends the request. Any other origin's is answered `403 OriginNotAllowedException`, the browser fails the request with a CORS error, and the API logs the origin it refused.
+- Pages can send `Authorization`, `Content-Type`, `nxx-app-id` and `nxx-connection-id`, with `GET`, `POST`, `PUT` and `DELETE`. The browser refuses a request with any other header.
+- Responses to a listed origin, errors included, can be read by the page, and so can their `Retry-After`, `RateLimit` and `RateLimit-Policy` headers.
+- A browser reuses a preflight's answer for the same URL for up to 2 hours, so `GET /model/{id}` costs one preflight for every new `{id}`. A page served from the API's own origin sends none.
+
+**Local testing.**
+
+- `http://localhost:5173`, `http://localhost:3000` and `http://127.0.0.1:5173` are three different origins. List the one the dev server runs on, or use `"*"` in a development deployment.
+- Or let the dev server forward API calls, with Vite's `server.proxy` or Next.js rewrites. The page and the API then share one origin, and CORS doesn't apply.
+- Chrome asks the user for permission before a page served from a public origin calls a private-network or `localhost` address.
 
 ---
 
@@ -316,7 +434,6 @@ With `app.hub` set, the API registers with the Hub as role `api` once it is list
 
 - Applications and their ACL roles are read once, at startup. Restart the API after creating or changing an application or a role.
 - With the built-in Elasticsearch adapter, only the first 100 applications are loaded.
-- The API sends no CORS headers. A browser client served from another origin needs a proxy in front of the API that adds them.
 - `auth.userTypes.<type>.private` isn't enforced yet: any user type an application declares can be chosen at registration.
 
 ---

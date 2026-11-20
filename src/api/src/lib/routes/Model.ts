@@ -4,6 +4,7 @@ import { type NexxusApiRequest, type NexxusApiResponse, NexxusApi } from '../Api
 import { RequiredHeadersMiddleware, AppExistsMiddleware, AuthMiddleware } from '../middlewares';
 import { NexxusApiModelParams } from '../ModelParams';
 import { NexxusApiAcl } from '../Acl';
+import { NexxusApiRateLimit } from '../RateLimit';
 import {
   NexxusAppModel,
   NexxusJsonPatch,
@@ -88,20 +89,28 @@ export default class ModelRoute extends NexxusApiBaseRoute {
     this.router.use(AppExistsMiddleware() as RequestHandler);
     this.router.use(AuthMiddleware as RequestHandler);
 
-    this.router.post('/', this.createModel.bind(this) as RequestHandler);
+    this.router.post('/',
+      NexxusApiRateLimit.limiter('POST /model'),
+      this.createModel.bind(this) as RequestHandler
+    );
     this.router.get('/:id',
+      NexxusApiRateLimit.limiter('GET /model/{id}'),
       this.getModel.bind(this) as RequestHandler<GetModelRequest['params'], any, any, GetModelRequest['query']>
     );
     this.router.put('/:id',
+      NexxusApiRateLimit.limiter('PUT /model/{id}'),
       this.updateModel.bind(this) as RequestHandler<UpdateAppModelRequest['params'], any, UpdateAppModelRequest['body']>
     );
     this.router.delete('/:id',
+      NexxusApiRateLimit.limiter('DELETE /model/{id}'),
       this.deleteModel.bind(this) as RequestHandler<DeleteAppModelRequest['params']>
     );
     this.router.post('/count',
+      NexxusApiRateLimit.limiter('POST /model/count'),
       this.countModel.bind(this) as RequestHandler<any, any, CountModelRequestBody>
     );
     this.router.post('/:type/search',
+      NexxusApiRateLimit.limiter('POST /model/{type}/search'),
       this.searchModel.bind(this) as RequestHandler<SearchModelRequest['params'], any, SearchModelRequest['body']>
     );
   }

@@ -14,6 +14,7 @@ import {
 import { InvalidParametersException, NotFoundException } from '../Exceptions';
 import { NexxusApiDeviceRegistration } from '../DeviceRegistration';
 import { NexxusApiSession } from '../Session';
+import { NexxusApiRateLimit } from '../RateLimit';
 
 import { NexxusDevice, NexxusDeviceProps, RedisKeyNotFoundException } from '@mayhem93/nexxus-redis';
 
@@ -47,9 +48,13 @@ export default class DeviceRoute extends NexxusApiBaseRoute {
     // No RequiresUser: an application without authentication has to be able to
     // register a device. The handler uses `req.user` only to record an owner
     // when there is one.
-    this.router.post('/register', this.registerDevice.bind(this) as RequestHandler);
+    this.router.post('/register',
+      NexxusApiRateLimit.limiter('POST /device/register'),
+      this.registerDevice.bind(this) as RequestHandler
+    );
     this.router.get('/list',
       RequiresUserMiddleware as RequestHandler,
+      NexxusApiRateLimit.limiter('GET /device/list'),
       this.listDevices.bind(this) as RequestHandler
     );
     // These act on "the calling device", which the token identifies. There is
@@ -58,10 +63,12 @@ export default class DeviceRoute extends NexxusApiBaseRoute {
     // read/write hole the `nxx-device-id` header left open.
     this.router.get('/',
       RequiresDeviceMiddleware as RequestHandler,
+      NexxusApiRateLimit.limiter('GET /device'),
       this.getDevice.bind(this) as RequestHandler
     );
     this.router.put('/',
       RequiresDeviceMiddleware as RequestHandler,
+      NexxusApiRateLimit.limiter('PUT /device'),
       this.updateDevice.bind(this) as RequestHandler
     );
   }

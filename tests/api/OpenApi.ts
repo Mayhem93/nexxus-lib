@@ -179,4 +179,18 @@ describe('openapi.yaml', () => {
       'PUT /user',
     ]);
   });
+
+  it('documents a 429 on every rate-limited route, and on no other', () => {
+    const unlimited = [ 'GET /', 'GET /auth/{strategy}/callback' ];
+
+    const wrong = Object.entries(spec.paths).flatMap(([ p, ops ]) =>
+      Object.entries(ops as Record<string, any>)
+        .filter(([ method ]) => [ 'get', 'post', 'put', 'delete', 'patch' ].includes(method))
+        .map(([ method, op ]) => ({ route: `${method.toUpperCase()} ${p}`, has429: '429' in (op.responses ?? {}) }))
+        // Wrong when an unlimited route documents a 429, or a limited one doesn't.
+        .filter(({ route, has429 }) => has429 === unlimited.includes(route))
+        .map(({ route }) => route));
+
+    expect(wrong).toEqual([]);
+  });
 });
