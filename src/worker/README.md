@@ -79,7 +79,7 @@ process.once('SIGINT',  () => worker.close());
 4. Starts consuming its queue.
 5. Starts the management server on `app.management.port`.
 6. Registers with the Hub, when `app.hub` is set.
-7. A transport then starts its listener: the websockets transport opens its WebSocket server on `app.port`.
+7. A transport then starts its listener: the websockets transport opens its WebSocket server on `app.port`, over TLS when `app.ssl` is set.
 
 `init()` rejects, and the worker doesn't start, when an ACL role doesn't validate against its application's schema, a user type names a role that doesn't exist, or a websockets transport's slot or port is already taken.
 
@@ -141,6 +141,7 @@ Every worker reads the `app` section of the config file. The `database`, `messag
 | `management.port`, `management.token` | yes | Port and bearer token of the management server. |
 | `hub.endpoint`, `hub.token` | no | Hub to register with. Without it the worker runs standalone. |
 | `port` | websockets transport only | Port of the WebSocket server. |
+| `ssl.sslKeyPath`, `ssl.sslCertPath` | no | Websockets transport: PEM key and certificate. When set, the transport accepts TLS connections only, at `wss://`. The certificate file holds the full chain: the server's certificate first, then the intermediate certificates. Without the intermediates, clients outside a browser, such as Node, refuse the connection. |
 | `heartbeatInterval` | no | Websockets transport: seconds between pings to each connection, 5 to 300, default 30. Keep it below the idle timeout of a load balancer in front of the transport. |
 | `maxMessageSize` | no | Websockets transport: largest message a client may send, in bytes after decompression, 16384 to 1048576, default 16384. |
 | `registerTimeout` | no | Websockets transport: seconds a connection gets to register, 5 to 300, default 30. |
@@ -181,6 +182,7 @@ A stored filter that no longer compiles against the model's schema — after a f
 - A registered connection is recorded in Redis on that queue, which is where the Transport Manager sends its events. It starts with no subscriptions, so a client subscribes again after every reconnect. On disconnect it is torn down, its subscriptions removed; the device's other connections keep theirs.
 - A connection recorded on the instance's queue that the instance doesn't hold is dead: an instance that held the slot before crashed with it open. It is torn down the first time the instance meets it — when an event for it arrives, or when its device registers on this instance.
 - A registration that takes a device over its application's `connections.maxPerDevice` evicts the device's oldest connections, wherever they are. Each one is torn down, then closed with code `4003`: by this instance when it holds it, otherwise by the instance that does, which gets a `connection_evicted` message on its queue. Push connections, dead ones and those being torn down don't count. Two registrations of a device at the same moment can leave it over the cap until its next registration.
+- With `ssl` set, clients connect with `wss://`, and a plain `ws://` connection is refused. A page served over HTTPS can only open `wss://`.
 - Messages of 2 KB or more are compressed for clients that support `permessage-deflate`. The server answers pings, and pings every connection every `heartbeatInterval` seconds; a connection that hasn't answered by the next ping is closed.
 - A connection that hasn't registered `registerTimeout` seconds after it opened is closed with code `4004`. A message from a client larger than `maxMessageSize` bytes, after decompression, closes its connection with code `1009`.
 - When its message-queue connection drops, the instance loses its slot queue with it. It closes every connection with code `1012`, and new ones with `1013`. Once the message queue is back, it declares the slot queue again and takes connections again. If the queue exists by then, another instance has taken the slot, and the worker emits `error`.

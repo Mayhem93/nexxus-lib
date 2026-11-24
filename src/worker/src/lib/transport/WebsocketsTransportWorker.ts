@@ -30,10 +30,18 @@ import { WebSocketServer, type WebSocket } from 'ws';
 
 import * as crypto from 'node:crypto';
 import * as path from 'node:path';
+import * as https from 'node:https';
+import { readFileSync } from 'node:fs';
+import { STATUS_CODES, type IncomingMessage, type ServerResponse } from 'node:http';
 
 export type NexxusWebsocketsTransportWorkerConfig = NexxusVolatileTransportWorkerConfig & {
   name: string;
   port: number;
+  /** PEM key and certificate. When set, the transport accepts TLS connections only (`wss://`). */
+  ssl?: {
+    sslKeyPath: string;
+    sslCertPath: string;
+  };
   /** Seconds between pings to each connection. */
   heartbeatInterval?: number;
   /** Largest message, in bytes after decompression, a client may send. */
@@ -119,6 +127,8 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
   private static readonly DISCONNECT_ALL_GRACE_MS = 3_000;
 
   private server! : WebSocketServer;
+  /** The HTTPS server the WebSocket server runs on, when `ssl` is set. */
+  private httpsServer: https.Server | null = null;
   /**
    * Settles once the server has stopped and its last connection has ended,
    * with the error closing it raised, if any. Set by `stopAcceptingConnections`.
@@ -144,8 +154,19 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
   }
 
   protected async initTransport(): Promise<void> {
+    const ssl = this.config.ssl;
+
+    // Without TLS, `ws` creates its HTTP server itself, from `port`. With TLS, it
+    // runs on an HTTPS server of ours, which this method starts listening.
+    this.httpsServer = ssl
+      ? https.createServer(
+        { key: readFileSync(ssl.sslKeyPath), cert: readFileSync(ssl.sslCertPath) },
+        NexxusWebsocketsTransportWorker.answerUpgradeRequired
+      )
+      : null;
+
     this.server = new WebSocketServer({
-      port: this.config.port,
+      ...(this.httpsServer ? { server: this.httpsServer } : { port: this.config.port }),
       autoPong: true,
       // Checked after decompression. A larger message closes its connection with 1009.
       maxPayload: this.config.maxMessageSize ?? NexxusWebsocketsTransportWorker.DEFAULT_MAX_MESSAGE_SIZE,
@@ -173,13 +194,16 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
         this.server.removeListener('error', onBindError);
 
         NexxusWebsocketsTransportWorker.logger.info(
-          `WebSocket server listening on port ${this.config.port}`,
+          `WebSocket server listening on port ${this.config.port}${ssl ? ' (TLS)' : ''}`,
           NexxusWebsocketsTransportWorker.loggerLabel
         );
         resolve();
       });
 
       this.server.once('error', onBindError);
+
+      // `ws` passes the HTTPS server's 'listening' and 'error' on as its own.
+      this.httpsServer?.listen(this.config.port);
     });
 
     // The bind-time listener above is gone once we're listening. Without a
@@ -311,11 +335,22 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
       return;
     }
 
-    // Resolves with the error rather than rejecting: `close()` only awaits it at
-    // the very end, and a rejection left waiting that long counts as unhandled.
-    this.serverClosed = new Promise<Error | undefined>(resolve => {
-      this.server.close(err => resolve(err));
-    });
+    const httpsServer = this.httpsServer;
+
+    // Each resolves with its error rather than rejecting: `close()` only awaits
+    // them at the very end, and a rejection left waiting that long counts as
+    // unhandled.
+    this.serverClosed = Promise.all([
+      new Promise<Error | undefined>(resolve => {
+        this.server.close(err => resolve(err));
+      }),
+      // `ws` closes only an HTTP server it created itself: the HTTPS one is ours.
+      httpsServer
+        ? new Promise<Error | undefined>(resolve => {
+          httpsServer.close(err => resolve(err));
+        })
+        : undefined
+    ]).then(([ wsError, httpsError ]) => wsError ?? httpsError);
   }
 
   protected async disconnectAllDevices(reason: NexxusDeviceDisconnectReason): Promise<void> {
@@ -633,6 +668,17 @@ export class NexxusWebsocketsTransportWorker extends NexxusVolatileTransportWork
 
       NexxusWebsocketsTransportWorker.logger.info('WebSocket server closed', NexxusWebsocketsTransportWorker.loggerLabel);
     }
+  }
+
+  /**
+   * The answer to a plain HTTPS request on the TLS server: `426 Upgrade
+   * Required`, as `ws` answers a plain HTTP request on a server it created.
+   */
+  private static answerUpgradeRequired(_req: IncomingMessage, res: ServerResponse): void {
+    const body = STATUS_CODES[426] ?? 'Upgrade Required';
+
+    res.writeHead(426, { 'Content-Length': Buffer.byteLength(body), 'Content-Type': 'text/plain' });
+    res.end(body);
   }
 
   protected getOwnStats(): Promise<Omit<NexxusWebsocketsTransportWorkerStats, keyof NexxusBaseWorkerStats>> {

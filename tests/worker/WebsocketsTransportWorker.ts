@@ -12,6 +12,10 @@ import { makeHarness, logger, mqState, getFreePort, resetWorkerStatics, type Wor
 
 import WebSocket from 'ws';
 
+import * as https from 'node:https';
+import * as path from 'node:path';
+import { readFileSync } from 'node:fs';
+
 const workers: any[] = [];
 const sockets: WebSocket[] = [];
 let h: WorkerHarness;
@@ -197,6 +201,71 @@ describe('NexxusWebsocketsTransportWorker.initTransport', () => {
     w.server.emit('error', new Error('server exploded'));
 
     expect(logger.has('error', /WebSocket server error: server exploded/)).toBe(true);
+  });
+});
+
+describe('NexxusWebsocketsTransportWorker over TLS', () => {
+  /** A self-signed certificate for localhost, 127.0.0.1 and ::1, made for these tests. */
+  const TLS_DIR = path.join(process.cwd(), 'tests/fixtures/tls');
+  const SSL = {
+    sslKeyPath: path.join(TLS_DIR, 'localhost-key.pem'),
+    sslCertPath: path.join(TLS_DIR, 'localhost-cert.pem'),
+  };
+  const CERT = readFileSync(SSL.sslCertPath);
+
+  /** A `wss://` client that trusts only the test certificate. */
+  const connectSecurely = (): Promise<WebSocket> => new Promise((resolve, reject) => {
+    const ws = new WebSocket(`wss://127.0.0.1:${wsPort}`, { ca: CERT });
+
+    sockets.push(ws);
+    ws.once('open', () => resolve(ws));
+    ws.once('error', reject);
+  });
+
+  it('serves wss:// with the configured certificate, and registers over it', async () => {
+    await build({ ssl: SSL });
+
+    expect(logger.has('info', new RegExp(`WebSocket server listening on port ${wsPort} \\(TLS\\)`))).toBe(true);
+
+    seedDevice('d1');
+
+    const client = await connectSecurely();
+    const reply = nextFrame(client);
+
+    client.send(register(tokenFor('d1')));
+
+    expect(await reply).toEqual(REGISTERED);
+  });
+
+  it('accepts TLS connections only', async () => {
+    await build({ ssl: SSL });
+
+    await expect(connect()).rejects.toThrow();
+  });
+
+  it('answers a plain HTTPS request with 426', async () => {
+    await build({ ssl: SSL });
+
+    const status = await new Promise<number>((resolve, reject) => {
+      https.get({ host: '127.0.0.1', port: wsPort, path: '/', ca: CERT, agent: false }, res => {
+        res.resume();
+        resolve(res.statusCode!);
+      }).on('error', reject);
+    });
+
+    expect(status).toBe(426);
+  });
+
+  it('stops listening when the transport closes', async () => {
+    const w = await build({ ssl: SSL });
+
+    await w.close();
+
+    await expect(connectSecurely()).rejects.toThrow();
+  });
+
+  it('fails to start when a certificate file is missing', async () => {
+    await expect(build({ ssl: { ...SSL, sslKeyPath: '/no/such/key.pem' } })).rejects.toThrow(/ENOENT/);
   });
 });
 

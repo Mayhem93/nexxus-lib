@@ -121,7 +121,7 @@ The API reads the `app` section of the config file. The `database`, `message_que
 | `logger` | yes | Logger class: `WinstonNexxusLogger`, or an npm package name. |
 | `database` | yes | Database adapter: `NexxusElasticsearchDb`, or an npm package name. |
 | `message_queue` | yes | Message-queue adapter: `NexxusRabbitMq`, or an npm package name. |
-| `ssl.sslKeyPath`, `ssl.sslCertPath` | no | PEM key and certificate. When set, the API serves HTTPS only and sends `Strict-Transport-Security`. |
+| `ssl.sslKeyPath`, `ssl.sslCertPath` | no | PEM key and certificate. When set, the API serves HTTPS only and sends `Strict-Transport-Security`. The certificate file holds the full chain: the server's certificate first, then the intermediate certificates. Without the intermediates, clients outside a browser, such as Node, refuse the connection. |
 | `maxBodySize` | no | Largest request body in bytes, 65536–1048576. Default `65536`. |
 | `trustProxy` | no | How many proxies in front of the API add the client's address to `X-Forwarded-For`, 0–10. Default `0`: the client's address is the connection's. See [Behind a load balancer](#behind-a-load-balancer). |
 | `cors.origins` | no | Origins whose web pages may call the API from a browser: exact origins, or `*` for any. Default: none. See [Browsers (CORS)](#browsers-cors). |
